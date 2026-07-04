@@ -954,14 +954,17 @@ def _setup_training(
         _orig_loss_fn = loss_fn
 
         def _lra_loss_fn(model, batch, for_tree_spawning=False, return_components=False, update_causal_state=True):
-            if for_tree_spawning or return_components:
+            if for_tree_spawning:
                 return _orig_loss_fn(model, batch,
-                                     for_tree_spawning=for_tree_spawning,
-                                     return_components=return_components,
+                                     for_tree_spawning=True,
                                      update_causal_state=False)
             comps = _orig_loss_fn(model, batch, return_components=True, update_causal_state=update_causal_state)
             w = lra_weights.weights
-            return sum(w.get(k, 1.0) * v for k, v in comps.items())
+            lra_total = sum(w.get(k, 1.0) * v for k, v in comps.items() if k != 'total')
+            if return_components:
+                comps['total'] = lra_total
+                return comps
+            return lra_total
 
         _lra_loss_fn.causal_state = getattr(loss_fn, 'causal_state', None)
         loss_fn = _lra_loss_fn

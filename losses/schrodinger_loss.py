@@ -395,8 +395,11 @@ def build_loss(**cfg) -> Callable:
             }
         elif return_components:
             comps = {'residual': mse_residual, 'ic': mse_ic}
+            total_loss = weight_residual * mse_residual + weight_ic * mse_ic
             if use_bc:
                 comps['bc'] = mse_bc
+                total_loss = total_loss + weight_bc * mse_bc
+            comps['total'] = total_loss
             return comps
         else:
             total_loss = weight_residual * mse_residual + weight_ic * mse_ic

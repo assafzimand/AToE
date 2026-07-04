@@ -694,12 +694,13 @@ def _train_segment(
 
         # Compute evaluation metrics only every print_every epochs or last epoch
         # This speeds up training significantly for physics-informed losses
-        should_evaluate = (epoch % eval_every == 0 or epoch == 1 or epoch == total_epochs)
+        should_evaluate = (epoch % eval_every == 0
+                           or epoch == segment_start_epoch + 1
+                           or epoch == total_epochs)
         
         if should_evaluate:
-            # Compute train rel-L2 and infinity norm errors
-
-            # Eval phase
+            # Eval phase: one physics pass per batch (loss + components) plus a
+            # cheap no-grad prediction pass for rel-L2 / inf-norm.
             model.eval()
             eval_loss = 0.0
             # Accumulate squared sums for correct global rel-L2 computation
@@ -708,16 +709,21 @@ def _train_segment(
             total_gt_sq = 0.0
             eval_inf_norm = 0.0  # Track max across all batches
             n_eval_batches = 0
+            comp_sums = {}
 
             # Eval metric uses the configured blending_mode (composed forward),
             # so the rel-L2 curve reflects the actual inference-time composition.
             for batch in eval_loader:
-                # Note: For physics-informed losses, we need gradients w.r.t. inputs
-                # even during evaluation (for computing derivatives in PDE residuals).
-                # We still use model.eval() to disable dropout/batchnorm training behavior.
+                # Physics losses need gradients w.r.t. inputs even during
+                # evaluation (for PDE residual derivatives); model.eval() still
+                # disables dropout/batchnorm training behavior.
                 timer.start('eval.loss_fn')
-                loss = loss_fn(model, batch, update_causal_state=False)
+                comps = loss_fn(model, batch, return_components=True,
+                                update_causal_state=False)
                 timer.stop('eval.loss_fn')
+                for k, v in comps.items():
+                    val = float(v.item()) if isinstance(v, torch.Tensor) else float(v)
+                    comp_sums[k] = comp_sums.get(k, 0.0) + val
 
                 with torch.no_grad():
                     inputs = torch.cat([batch['x'], batch['t']], dim=1)
@@ -732,10 +738,10 @@ def _train_segment(
                     inf_norm = compute_infinity_norm_error(h_pred, batch['h_gt'])
                     eval_inf_norm = max(eval_inf_norm, inf_norm.item())
 
-                eval_loss += loss.item()
                 n_eval_batches += 1
 
-            eval_loss /= n_eval_batches
+            comp_means = {k: v / n_eval_batches for k, v in comp_sums.items()}
+            eval_loss = comp_means.pop('total')
             # Compute global rel-L2: ||pred - gt||_2 / ||gt||_2
             eval_rel_l2 = math.sqrt(total_diff_sq) / (math.sqrt(total_gt_sq) + 1e-10)
 
@@ -744,31 +750,17 @@ def _train_segment(
             metrics['eval_loss'].append(eval_loss)
             metrics['eval_rel_l2'].append(eval_rel_l2)
             metrics['eval_inf_norm'].append(eval_inf_norm)
-            
-            # ── Compute and log term-wise loss components ──
-            try:
-                _comp_batch = next(iter(eval_loader))
-                _loss_comps = loss_fn(model, _comp_batch, return_components=True, update_causal_state=False)
-                _comp_dict = {k: float(v.item()) if isinstance(v, torch.Tensor) else float(v) 
-                              for k, v in _loss_comps.items()}
-                
-                # Store in metrics for plotting
-                metrics['loss_components']['epochs'].append(epoch)
-                for term in ['residual', 'ic', 'bc']:
-                    val = _comp_dict.get(term, 0.0)
-                    metrics['loss_components'][term].append(val)
-                
-                # Log components at evaluation epochs
-                _comp_str = ', '.join(f'{k}={v:.6f}' for k, v in _comp_dict.items())
-                logger.info(f"  [LossTerms] {_comp_str}")
-                
-                # Store in history with full details
-                metrics['loss_components_history'].append({
-                    'epoch': epoch,
-                    **_comp_dict
-                })
-            except Exception as _comp_err:
-                logger.info(f"  [LossTerms] Failed to compute: {_comp_err}")
+
+            # ── Term-wise loss components (from the same eval pass) ──
+            metrics['loss_components']['epochs'].append(epoch)
+            for term in ['residual', 'ic', 'bc']:
+                metrics['loss_components'][term].append(comp_means.get(term, 0.0))
+            _comp_str = ', '.join(f'{k}={v:.6f}' for k, v in comp_means.items())
+            logger.info(f"  [LossTerms] {_comp_str}")
+            metrics['loss_components_history'].append({
+                'epoch': epoch,
+                **comp_means,
+            })
 
             # Per-expert split-loss breakdown
             _split_ctx = getattr(ctx, '_split_context', None)
@@ -947,31 +939,6 @@ def _train_segment(
                     f"  [LR] lr={_cur_lr:.2e} (expected={_expected_lr:.2e} {_lr_match}) | "
                     f"step={step_count} | phase={_phase}"
                 )
-
-            # DIAGNOSTIC: Unweighted loss component breakdown
-            # Compute on a sample eval batch
-            try:
-                sample_batch = next(iter(eval_loader))
-                # Get the original loss function (unwrap LRA if present)
-                orig_loss_fn = getattr(loss_fn, '__wrapped__', loss_fn)
-                if hasattr(orig_loss_fn, '__self__'):  # It's a method/closure
-                    # For the LRA wrapper, we need to access _orig_loss_fn from the closure
-                    if '_orig_loss_fn' in dir(loss_fn):
-                        orig_loss_fn = loss_fn.__code__.co_consts  # This won't work, need different approach
-                # Actually, just call with return_components=True which the wrapper forwards
-                with torch.no_grad():
-                    components = loss_fn(model, sample_batch, return_components=True)
-                    comps_str = ', '.join(f'{k}={v:.6f}' for k, v in components.items())
-                    logger.info(f"  [Loss] components: {comps_str} (unweighted)")
-                    metrics['loss_components_history'].append({
-                        'epoch': epoch,
-                        'residual': float(components['residual'].item()),
-                        'ic': float(components['ic'].item()),
-                        'bc': float(components['bc'].item()),
-                    })
-            except Exception as e:
-                # Don't crash if component breakdown fails
-                pass
 
             # DIAGNOSTIC: Print expert contributions (configurable)
             enable_grad_diag = adaptive_cfg.get('enable_gradient_diagnostics', False) if is_adaptive else False

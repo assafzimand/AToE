@@ -42,6 +42,56 @@ from adaptive.subdomain_data import build_subdomain_data, KIND_NAMES
 from trainer.setup import _save_checkpoint, _NumpySafeEncoder
 
 
+def _compute_dense_grid_rel_l2(model, cfg, device, chunk_size: int = 65536):
+    """Rel-L2 of the model against the solver's native dense solution grid.
+
+    This is the headline number comparable to the literature (which reports
+    dense-grid rel-L2, not a random-subsample estimate). The grid is restricted
+    to the config's temporal domain so time-marching windows are scored on
+    their own window.
+
+    Returns:
+        (rel_l2, n_points, grid_shape) or None if the solver grid is unavailable.
+    """
+    import importlib
+
+    problem = cfg['problem']
+    try:
+        solver = importlib.import_module(f'solvers.{problem}_solver')
+        x_grid, t_grid, h_sol = solver._get_solution_cached(cfg)
+    except Exception as e:
+        logger.warning(f"  [DenseRelL2] Solver grid unavailable for '{problem}': {e}")
+        return None
+
+    t0, t1 = cfg[problem]['temporal_domain']
+    t_mask = (t_grid >= t0 - 1e-12) & (t_grid <= t1 + 1e-12)
+    t_grid = t_grid[t_mask]
+    h_sol = h_sol[t_mask]  # (nt, nx), complex for schrodinger
+
+    # Flatten grid to (N, 2) inputs and (N, output_dim) ground truth
+    T, X = np.meshgrid(t_grid, x_grid, indexing='ij')
+    xt = np.column_stack([X.ravel(), T.ravel()])
+    if np.iscomplexobj(h_sol):
+        gt = np.column_stack([h_sol.real.ravel(), h_sol.imag.ravel()])
+    else:
+        gt = h_sol.reshape(-1, 1)
+
+    dtype = next(model.parameters()).dtype
+    model.eval()
+    total_diff_sq = 0.0
+    total_gt_sq = 0.0
+    with torch.no_grad():
+        for start in range(0, xt.shape[0], chunk_size):
+            xb = torch.tensor(xt[start:start + chunk_size], dtype=dtype, device=device)
+            gb = torch.tensor(gt[start:start + chunk_size], dtype=dtype, device=device)
+            pred = model(xb)
+            total_diff_sq += ((pred - gb) ** 2).sum().item()
+            total_gt_sq += (gb ** 2).sum().item()
+
+    rel_l2 = math.sqrt(total_diff_sq) / (math.sqrt(total_gt_sq) + 1e-10)
+    return rel_l2, xt.shape[0], (len(t_grid), len(x_grid))
+
+
 def _finalize_training(ctx: TrainingContext) -> Path:
     """Phase 3 of :func:`train`: final checkpoints, plots, metrics, summary.
 
@@ -114,6 +164,16 @@ def _finalize_training(ctx: TrainingContext) -> Path:
     logger.info(f"  Best eval loss: {best_eval_loss:.6f}")
     logger.info(f"  Best checkpoint: {best_checkpoint_path}")
     logger.info(f"  Final checkpoint: {final_checkpoint_path}")
+
+    # ── Headline metric: rel-L2 on the solver's dense solution grid ──
+    dense_rel_l2 = None
+    _dense = _compute_dense_grid_rel_l2(model, cfg, device)
+    if _dense is not None:
+        dense_rel_l2, _n_dense, _dense_shape = _dense
+        metrics['final_dense_rel_l2'] = dense_rel_l2
+        metrics['final_dense_grid_shape'] = list(_dense_shape)
+        logger.info(f"  Final dense-grid rel-L2: {dense_rel_l2:.6e} "
+                    f"(grid {_dense_shape[0]}x{_dense_shape[1]} = {_n_dense:,} points)")
     
     # Save timing data and print summary
     timer.save(run_dir / "timing.json")
@@ -277,7 +337,8 @@ def _finalize_training(ctx: TrainingContext) -> Path:
         f.write(f"Device: {device}\n\n")
         f.write(f"Final train loss: {train_loss:.6f}\n")
         f.write(f"Final eval loss: {eval_loss:.6f}\n" if eval_loss is not None else "Final eval loss: N/A\n")
-        f.write(f"Final eval rel-L2: {eval_rel_l2:.6f}\n" if eval_rel_l2 is not None else "Final eval rel-L2: N/A\n")
+        f.write(f"Final eval rel-L2 (subsample): {eval_rel_l2:.6f}\n" if eval_rel_l2 is not None else "Final eval rel-L2 (subsample): N/A\n")
+        f.write(f"Final dense-grid rel-L2: {dense_rel_l2:.6e}\n" if dense_rel_l2 is not None else "Final dense-grid rel-L2: N/A\n")
         f.write(f"Final eval inf-norm: {eval_inf_norm:.6f}\n" if eval_inf_norm is not None else "Final eval inf-norm: N/A\n")
         f.write(f"Best eval loss: {best_eval_loss:.6f}\n\n")
         f.write(f"Best checkpoint: {best_checkpoint_path}\n")
