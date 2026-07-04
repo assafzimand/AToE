@@ -85,7 +85,7 @@ def _train_segment(
     metrics = ctx.metrics
     best_eval_loss = ctx.best_eval_loss
     best_checkpoint_path = ctx.best_checkpoint_path
-    patience_epochs = ctx.patience_epochs
+    patience_evals = ctx.patience_evals
     patience_rel_delta = ctx.patience_rel_delta
     lra_weights = ctx.lra_weights
     checkpoint_dir = ctx.checkpoint_dir
@@ -145,8 +145,8 @@ def _train_segment(
         lr_scheduler = _create_lr_scheduler(optimizer, seg_cfg, total_steps_estimate)
 
     step_count = 0
-    best_train_loss = float('inf')
-    epochs_without_improvement = 0
+    best_patience_eval_loss = float('inf')
+    evals_without_improvement = 0
     # optimizer_1 is watched from the segment start; reset to switch_epoch at the switch.
     patience_start_epoch = segment_start_epoch
     _nan_detected = False
@@ -620,8 +620,8 @@ def _train_segment(
                 optimizer_2_name, model, seg_cfg)
             lr_scheduler = None  # optimizer_2 uses its own LR / line search
             # Reset patience at the switch; optimizer_2 gets a fresh grace window.
-            epochs_without_improvement = 0
-            best_train_loss = float('inf')
+            evals_without_improvement = 0
+            best_patience_eval_loss = float('inf')
             patience_start_epoch = switch_epoch
             metrics['optimizer_events'].append({
                 'epoch': epoch,
@@ -970,30 +970,32 @@ def _train_segment(
             _save_checkpoint(best_checkpoint_path, model, optimizer, current_optimizer_name, epoch,
                            train_loss, eval_loss, cfg, metrics)
 
-        # Patience-based early stopping on train loss. Active for BOTH optimizers
-        # (Step 5): the relative-improvement plateau test runs from the segment
-        # start. On an optimizer_1 plateau we fast-forward to the switch epoch (so
-        # the existing switch handler fires and optimizer_2 keeps its full budget)
+        # Patience-based early stopping on EVAL physics loss, counted in evals.
+        # Eval loss is computed on a fixed (non-resampled) eval set, so it is
+        # immune to the collocation-resample noise that made train loss an
+        # unreliable plateau anchor. Active for BOTH optimizers: on an
+        # optimizer_1 plateau we fast-forward to the switch epoch (so the
+        # existing switch handler fires and optimizer_2 keeps its full budget)
         # rather than stopping; an optimizer_2 (or no-switch) plateau stops the
-        # segment. The relative min-delta means a loss creeping down by a negligible
-        # amount each epoch still counts as "no improvement".
-        if (train_loss is not None and patience_epochs > 0
+        # segment. The relative min-delta means a loss creeping down by a
+        # negligible amount still counts as "no improvement".
+        if (should_evaluate and eval_loss is not None and patience_evals > 0
                 and epoch >= patience_start_epoch):
-            if train_loss < best_train_loss * (1.0 - patience_rel_delta):
-                best_train_loss = train_loss
-                epochs_without_improvement = 0
+            if eval_loss < best_patience_eval_loss * (1.0 - patience_rel_delta):
+                best_patience_eval_loss = eval_loss
+                evals_without_improvement = 0
             else:
-                epochs_without_improvement += 1
+                evals_without_improvement += 1
             # seg_min_epochs is a grace period measured within the active window.
             if (epoch - patience_start_epoch >= seg_min_epochs
-                    and epochs_without_improvement >= patience_epochs):
+                    and evals_without_improvement >= patience_evals):
                 _in_optimizer_1 = (optimizer_2_name is not None
                                    and epoch < switch_epoch)
                 if _in_optimizer_1 and switch_epoch < total_epochs:
                     # Fast-forward to the switch; preserves optimizer_2's budget.
                     logger.info(f"\n  [Patience] optimizer_1 plateau "
                           f">{patience_rel_delta:.1%} for "
-                          f"{epochs_without_improvement} epochs at epoch {epoch}; "
+                          f"{evals_without_improvement} evals at epoch {epoch}; "
                           f"fast-forwarding to switch epoch {switch_epoch}.")
                     metrics['plateau_events'].append({
                         'epoch': epoch,
@@ -1002,14 +1004,14 @@ def _train_segment(
                     })
                     epoch = switch_epoch - 1
                     ctx.epoch = epoch
-                    epochs_without_improvement = 0
-                    best_train_loss = float('inf')
+                    evals_without_improvement = 0
+                    best_patience_eval_loss = float('inf')
                     continue
                 else:
-                    logger.info(f"\n  [EarlyStop] No train loss improvement "
+                    logger.info(f"\n  [EarlyStop] No eval loss improvement "
                           f">{patience_rel_delta:.1%} for "
-                          f"{epochs_without_improvement} epochs "
-                          f"(best={best_train_loss:.6f}). "
+                          f"{evals_without_improvement} evals "
+                          f"(best={best_patience_eval_loss:.6f}). "
                           f"Stopping segment at epoch {epoch}.")
                     _stopped_early = True
                     _stop_reason = 'early_stop'
@@ -1026,7 +1028,6 @@ def _train_segment(
     ctx.switch_epoch = switch_epoch
     ctx.optimizer_2_name = optimizer_2_name
     ctx.best_eval_loss = best_eval_loss
-    ctx.best_train_loss = best_train_loss
     ctx.best_checkpoint_path = best_checkpoint_path
     ctx.train_loss = train_loss
     ctx.eval_loss = eval_loss

@@ -925,14 +925,17 @@ def _setup_training(
     }
 
     best_eval_loss = float('inf')
-    best_train_loss = float('inf')
     best_checkpoint_path = None
-    patience_epochs = cfg['patience_epochs']
+    # Patience is counted in EVALS (eval physics loss); patience_epochs is
+    # accepted as a legacy alias interpreted as (patience_epochs / eval_every).
+    if 'patience_evals' in cfg:
+        patience_evals = cfg['patience_evals']
+    else:
+        patience_evals = cfg['patience_epochs'] // max(1, cfg['eval_every'])
     min_epochs = cfg['min_epochs']
-    # Relative-improvement threshold for the plateau test: an epoch only counts as
+    # Relative-improvement threshold for the plateau test: an eval only counts as
     # an improvement if it beats the anchored best by at least this fraction.
     patience_rel_delta = cfg.get('patience_rel_delta', 0.0)
-    epochs_without_improvement = 0
 
     # LRA: adaptive loss component weighting (read from per-problem config)
     lra_cfg = problem_cfg['lra']
@@ -1103,8 +1106,8 @@ def _setup_training(
         logger.info(f"  Optimizer: {opt1_name}")
     
     # Early stopping
-    if patience_epochs > 0:
-        logger.info(f"  Early stopping: enabled (patience={patience_epochs}, min_epochs={min_epochs})")
+    if patience_evals > 0:
+        logger.info(f"  Early stopping: enabled (patience={patience_evals} evals, min_epochs={min_epochs})")
     else:
         logger.info(f"  Early stopping: disabled")
     
@@ -1161,12 +1164,10 @@ def _setup_training(
         save_every=save_every,
         metrics=metrics,
         best_eval_loss=best_eval_loss,
-        best_train_loss=best_train_loss,
         best_checkpoint_path=best_checkpoint_path,
-        patience_epochs=patience_epochs,
+        patience_evals=patience_evals,
         min_epochs=min_epochs,
         patience_rel_delta=patience_rel_delta,
-        epochs_without_improvement=epochs_without_improvement,
         lra_weights=lra_weights,
         checkpoint_dir=checkpoint_dir,
         adaptive_cfg=adaptive_cfg,
