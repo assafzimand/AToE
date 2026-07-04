@@ -751,7 +751,6 @@ def _setup_training(
             return sum(w.get(k, 1.0) * v for k, v in comps.items())
 
         _lra_loss_fn.causal_state = getattr(loss_fn, 'causal_state', None)
-        _lra_loss_fn._leaf_state = getattr(loss_fn, '_leaf_state', None)
         loss_fn = _lra_loss_fn
 
     checkpoint_dir = run_dir / "checkpoints"
@@ -762,8 +761,6 @@ def _setup_training(
     is_adaptive = adaptive_cfg['enabled']
     region_detector = None
     max_experts = adaptive_cfg['max_experts']
-    _per_leaf_causal = problem_cfg.get('causal_training', {}).get('per_leaf_causal', False)  # Optional feature
-    _per_leaf_sampling = problem_cfg['adaptive_sampling'].get('per_leaf_sampling', False)  # Optional feature
 
     # Read configurable norm variables
     variable_for_node_accept = adaptive_cfg['variable_for_node_accept']
@@ -964,8 +961,6 @@ def _setup_training(
         _pretrained_force_spawn=_pretrained_force_spawn,
         region_detector=region_detector,
         max_experts=max_experts,
-        _per_leaf_causal=_per_leaf_causal,
-        _per_leaf_sampling=_per_leaf_sampling,
         variable_for_node_accept=variable_for_node_accept,
         variable_for_expert_size=variable_for_expert_size,
         domain_bounds=domain_bounds,
@@ -1037,8 +1032,6 @@ def _train_segment(
     checkpoint_dir = ctx.checkpoint_dir
     adaptive_cfg = ctx.adaptive_cfg
     is_adaptive = ctx.is_adaptive
-    _per_leaf_causal = ctx._per_leaf_causal
-    _per_leaf_sampling = ctx._per_leaf_sampling
     timer = ctx.timer
     start_time = ctx.start_time
     train_loss = ctx.train_loss
@@ -1205,29 +1198,16 @@ def _train_segment(
                     all_x = torch.cat([r[0] for r in _rc], dim=0)
                     all_t = torch.cat([r[1] for r in _rc], dim=0)
                     all_r2 = torch.cat([r[2] for r in _rc], dim=0)
-                    _leaf_info_split = None
-                    if is_adaptive and hasattr(model, 'get_leaf_info'):
-                        _raw = model.get_leaf_info()
-                        _leaf_info_split = [(r, idx) for r, idx in _raw if r is not None] or None
                     _save_adaptive_sampling_heatmap(
                         all_x, all_t, all_r2,
                         None, None,
                         run_dir, epoch, cfg,
                         causal_state=None,
-                        leaf_info=_leaf_info_split,
                     )
                     _split_loss_fn._residual_cache.clear()
             else:
                 cached_residuals = getattr(model, '_residual_cache', [])
                 model._residual_cache_enabled = False
-                _leaf_info_for_sampling = None
-                if _per_leaf_sampling and is_adaptive and hasattr(model, 'get_leaf_info'):
-                    _raw_leaf_info = model.get_leaf_info()
-                    _leaf_info_for_sampling = [(r, idx) for r, idx in _raw_leaf_info if r is not None] or None
-                _leaf_causal_states_for_plot = (
-                    loss_fn._leaf_state.get('causal_states', {})
-                    if _per_leaf_causal and hasattr(loss_fn, '_leaf_state') else None
-                )
                 if (not adaptive_sampling_enabled and cached_residuals
                         and _problem_spatial_dim == 1
                         and (epoch - 1) % plot_samples_every == 0):
@@ -1239,8 +1219,6 @@ def _train_segment(
                         None, None,
                         run_dir, epoch, cfg,
                         causal_state=causal_state,
-                        leaf_info=_leaf_info_for_sampling,
-                        leaf_causal_states=_leaf_causal_states_for_plot,
                     )
                 train_data = resample_residual_inplace(
                     train_data, cfg, device,
@@ -1249,8 +1227,6 @@ def _train_segment(
                     run_dir=run_dir,
                     epoch=epoch,
                     causal_state=causal_state,
-                    leaf_info=_leaf_info_for_sampling,
-                    leaf_causal_states=_leaf_causal_states_for_plot,
                 )
                 torch.set_default_device(None)
                 train_loader = _create_dataloader(train_data, cfg['batch_size'], shuffle=True)
@@ -1644,43 +1620,18 @@ def _train_segment(
         # Causal weighting: check if epsilon should advance
         causal_state = getattr(loss_fn, 'causal_state', None)
         causal_epoch_min_weight = None
-        if _per_leaf_causal and hasattr(loss_fn, '_leaf_state'):
-            leaf_states = loss_fn._leaf_state.get('causal_states', {})
-            if leaf_states:
-                for _expert_idx, _leaf_cs in leaf_states.items():
-                    causal_epoch_min_weight = min(
-                        causal_epoch_min_weight if causal_epoch_min_weight is not None else 1.0,
-                        _leaf_cs.get('min_weight', 1.0))
-                    if advance_causal_schedule(_leaf_cs):
-                        logger.info(f"  [PerLeafCausal] Expert {_expert_idx}: epsilon advanced to "
-                              f"{_leaf_cs['tol']:.2f} "
-                              f"(stage {_leaf_cs['schedule_idx']+1}/{len(_leaf_cs['schedule'])})")
-                    _leaf_cs['min_weight'] = 1.0
-            else:
-                # No leaves yet (pre-first-spawn); fall back to global causal
-                if causal_state is not None:
-                    causal_epoch_min_weight = causal_state['min_weight']
-                if advance_causal_schedule(causal_state):
-                    cs = loss_fn.causal_state
-                    logger.info(f"  [Causal] epsilon advanced to "
-                          f"{cs['tol']:.2f} "
-                          f"(stage {cs['schedule_idx']+1}/{len(cs['schedule'])}, "
-                          f"prev_min_w={causal_epoch_min_weight:.6f})")
-                if causal_state is not None:
-                    causal_state['min_weight'] = 1.0
-        else:
-            if causal_state is not None:
-                causal_epoch_min_weight = causal_state['min_weight']
-            if advance_causal_schedule(causal_state):
-                cs = loss_fn.causal_state
-                logger.info(f"  [Causal] epsilon advanced to "
-                      f"{cs['tol']:.2f} "
-                      f"(stage {cs['schedule_idx']+1}/"
-                      f"{len(cs['schedule'])}, "
-                      f"prev_min_w={causal_epoch_min_weight:.6f})")
-            # Reset min_weight AFTER advance check so it sees the true minimum.
-            if causal_state is not None:
-                causal_state['min_weight'] = 1.0
+        if causal_state is not None:
+            causal_epoch_min_weight = causal_state['min_weight']
+        if advance_causal_schedule(causal_state):
+            cs = loss_fn.causal_state
+            logger.info(f"  [Causal] epsilon advanced to "
+                  f"{cs['tol']:.2f} "
+                  f"(stage {cs['schedule_idx']+1}/"
+                  f"{len(cs['schedule'])}, "
+                  f"prev_min_w={causal_epoch_min_weight:.6f})")
+        # Reset min_weight AFTER advance check so it sees the true minimum.
+        if causal_state is not None:
+            causal_state['min_weight'] = 1.0
 
         # Compute evaluation metrics only every print_every epochs or last epoch
         # This speeds up training significantly for physics-informed losses
@@ -2417,50 +2368,6 @@ def _spawn_nodes(ctx: TrainingContext, level_nodes, copy_output: bool,
     return len(new_expert_indices), new_expert_indices
 
 
-def _post_spawn_update(ctx: TrainingContext) -> None:
-    """After spawning: refresh per-leaf causal states + resample per-leaf data."""
-    model = ctx.model
-    loss_fn = ctx.loss_fn
-    cfg = ctx.cfg
-    problem_cfg = ctx.problem_cfg
-    device = ctx.device
-    run_dir = ctx.run_dir
-    epoch = ctx.epoch
-
-    if (ctx._per_leaf_causal and hasattr(loss_fn, '_leaf_state')
-            and hasattr(model, 'get_leaf_info')):
-        new_leaf_info = model.get_leaf_info()
-        existing = loss_fn._leaf_state.get('causal_states', {})
-        new_states = {}
-        for _region, expert_idx in new_leaf_info:
-            new_states[expert_idx] = (existing[expert_idx]
-                                      if expert_idx in existing
-                                      else create_causal_state(problem_cfg))
-        loss_fn._leaf_state['causal_states'] = new_states
-        loss_fn._leaf_state['leaf_info'] = new_leaf_info
-        logger.info(f"  [PerLeafCausal] Updated leaf states: "
-              f"{list(new_states.keys())} ({len(new_states)} leaves)")
-
-    if ctx._per_leaf_sampling and hasattr(model, 'get_leaf_info'):
-        raw = model.get_leaf_info()
-        leaf_info = [(r, idx) for r, idx in raw if r is not None] or None
-        cached = getattr(model, '_residual_cache', [])
-        causal_states = (loss_fn._leaf_state.get('causal_states', {})
-                         if ctx._per_leaf_causal and hasattr(loss_fn, '_leaf_state')
-                         else None)
-        td = regenerate_training_data(
-            cfg, device, resample_seed=epoch, cached_residuals=cached,
-            run_dir=run_dir, epoch=epoch, causal_state=None,
-            leaf_info=leaf_info, leaf_causal_states=causal_states,
-        )
-        td = _override_ic_for_time_marching(td, cfg, device)
-        torch.set_default_device(None)
-        ctx.train_data = td
-        ctx.train_loader = _create_dataloader(td, cfg['batch_size'], shuffle=True)
-        n = len(leaf_info) if leaf_info else 0
-        logger.info(f"  [PostSpawnResample] Rebuilt dataset for {n} leaves")
-
-
 def _plot_after_spawn(ctx: TrainingContext, tag: str) -> None:
     """Save expert-region (and soft-weight) plots after a spawn event."""
     model = ctx.model
@@ -2479,7 +2386,7 @@ def _plot_after_spawn(ctx: TrainingContext, tag: str) -> None:
     leaf_expert_indices = [idx for _, idx in leaf_info if idx >= 0]
     regions_to_plot = (
         [model.regions[i] for i in leaf_expert_indices]
-        if isinstance(model, (AToELeaves, ANT)) else model.regions
+        if isinstance(model, AToELeaves) else model.regions
     )
     plot_expert_regions(
         regions=regions_to_plot,
@@ -2671,7 +2578,6 @@ def train_orchestrator(ctx: TrainingContext) -> None:
     _after_spawn = _check_output_continuity(ctx, "after_spawn")
     _log_continuity_diff(_before_spawn, _after_spawn)
 
-    _post_spawn_update(ctx)
     _plot_after_spawn(ctx, f"epoch_{ctx.epoch}")
     if total == 0:
         logger.info("[Orchestrator] Zero experts spawned — finishing after root.")

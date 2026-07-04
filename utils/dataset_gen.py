@@ -375,14 +375,11 @@ def _save_adaptive_sampling_heatmap(
     x_sampled, t_sampled,
     run_dir, epoch, config,
     causal_state=None,
-    leaf_info=None,
-    leaf_causal_states=None,
 ):
     """Save diagnostic heatmap for residual distribution (and adaptive sampling if active).
 
     x_sampled / t_sampled may be None when adaptive sampling is disabled —
     in that case the sampled-points panel is omitted.
-    leaf_causal_states: dict {expert_idx: causal_state_dict} for per-leaf causal panel.
     """
     try:
         import matplotlib.pyplot as plt
@@ -399,12 +396,7 @@ def _save_adaptive_sampling_heatmap(
         log_r2 = np.log10(r2_cached_np + 1e-10)
 
         has_adaptive = x_sampled is not None and t_sampled is not None
-        has_global_causal = (causal_state is not None and causal_state.get('enabled', False))
-        has_per_leaf_causal = (
-            leaf_info is not None and leaf_causal_states is not None and len(leaf_info) > 0
-            and any(leaf_causal_states.get(idx) is not None for _, idx in leaf_info)
-        )
-        has_causal = has_global_causal or has_per_leaf_causal
+        has_causal = (causal_state is not None and causal_state.get('enabled', False))
         n_panels = 1 + int(has_adaptive) + int(has_causal)
         fig, axes = plt.subplots(1, n_panels, figsize=(7 * n_panels, 5))
         if n_panels == 1:
@@ -430,91 +422,38 @@ def _save_adaptive_sampling_heatmap(
             ax2.set_ylabel('t')
             ax2.set_title(f'Adaptive Sampling by Pure Residual (epoch {epoch})')
 
-        # Panel 3: causal-weighted residuals — global or per-leaf
+        # Panel 3: causal-weighted residuals
         if has_causal and ax3 is not None:
-            if has_global_causal:
-                num_chunks = causal_state['num_chunks']
-                causal_tol = causal_state['tol']
+            num_chunks = causal_state['num_chunks']
+            causal_tol = causal_state['tol']
 
-                t_flat = t_cached[:, 0].cpu()
-                r2_flat = r2_cached.cpu()
-                N = len(t_flat)
-                sort_idx = torch.argsort(t_flat)
-                r2_sorted = r2_flat[sort_idx]
+            t_flat = t_cached[:, 0].cpu()
+            r2_flat = r2_cached.cpu()
+            N = len(t_flat)
+            sort_idx = torch.argsort(t_flat)
+            r2_sorted = r2_flat[sort_idx]
 
-                chunk_size = max(1, N // num_chunks)
-                per_point_weights = torch.ones(N)
-                chunk_losses = []
-                for i in range(num_chunks):
-                    start = i * chunk_size
-                    end = start + chunk_size if i < num_chunks - 1 else N
-                    chunk_losses.append(r2_sorted[start:end].mean().item())
+            chunk_size = max(1, N // num_chunks)
+            per_point_weights = torch.ones(N)
+            chunk_losses = []
+            for i in range(num_chunks):
+                start = i * chunk_size
+                end = start + chunk_size if i < num_chunks - 1 else N
+                chunk_losses.append(r2_sorted[start:end].mean().item())
 
-                cumsum = np.cumsum(chunk_losses)
-                shifted = np.concatenate([[0.0], cumsum[:-1]])
-                chunk_weights = np.exp(-causal_tol * shifted)
+            cumsum = np.cumsum(chunk_losses)
+            shifted = np.concatenate([[0.0], cumsum[:-1]])
+            chunk_weights = np.exp(-causal_tol * shifted)
 
-                for i in range(num_chunks):
-                    start = i * chunk_size
-                    end = start + chunk_size if i < num_chunks - 1 else N
-                    per_point_weights[sort_idx[start:end]] = chunk_weights[i]
+            for i in range(num_chunks):
+                start = i * chunk_size
+                end = start + chunk_size if i < num_chunks - 1 else N
+                per_point_weights[sort_idx[start:end]] = chunk_weights[i]
 
-                weighted_r2 = r2_flat.numpy() * per_point_weights.numpy()
-                log_weighted = np.log10(weighted_r2 + 1e-10)
-                tol_str = f'{causal_tol:.4g}'
-                panel_title = f'Causal-Weighted Residual (ε={tol_str}, epoch {epoch-1})'
-
-            else:
-                # Per-leaf causal: compute per-point weights from each leaf's own state.
-                # Points not belonging to any leaf keep weight=1 (no de-weighting).
-                r2_np = r2_cached_np
-                per_point_weights = np.ones(len(x_cached_np))
-                problem = config['problem']
-                _sdim = config[problem]['spatial_dim']
-
-                tol_vals = []
-                for _region, _expert_idx in leaf_info:
-                    state = leaf_causal_states.get(_expert_idx)
-                    if state is None:
-                        continue
-                    # Region mask (matching compute_region_mask convention)
-                    mask = (
-                        (x_cached_np >= _region.bounds_lower[0]) &
-                        (x_cached_np <= _region.bounds_upper[0]) &
-                        (t_cached_np >= _region.bounds_lower[_sdim]) &
-                        (t_cached_np <= _region.bounds_upper[_sdim])
-                    )
-                    n_leaf = mask.sum()
-                    num_chunks = state['num_chunks']
-                    causal_tol = state['tol']
-                    tol_vals.append(causal_tol)
-                    if n_leaf < num_chunks:
-                        continue
-                    t_leaf = t_cached_np[mask]
-                    r2_leaf = r2_np[mask]
-                    sort_idx = np.argsort(t_leaf)
-                    r2_sorted = r2_leaf[sort_idx]
-                    chunk_size = max(1, n_leaf // num_chunks)
-                    chunk_losses = []
-                    for i in range(num_chunks):
-                        start = i * chunk_size
-                        end = start + chunk_size if i < num_chunks - 1 else n_leaf
-                        chunk_losses.append(r2_sorted[start:end].mean())
-                    cumsum = np.cumsum(chunk_losses)
-                    shifted = np.concatenate([[0.0], cumsum[:-1]])
-                    cw = np.exp(-causal_tol * shifted)
-                    leaf_weights = np.ones(n_leaf)
-                    for i in range(num_chunks):
-                        start = i * chunk_size
-                        end = start + chunk_size if i < num_chunks - 1 else n_leaf
-                        leaf_weights[sort_idx[start:end]] = cw[i]
-                    per_point_weights[mask] = leaf_weights
-
-                weighted_r2 = r2_np * per_point_weights
-                log_weighted = np.log10(weighted_r2 + 1e-10)
-                unique_tols = sorted(set(tol_vals))
-                tol_str = '/'.join(f'{e:.4g}' for e in unique_tols)
-                panel_title = f'Per-Leaf Causal-Weighted Residual (ε={tol_str}, epoch {epoch-1})'
+            weighted_r2 = r2_flat.numpy() * per_point_weights.numpy()
+            log_weighted = np.log10(weighted_r2 + 1e-10)
+            tol_str = f'{causal_tol:.4g}'
+            panel_title = f'Causal-Weighted Residual (ε={tol_str}, epoch {epoch-1})'
 
             sc3 = ax3.scatter(x_cached_np, t_cached_np, c=log_weighted, cmap='hot', s=1, alpha=0.6)
             ax3.set_xlabel('x')
@@ -531,21 +470,6 @@ def _save_adaptive_sampling_heatmap(
         for ax in [a for a in [ax1, ax2, ax3] if a is not None]:
             ax.set_xlim(x_lo, x_hi)
             ax.set_ylim(t_min, t_max)
-
-        if leaf_info:
-            import matplotlib.patches as mpatches
-            for ax in [a for a in [ax1, ax2, ax3] if a is not None]:
-                for _region, _expert_idx in leaf_info:
-                    rx_min = _region.bounds_lower[0]
-                    rt_min = _region.bounds_lower[spatial_dim]
-                    rx_max = _region.bounds_upper[0]
-                    rt_max = _region.bounds_upper[spatial_dim]
-                    ax.add_patch(mpatches.Rectangle(
-                        (rx_min, rt_min),
-                        rx_max - rx_min, rt_max - rt_min,
-                        linewidth=1.5, edgecolor='black',
-                        facecolor='none', zorder=10,
-                    ))
 
         plt.tight_layout()
         output_path = output_dir / f"resample_epoch_{epoch}.png"
@@ -564,8 +488,6 @@ def regenerate_training_data(
     run_dir=None,
     epoch=None,
     causal_state: dict = None,
-    leaf_info=None,
-    leaf_causal_states: dict = None,
 ) -> Dict[str, torch.Tensor]:
     """Lightweight resampling: fresh random coordinates + analytical IC/BC.
 
@@ -581,7 +503,6 @@ def regenerate_training_data(
         run_dir: Optional path for saving diagnostic plots
         epoch: Current epoch (for diagnostic filenames)
         causal_state: Optional causal training state dict for diagnostic heatmaps
-        leaf_info: Optional list of (region, expert_idx) for per-leaf adaptive sampling
     """
     problem = config['problem']
     pc = config[problem]
@@ -605,7 +526,6 @@ def regenerate_training_data(
     has_cache = cached_residuals is not None and len(cached_residuals) > 0
     as_enabled = as_cfg['enabled'] and has_cache
     as_ratio = as_cfg['adaptive_ratio']
-    per_leaf_sampling = as_cfg['per_leaf_sampling']
     # phi config comes from the same per-problem adaptive_sampling section
     phi_cfg = {
         'phi': as_cfg['phi'],
@@ -628,43 +548,10 @@ def regenerate_training_data(
             x[idx:idx + n_uniform, d] = torch.rand(n_uniform, device=device) * (hi - lo) + lo
         t[idx:idx + n_uniform, 0] = torch.rand(n_uniform, device=device) * (t_max - t_min) + t_min
         idx += n_uniform
-        # Adaptive residual points — global or per-leaf
-        if per_leaf_sampling and leaf_info is not None and len(leaf_info) > 0:
-            n_leaves = len(leaf_info)
-            _min_per_leaf = config['sampling']['min_points_per_leaf']
-            n_per_leaf_base = max(_min_per_leaf, max(1, n_adaptive // n_leaves))
-            x_parts, t_parts = [], []
-            for _leaf_i, (_region, _expert_idx) in enumerate(leaf_info):
-                # Last leaf absorbs the remainder so total == n_adaptive exactly.
-                n_this = (n_adaptive - n_per_leaf_base * (n_leaves - 1)
-                          if _leaf_i == n_leaves - 1 else n_per_leaf_base)
-                leaf_cached = _filter_cache_to_region(cached_residuals, _region)
-                if leaf_cached:
-                    x_leaf, t_leaf = _sample_adaptive_residual_points(
-                        leaf_cached, config, device, n_this, phi_cfg)
-                else:
-                    x_leaf, t_leaf = _uniform_in_region(_region, n_this, spatial_dim, device)
-                x_parts.append(x_leaf)
-                t_parts.append(t_leaf)
-            x_adap = torch.cat(x_parts, dim=0)[:n_adaptive]
-            t_adap = torch.cat(t_parts, dim=0)[:n_adaptive]
-            logger.info(f"  [Resample] Per-leaf adaptive: {n_leaves} leaves × ~{n_per_leaf_base} pts = {len(x_adap)} adaptive")
-            if run_dir is not None and epoch is not None and spatial_dim == 1:
-                _all_x = torch.cat([r[0] for r in cached_residuals], dim=0)
-                _all_t = torch.cat([r[1] for r in cached_residuals], dim=0)
-                _all_r2 = torch.cat([r[2] for r in cached_residuals], dim=0)
-                _save_adaptive_sampling_heatmap(
-                    _all_x, _all_t, _all_r2,
-                    x_adap, t_adap,
-                    run_dir, epoch, config,
-                    causal_state=None,
-                    leaf_info=leaf_info,
-                    leaf_causal_states=leaf_causal_states,
-                )
-        else:
-            x_adap, t_adap = _sample_adaptive_residual_points(
-                cached_residuals, config, device, n_adaptive, phi_cfg, run_dir, epoch,
-                causal_state=causal_state)
+        # Adaptive residual points
+        x_adap, t_adap = _sample_adaptive_residual_points(
+            cached_residuals, config, device, n_adaptive, phi_cfg, run_dir, epoch,
+            causal_state=causal_state)
         x[idx:idx + n_adaptive] = x_adap
         t[idx:idx + n_adaptive] = t_adap
         idx += n_adaptive
@@ -744,8 +631,6 @@ def sample_residual_points(
     run_dir=None,
     epoch=None,
     causal_state: dict = None,
-    leaf_info=None,
-    leaf_causal_states: dict = None,
 ):
     """Sample n_res residual (x, t) pairs.
 
@@ -763,7 +648,6 @@ def sample_residual_points(
     has_cache = cached_residuals is not None and len(cached_residuals) > 0
     as_enabled = as_cfg['enabled'] and has_cache
     as_ratio = as_cfg['adaptive_ratio']
-    per_leaf_sampling = as_cfg['per_leaf_sampling']
     phi_cfg = {
         'phi': as_cfg['phi'],
         'phi_epsilon': as_cfg['phi_epsilon'],
@@ -787,29 +671,9 @@ def sample_residual_points(
         )
         idx += n_uniform
 
-        if per_leaf_sampling and leaf_info is not None and len(leaf_info) > 0:
-            n_leaves = len(leaf_info)
-            _min_per_leaf = config['sampling']['min_points_per_leaf']
-            n_per_leaf_base = max(_min_per_leaf, max(1, n_adaptive // n_leaves))
-            x_parts, t_parts = [], []
-            for _leaf_i, (_region, _expert_idx) in enumerate(leaf_info):
-                n_this = (n_adaptive - n_per_leaf_base * (n_leaves - 1)
-                          if _leaf_i == n_leaves - 1 else n_per_leaf_base)
-                leaf_cached = _filter_cache_to_region(cached_residuals, _region)
-                if leaf_cached:
-                    x_leaf, t_leaf = _sample_adaptive_residual_points(
-                        leaf_cached, config, device, n_this, phi_cfg)
-                else:
-                    x_leaf, t_leaf = _uniform_in_region(
-                        _region, n_this, spatial_dim, device)
-                x_parts.append(x_leaf)
-                t_parts.append(t_leaf)
-            x_adap = torch.cat(x_parts, dim=0)[:n_adaptive]
-            t_adap = torch.cat(t_parts, dim=0)[:n_adaptive]
-        else:
-            x_adap, t_adap = _sample_adaptive_residual_points(
-                cached_residuals, config, device, n_adaptive, phi_cfg,
-                run_dir, epoch, causal_state=causal_state)
+        x_adap, t_adap = _sample_adaptive_residual_points(
+            cached_residuals, config, device, n_adaptive, phi_cfg,
+            run_dir, epoch, causal_state=causal_state)
         x_res[idx:idx + n_adaptive] = x_adap
         t_res[idx:idx + n_adaptive] = t_adap
     else:
@@ -830,8 +694,6 @@ def resample_residual_inplace(
     run_dir=None,
     epoch=None,
     causal_state: dict = None,
-    leaf_info=None,
-    leaf_causal_states: dict = None,
 ) -> Dict:
     """Update only the residual rows in train_data with freshly sampled points.
 
@@ -846,7 +708,7 @@ def resample_residual_inplace(
     torch.manual_seed(resample_seed)
     x_res, t_res = sample_residual_points(
         config, device, n_res, cached_residuals,
-        run_dir, epoch, causal_state, leaf_info, leaf_causal_states)
+        run_dir, epoch, causal_state)
     train_data['x'][res_mask] = x_res
     train_data['t'][res_mask] = t_res
     return train_data

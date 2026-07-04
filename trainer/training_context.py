@@ -96,8 +96,6 @@ class TrainingContext:
     _pretrained_force_spawn: bool = False
     region_detector: Any = None
     max_experts: int = 0
-    _per_leaf_causal: bool = False
-    _per_leaf_sampling: bool = False
     variable_for_node_accept: Any = None
     variable_for_expert_size: Any = None
     domain_bounds: Any = None

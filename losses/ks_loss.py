@@ -25,8 +25,7 @@ import math
 import torch
 import torch.nn as nn
 from typing import Dict, Callable, Tuple
-from losses.causal_weighting import (create_causal_state, compute_causal_residual,
-                                      compute_per_leaf_causal_residual)
+from losses.causal_weighting import create_causal_state, compute_causal_residual
 
 # Mutable context set by trainer (e.g. f"epoch {epoch} batch {b}") so prints are traceable.
 _nan_ctx: list = ['']
@@ -505,7 +504,6 @@ def build_loss(**cfg) -> Callable:
     use_bc = not cfg['fourier_features']['periodic']
 
     causal_state = create_causal_state(problem_config)
-    _leaf_state = {}  # mutable container; trainer populates when per_leaf_causal=True
 
     def loss_fn(model: nn.Module, batch: Dict[str, torch.Tensor],
                 for_tree_spawning: bool = False,
@@ -581,15 +579,8 @@ def build_loss(**cfg) -> Callable:
                         t_f.detach().clone(),
                         residual_squared.detach().clone(),
                     ))
-                _leaf_causal_states = _leaf_state.get('causal_states')
-                _leaf_info_perlf = _leaf_state.get('leaf_info')
-                if _leaf_causal_states is not None and _leaf_info_perlf is not None:
-                    mse_residual = compute_per_leaf_causal_residual(
-                        residual_squared, x_f, t_f, _leaf_info_perlf,
-                        _leaf_causal_states, update_state=update_causal_state)
-                else:
-                    mse_residual = compute_causal_residual(
-                        residual_squared, t_f, causal_state, update_state=update_causal_state)
+                mse_residual = compute_causal_residual(
+                    residual_squared, t_f, causal_state, update_state=update_causal_state)
                 _chk(mse_residual, 'mse_residual (after causal weighting)')
         else:
             if not for_tree_spawning:
@@ -725,5 +716,4 @@ def build_loss(**cfg) -> Callable:
             return total_loss
 
     loss_fn.causal_state = causal_state
-    loss_fn._leaf_state = _leaf_state
     return loss_fn
