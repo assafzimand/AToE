@@ -57,6 +57,13 @@ def apply_hidden_init(model: nn.Module, cfg: dict) -> None:
     for module in model.modules():
         if isinstance(module, linear_types) and module is not out_layer:
             nn.init.xavier_uniform_(module.weight, gain=gain)
+            # RWFLinear factorizes W_eff = scale * weight: divide the freshly
+            # drawn weights by scale so the EFFECTIVE init stays Glorot
+            # (mirrors RWFLinear.__init__; without this the effective weights
+            # are inflated by ~exp(mean) and higher-order PDE residuals blow up).
+            if hasattr(module, 'scale'):
+                with torch.no_grad():
+                    module.weight.data /= module.scale.unsqueeze(1)
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
             n_hidden += 1
