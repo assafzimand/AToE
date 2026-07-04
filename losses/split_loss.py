@@ -93,19 +93,28 @@ def build_split_loss(
         total_loss = torch.tensor(0.0, device=device)
         all_comps = {}
 
+        # ── Residual: all experts share ONE autograd graph ──
+        # Each expert's points go through its own network, but derivatives are
+        # taken w.r.t. a single (xf, tf) leaf pair, so the (expensive, 2nd-4th
+        # order) autograd calls run once instead of once per expert.
+        residual_losses = _compute_all_residual_losses(
+            model, x, t, expert_ids, kinds,
+            pde_res_fn, deriv_fn, pde_params,
+            residual_cache=(
+                residual_cache
+                if split_loss_fn._cache_residuals else None
+            ),
+        )
+
         for eidx in unique_experts:
             emask = (expert_ids == eidx)
             comps = _compute_expert_loss(
                 model, eidx,
                 x[emask], t[emask], h_gt[emask],
                 kinds[emask],
-                pde_res_fn, deriv_fn, pde_params,
                 w_res, w_ic, w_bc, is_allen_cahn,
                 device,
-                residual_cache=(
-                    residual_cache
-                    if split_loss_fn._cache_residuals else None
-                ),
+                residual_loss=residual_losses.get(eidx),
             )
             total_loss = total_loss + comps['total']
             _record(per_expert_history, eidx, comps)
@@ -152,41 +161,79 @@ def build_split_loss(
     return split_loss_fn
 
 
-def _compute_expert_loss(
-    model, expert_idx, x, t, h_gt, kinds,
+def _compute_all_residual_losses(
+    model, x, t, expert_ids, kinds,
     pde_res_fn, deriv_fn, pde_params,
-    w_res, w_ic, w_bc, is_allen_cahn, device,
     residual_cache=None,
 ):
-    """Per-expert local loss (no PoU)."""
+    """Per-expert residual losses computed in a single autograd graph.
+
+    All experts' residual points are stacked (grouped by expert) onto one
+    ``(xf, tf)`` leaf pair; each block is forwarded through its own expert
+    network, and the PDE derivatives are computed once over the concatenated
+    output. The per-expert mean of r² over its own points is unchanged
+    relative to computing each expert separately.
+
+    Returns:
+        Dict mapping expert_idx -> residual loss tensor (mean r² in region).
+    """
+    rmask = (kinds == KIND_RESIDUAL)
+    if rmask.sum() == 0:
+        return {}
+
+    x_r = x[rmask]
+    t_r = t[rmask]
+    eid_r = expert_ids[rmask]
+
+    # Group points into contiguous per-expert blocks
+    order = torch.argsort(eid_r, stable=True)
+    x_r = x_r[order]
+    t_r = t_r[order]
+    eid_r = eid_r[order]
+
+    xf = x_r.clone().detach().requires_grad_(True)
+    tf = t_r.clone().detach().requires_grad_(True)
+    xt = torch.cat([xf, tf], dim=1)
+
+    u_parts = []
+    bounds = []  # (expert_idx, start, end) into the stacked tensors
+    start = 0
+    for eidx in eid_r.unique(sorted=True).tolist():
+        n = int((eid_r == eidx).sum().item())
+        u_parts.append(model.forward_single_expert(int(eidx), xt[start:start + n]))
+        bounds.append((int(eidx), start, start + n))
+        start += n
+    u_all = torch.cat(u_parts, dim=0)
+
+    hf = u_all[:, 0]
+    derivs = deriv_fn(hf, xf, tf)
+    res = pde_res_fn(hf, *derivs, **pde_params)
+    r2 = res ** 2
+
+    if residual_cache is not None:
+        residual_cache.append((
+            xf.detach().cpu(),
+            tf.detach().cpu(),
+            r2.detach().cpu(),
+        ))
+
+    return {eidx: r2[s:e].mean() for eidx, s, e in bounds}
+
+
+def _compute_expert_loss(
+    model, expert_idx, x, t, h_gt, kinds,
+    w_res, w_ic, w_bc, is_allen_cahn, device,
+    residual_loss=None,
+):
+    """Per-expert local loss (no PoU). Residual is supplied precomputed."""
     z = torch.tensor(0.0, device=device)
     comps = {
-        'residual': z.clone(),
+        'residual': residual_loss if residual_loss is not None else z.clone(),
         'ic': z.clone(),
         'interface_ic': z.clone(),
         'interface_bc': z.clone(),
         'bc': z.clone(),
     }
-
-    # ── Residual ──
-    rmask = (kinds == KIND_RESIDUAL)
-    if rmask.sum() > 0:
-        xf = x[rmask].clone().detach().requires_grad_(True)
-        tf = t[rmask].clone().detach().requires_grad_(True)
-        xt = torch.cat([xf, tf], dim=1)
-        u_field = model.forward_single_expert(expert_idx, xt)
-
-        hf = u_field[:, 0]
-        ht, hx, hxx = deriv_fn(hf, xf, tf)
-        res = pde_res_fn(hf, ht, hx, hxx, **pde_params)
-        comps['residual'] = torch.mean(res ** 2)
-        if residual_cache is not None:
-            r2 = (res ** 2).detach().cpu()
-            residual_cache.append((
-                xf.detach().cpu(),
-                tf.detach().cpu(),
-                r2,
-            ))
 
     # ── IC true (real t=0) ──
     ic_mask = (kinds == KIND_IC_TRUE)
