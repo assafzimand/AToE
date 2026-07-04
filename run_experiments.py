@@ -81,7 +81,7 @@ def run_single_experiment(exp_config, base_config, exp_name, parent_dir):
         with open('config/config.yaml', 'w') as f:
             yaml.dump(config, f, default_flow_style=False)
 
-        result = subprocess.run([sys.executable, 'run_ncc.py'])
+        result = subprocess.run([sys.executable, 'run_training.py'])
 
         if result.returncode != 0:
             logger.warning(f"{exp_name} exited with code {result.returncode} — attempting to save partial output anyway.")

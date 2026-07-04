@@ -1,16 +1,15 @@
-"""Shared training state container for the trainer orchestrator.
+"""Shared training state container for the trainer package.
 
 ``TrainingContext`` carries all state that crosses the boundaries between the
-three phases of ``trainer.trainer.train``:
+three phases of ``trainer.orchestrator.train``:
 
-  * ``_setup_training``  builds and returns a fully-populated context,
-  * ``_run_training_loop`` consumes it (reading state, writing back the
-    values it reassigns), and
-  * ``_finalize_training`` reads post-loop state to emit checkpoints/plots.
+  * ``trainer.setup._setup_training`` builds and returns a fully-populated context,
+  * ``trainer.epoch_loop._train_segment`` consumes it per segment (reading
+    state, writing back the values it reassigns), and
+  * ``trainer.finalize._finalize_training`` reads post-loop state to emit
+    checkpoints/plots.
 
-This is purely a state bag; it holds no behavior. Every field corresponds
-1:1 to a local variable that previously lived inside the monolithic
-``train`` function, so the split is behavior-preserving.
+This is purely a state bag; it holds no behavior.
 """
 
 from dataclasses import dataclass, field

@@ -16,3 +16,4 @@ __pycache__/
 !roots_checkpoints/*.pt
 *.png
 .Python
+*.pt.legacy
