@@ -90,7 +90,6 @@ def test_trainer_small_run():
         shutil.rmtree(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "training_plots").mkdir(exist_ok=True)
-    (run_dir / "ncc_plots").mkdir(exist_ok=True)
 
     # Run training
     print("  Running training...")

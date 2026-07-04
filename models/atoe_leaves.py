@@ -20,7 +20,6 @@ Additive mode (optional): when enabled, the frozen root is added:
 import torch
 import torch.nn as nn
 from typing import List, Dict, Optional, Set
-from torch.utils.hooks import RemovableHandle
 
 from models.fc_model import FCNet
 from models.network_factory import create_network
@@ -102,9 +101,6 @@ class AToELeaves(nn.Module):
         self.regions: List[RegionDescriptor] = []
 
         self.batched_indicators = BatchedIndicators(base_weight=self.base_weight)
-
-        self.activations: Dict[str, torch.Tensor] = {}
-        self.hook_handles: List[RemovableHandle] = []
 
         self._timer = None
 
@@ -586,34 +582,6 @@ class AToELeaves(nn.Module):
 
     def get_layer_names(self) -> List[str]:
         return self.base_model.get_layer_names()
-
-    def register_ncc_hooks(
-        self,
-        layer_names: List[str],
-        keep_gradients: bool = False
-    ) -> List[RemovableHandle]:
-        self.remove_hooks()
-        self.activations = {}
-
-        handles = self.base_model.register_ncc_hooks(layer_names, keep_gradients)
-        self.hook_handles = handles
-
-        return handles
-
-    def remove_hooks(self):
-        self.base_model.remove_hooks()
-        for handle in self.hook_handles:
-            handle.remove()
-        self.hook_handles = []
-        self.activations = {}
-
-    @property
-    def activations(self) -> Dict[str, torch.Tensor]:
-        return self.base_model.activations
-
-    @activations.setter
-    def activations(self, value):
-        self._activations = value
 
     def get_domain_bounds(self) -> Dict[str, List[float]]:
         problem = self.config['problem']

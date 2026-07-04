@@ -122,6 +122,5 @@ def make_run_dir(
     # Create the directory and subdirectories
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "training_plots").mkdir(exist_ok=True)
-    (run_dir / "ncc_plots").mkdir(exist_ok=True)
 
     return run_dir

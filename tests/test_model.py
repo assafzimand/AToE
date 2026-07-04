@@ -77,69 +77,6 @@ def test_model_forward():
     print(f"  ✓ Output device: {output.device}")
 
 
-def test_model_hooks():
-    """Test NCC hook registration and activation capture."""
-    print("\nTesting NCC hooks...")
-
-    config = load_config()
-    device = torch.device('cuda' if config['cuda'] and
-                          torch.cuda.is_available() else 'cpu')
-
-    # Build model
-    architecture = config['base_architecture']
-    activation = config['activation']
-    model = FCNet(architecture, activation, config).to(device)
-
-    # Get layer names (all hidden layers)
-    layer_names = model.get_layer_names()[:-1]  # Exclude output layer
-    print(f"  Hooking layers: {layer_names}")
-
-    # Register hooks
-    handles = model.register_ncc_hooks(layer_names)
-
-    assert len(handles) == len(layer_names), \
-        "Number of handles should match number of layers"
-
-    # Forward pass
-    batch_size = 50
-    input_dim = architecture[0]
-    x_input = torch.randn(batch_size, input_dim, device=device)
-
-    output = model(x_input)
-
-    # Check activations were captured
-    assert len(model.activations) == len(layer_names), \
-        f"Expected {len(layer_names)} activations, " \
-        f"got {len(model.activations)}"
-
-    # Check activation shapes
-    for i, layer_name in enumerate(layer_names):
-        assert layer_name in model.activations, \
-            f"Activation for {layer_name} not captured"
-
-        activation_tensor = model.activations[layer_name]
-
-        # Check shape
-        expected_hidden_dim = architecture[i + 1]
-        assert activation_tensor.shape == (batch_size, expected_hidden_dim), \
-            f"Expected shape ({batch_size}, {expected_hidden_dim}), " \
-            f"got {activation_tensor.shape}"
-
-        # Check device
-        assert activation_tensor.device.type == device.type, \
-            f"Activation should be on {device}"
-
-        print(f"  ✓ {layer_name}: shape {activation_tensor.shape}, "
-              f"device {activation_tensor.device}")
-
-    # Remove hooks
-    model.remove_hooks()
-    assert len(model.hook_handles) == 0, "Hooks should be removed"
-    assert len(model.activations) == 0, "Activations should be cleared"
-
-    print(f"  ✓ Hooks registered and removed successfully")
-
-
 def test_architecture_verification():
     """Test that architecture verification catches mismatches."""
     print("\nTesting architecture verification...")
@@ -205,13 +142,12 @@ def test_gradients_flow():
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("Step 4 — FC model + hooks — Tests")
+    print("Step 4 — FC model — Tests")
     print("=" * 60)
 
     try:
         test_model_construction()
         test_model_forward()
-        test_model_hooks()
         test_architecture_verification()
         test_gradients_flow()
 

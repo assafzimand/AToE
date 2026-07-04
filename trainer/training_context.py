@@ -70,7 +70,6 @@ class TrainingContext:
     # ── Reporting intervals ─────────────────────────────────────────────────
     print_every: int = 0
     eval_every: int = 0
-    inner_metrics_every: int = 0
     save_every: int = 0
 
     # ── Metrics / best-model tracking ───────────────────────────────────────
@@ -101,7 +100,6 @@ class TrainingContext:
     max_experts: int = 0
     spawning_method: Optional[str] = None
     wavelet_threshold: Any = None
-    adaptive_inner_metrics: bool = False
     spawning_complete: bool = False
     _retries_before_stop: Any = False
     _stop_on_no_spawn: bool = False

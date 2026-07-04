@@ -22,7 +22,7 @@ def test_config_loading():
     # Required keys from PRD
     required_keys = [
         'problem', 'base_architecture', 'activation', 'epochs', 'batch_size', 
-        'lr', 'cuda', 'eval_only', 'resume_from', 'bins', 'seed',
+        'lr', 'cuda', 'eval_only', 'resume_from', 'seed',
         'n_residual_train', 'n_initial_train', 'n_boundary_train',
         'n_residual_eval', 'n_initial_eval', 'n_boundary_eval'
     ]
@@ -45,7 +45,6 @@ def test_config_loading():
     assert isinstance(config['eval_only'], bool), "eval_only should be a boolean"
     assert config['resume_from'] is None or isinstance(config['resume_from'], str), \
         "resume_from should be None or string"
-    assert isinstance(config['bins'], int), "bins should be an integer"
     
     # Check dataset size keys are integers
     for key in ['n_residual_train', 'n_initial_train', 'n_boundary_train',
@@ -96,7 +95,6 @@ def test_run_dir_creation():
     
     # Check subdirectories
     assert (run_dir / "training_plots").exists(), "training_plots subdirectory should exist"
-    assert (run_dir / "ncc_plots").exists(), "ncc_plots subdirectory should exist"
     
     # Check naming format
     expected_name = f"{config['problem']}-2-50-100-50-2-{config['activation']}"
@@ -104,7 +102,7 @@ def test_run_dir_creation():
     
     print(f"✓ Run directory created: {run_dir}")
     print(f"✓ Directory name format correct: {run_dir.name}")
-    print(f"✓ Subdirectories created: training_plots/, ncc_plots/")
+    print(f"✓ Subdirectories created: training_plots/")
 
 
 if __name__ == "__main__":

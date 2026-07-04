@@ -15,15 +15,6 @@ from typing import Dict
 import sys
 sys.path.insert(0, str(Path(__file__).parent))
 
-from utils.comparison_plots import (
-    generate_ncc_classification_plot,
-    generate_ncc_compactness_plot,
-    generate_probe_comparison_plots,
-    generate_derivatives_comparison_plots,
-    generate_frequency_coverage_comparison,
-    plot_spectral_learning_efficiency_comparison
-)
-
 _TIMESTAMP_RE = re.compile(r'\d{8}_\d{6}$')
 
 
@@ -371,12 +362,8 @@ def generate_comparison_for_batch(batch_dir: Path, label: str = None):
                     exp_name = f"{exp_name}_{ts_dir.name[-6:]}"
                 results[exp_name] = ts_dir
 
-    # Collect training metrics (same logic as run_experiments.py)
+    # Collect training metrics
     metrics_data = []
-    ncc_data = {}
-    probe_data = {}
-    derivatives_data = {}
-    frequency_data = {}
     for exp_name, result_path in results.items():
         if result_path is None:
             continue
@@ -390,80 +377,16 @@ def generate_comparison_for_batch(batch_dir: Path, label: str = None):
         with open(metrics_file) as f:
             train_metrics = json.load(f)
 
-        # Collect NCC metrics
-        ncc_plots_dir = result_path / "ncc_plots"
-        ncc_epochs = {}
-
-        if ncc_plots_dir.exists():
-            final_ncc_file = ncc_plots_dir / "ncc_metrics.json"
-            if final_ncc_file.exists():
-                with open(final_ncc_file) as f:
-                    ncc_epochs['final'] = json.load(f)
-
-            # Load periodic NCCs
-            for subdir in ncc_plots_dir.iterdir():
-                if subdir.is_dir() and subdir.name.startswith("ncc_plots_epoch_"):
-                    epoch_num = int(subdir.name.split("_")[-1])
-                    epoch_file = subdir / "ncc_metrics.json"
-                    if epoch_file.exists():
-                        with open(epoch_file) as f:
-                            ncc_epochs[epoch_num] = json.load(f)
-
-        # If no NCC data, use defaults
-        if not ncc_epochs:
-            print(f"  Warning: No NCC data found for {exp_name}, using defaults")
-            final_ncc = None
-        else:
-            final_ncc = ncc_epochs.get('final', list(ncc_epochs.values())[-1])
-
-        # Load probe metrics
-        probe_file = result_path / "probe_plots" / "probe_metrics.json"
-        if probe_file.exists():
-            with open(probe_file) as f:
-                probe_metrics = json.load(f)
-                probe_data[exp_name] = probe_metrics
-
-        # Load derivatives metrics
-        deriv_file = result_path / "derivatives_plots" / "derivatives_metrics.json"
-        deriv_metrics = None
-        if deriv_file.exists():
-            with open(deriv_file) as f:
-                deriv_metrics = json.load(f)
-                derivatives_data[exp_name] = deriv_metrics
-
-        # Load frequency metrics
-        freq_file = result_path / "frequency_plots" / "frequency_metrics.json"
-        if freq_file.exists():
-            with open(freq_file) as f:
-                freq_metrics = json.load(f)
-                frequency_data[exp_name] = freq_metrics
-
-        # Extract margin SNR if NCC data available
-        if final_ncc:
-            final_layer = list(final_ncc['layer_accuracies'].keys())[-1]
-            margin_mean = final_ncc['layer_margins'][final_layer]['mean_margin']
-            margin_std = final_ncc['layer_margins'][final_layer]['std_margin']
-            margin_snr = margin_mean / margin_std if margin_std > 0 else 0
-            ncc_accuracy = final_ncc['layer_accuracies'][final_layer]
-        else:
-            margin_snr = float('nan')
-            ncc_accuracy = float('nan')
-
         def _last(lst):
             return lst[-1] if lst else float('nan')
 
-        # Build metrics row
-        metrics_row = {
+        metrics_data.append({
             'experiment': exp_name,
             'final_train_loss': _last(train_metrics.get('train_loss', [])),
             'final_eval_loss': _last(train_metrics.get('eval_loss', [])),
             'final_eval_rel_l2': _last(train_metrics.get('eval_rel_l2', [])),
             'final_eval_inf_norm': _last(train_metrics.get('eval_inf_norm', [])),
-        }
-
-        metrics_data.append(metrics_row)
-        if ncc_epochs:
-            ncc_data[exp_name] = ncc_epochs
+        })
 
     if not metrics_data:
         print(f"  No valid results to compare for batch {batch_dir.name}")
@@ -482,20 +405,6 @@ def generate_comparison_for_batch(batch_dir: Path, label: str = None):
 
     # Generate plots
     _generate_training_results_plot(batch_dir, df, run_infos)
-
-    if ncc_data:
-        generate_ncc_classification_plot(batch_dir, ncc_data)
-        generate_ncc_compactness_plot(batch_dir, ncc_data)
-
-    if probe_data:
-        generate_probe_comparison_plots(batch_dir, probe_data)
-
-    if derivatives_data:
-        generate_derivatives_comparison_plots(batch_dir, derivatives_data)
-
-    if frequency_data:
-        generate_frequency_coverage_comparison(batch_dir, frequency_data)
-        plot_spectral_learning_efficiency_comparison(frequency_data, batch_dir)
 
     print(f"\n  [OK] Comparison plots saved to {batch_dir}")
 

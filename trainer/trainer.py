@@ -697,7 +697,6 @@ def _setup_training(
     # Training setup
     print_every = cfg['print_every']
     eval_every = cfg['eval_every']
-    inner_metrics_every = cfg['inner_metrics_eval_every']
     save_every = cfg['save_every']
 
     # Metrics storage
@@ -785,10 +784,6 @@ def _setup_training(
     checkpoint_dir = run_dir / "checkpoints"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-    # Create ncc_plots directory for periodic NCC analysis
-    ncc_plots_parent = run_dir / "ncc_plots"
-    ncc_plots_parent.mkdir(exist_ok=True)
-
     # Adaptive PINN setup
     adaptive_cfg = cfg['adaptive_pinn']
     is_adaptive = adaptive_cfg['enabled']
@@ -797,7 +792,6 @@ def _setup_training(
     max_experts = adaptive_cfg['max_experts']
     spawning_method = adaptive_cfg['spawning_method']
     wavelet_threshold = problem_cfg['wavelet_threshold']
-    adaptive_inner_metrics = adaptive_cfg['inner_metrics_calculation']
     spawning_complete = False
     _retries_before_stop = adaptive_cfg['spawn_retries_before_stop']
     _stop_on_no_spawn = _retries_before_stop is not False  # False = feature disabled
@@ -998,7 +992,6 @@ def _setup_training(
         step_count=step_count,
         print_every=print_every,
         eval_every=eval_every,
-        inner_metrics_every=inner_metrics_every,
         save_every=save_every,
         metrics=metrics,
         best_eval_loss=best_eval_loss,
@@ -1021,7 +1014,6 @@ def _setup_training(
         max_experts=max_experts,
         spawning_method=spawning_method,
         wavelet_threshold=wavelet_threshold,
-        adaptive_inner_metrics=adaptive_inner_metrics,
         spawning_complete=spawning_complete,
         _retries_before_stop=_retries_before_stop,
         _stop_on_no_spawn=_stop_on_no_spawn,
@@ -1096,7 +1088,6 @@ def _train_segment(
     batches_per_epoch = ctx.batches_per_epoch
     print_every = ctx.print_every
     eval_every = ctx.eval_every
-    inner_metrics_every = ctx.inner_metrics_every
     save_every = ctx.save_every
     metrics = ctx.metrics
     best_eval_loss = ctx.best_eval_loss
@@ -1107,7 +1098,6 @@ def _train_segment(
     checkpoint_dir = ctx.checkpoint_dir
     adaptive_cfg = ctx.adaptive_cfg
     is_adaptive = ctx.is_adaptive
-    adaptive_inner_metrics = ctx.adaptive_inner_metrics
     _per_leaf_causal = ctx._per_leaf_causal
     _per_leaf_sampling = ctx._per_leaf_sampling
     timer = ctx.timer
@@ -2108,35 +2098,6 @@ def _train_segment(
                     _stopped_early = True
                     _stop_reason = 'early_stop'
                     break
-
-        # Periodic inner metrics (NCC + probes + derivatives + frequency)
-        # Skip if adaptive PINN and inner_metrics_calculation is disabled
-        should_run_inner_metrics = inner_metrics_every > 0 and epoch % inner_metrics_every == 0
-        if is_adaptive and not adaptive_inner_metrics:
-            should_run_inner_metrics = False
-            
-        if should_run_inner_metrics:
-            logger.info(f"\n  Running inner metrics at epoch {epoch} (NCC/Probes/Derivatives/Frequency)...")
-            ncc_metrics = _run_intermediate_ncc(model, cfg, run_dir, epoch)
-            probe_metrics = _run_intermediate_probes(model, cfg, run_dir, epoch)
-            deriv_metrics = _run_intermediate_derivatives(model, cfg, run_dir, epoch)
-            freq_metrics = _run_intermediate_frequency(model, cfg, run_dir, epoch)
-            # Cache for post-run shading overlays
-            if 'ncc_history' not in metrics:
-                metrics['ncc_history'] = []
-            metrics['ncc_history'].append((epoch, ncc_metrics))
-            if 'probe_history' not in metrics:
-                metrics['probe_history'] = []
-            if probe_metrics is not None:
-                metrics['probe_history'].append((epoch, probe_metrics))
-            if 'deriv_history' not in metrics:
-                metrics['deriv_history'] = []
-            if deriv_metrics is not None:
-                metrics['deriv_history'].append((epoch, deriv_metrics))
-            if 'freq_history' not in metrics:
-                metrics['freq_history'] = []
-            if freq_metrics is not None:
-                metrics['freq_history'].append((epoch, freq_metrics))
 
     # ── Write reassigned segment state back to ctx ──
     # (objects mutated in place — model, metrics, timer — need no write-back.)
@@ -3240,7 +3201,6 @@ def _finalize_training(ctx: TrainingContext) -> Path:
     _nan_detected = ctx._nan_detected
     is_adaptive = ctx.is_adaptive
     adaptive_cfg = ctx.adaptive_cfg
-    adaptive_inner_metrics = ctx.adaptive_inner_metrics
     adaptive_plots_dir = ctx.adaptive_plots_dir
     domain_bounds = ctx.domain_bounds
     gt_grid = ctx.gt_grid
@@ -3339,77 +3299,6 @@ def _finalize_training(ctx: TrainingContext) -> Path:
         eval_data['t'].detach().cpu().numpy(),
         training_plots_dir
     )
-
-    # Run final probes, derivatives, and frequency analysis (without epoch_suffix for main directory)
-    # Skip if adaptive PINN with inner_metrics_calculation disabled
-    skip_final_inner_metrics = is_adaptive and not adaptive_inner_metrics
-    
-    if skip_final_inner_metrics:
-        logger.info("\n  [Skipping final inner metrics (probes/derivatives/frequency) — inner_metrics_calculation=false]")
-    else:
-        logger.info("\n" + "=" * 60)
-        logger.info("Running Final Probe, Derivative, and Frequency Analysis")
-        logger.info("=" * 60)
-    
-    from probes.probe_runner import run_probes
-    from derivatives_tracker.derivatives_runner import run_derivatives_tracker
-    from frequency_tracker.frequency_runner import run_frequency_tracker
-    
-    train_data_path = Path("datasets") / cfg['problem'] / "training_data.pt"
-    eval_data_path = Path("datasets") / cfg['problem'] / "eval_data.pt"
-    
-    if not skip_final_inner_metrics:
-        # Final probes (saves to main probe_plots/ directory)
-        logger.info("\nRunning final probe analysis...")
-        final_probe_metrics = run_probes(
-            model=model,
-            train_data_path=str(train_data_path),
-            eval_data_path=str(eval_data_path),
-            cfg=cfg,
-            run_dir=run_dir
-        )
-        
-        # Final derivatives (saves to main derivatives_plots/ directory)
-        logger.info("\nRunning final derivatives analysis...")
-        final_deriv_metrics = run_derivatives_tracker(
-            model=model,
-            train_data_path=str(train_data_path),
-            eval_data_path=str(eval_data_path),
-            cfg=cfg,
-            run_dir=run_dir
-        )
-        
-        # Final frequency (saves to main frequency_plots/ directory)
-        logger.info("\nRunning final frequency analysis...")
-        final_freq_metrics = run_frequency_tracker(
-            model=model,
-            train_data_path=str(train_data_path),
-            eval_data_path=str(eval_data_path),
-            cfg=cfg,
-            run_dir=run_dir
-        )
-    
-    # Add final results to history for shaded plotting
-    if not skip_final_inner_metrics:
-        if 'probe_history' not in metrics:
-            metrics['probe_history'] = []
-        if final_probe_metrics is not None:
-            metrics['probe_history'].append((epochs, final_probe_metrics))
-        
-        if 'deriv_history' not in metrics:
-            metrics['deriv_history'] = []
-        if final_deriv_metrics is not None:
-            metrics['deriv_history'].append((epochs, final_deriv_metrics))
-        
-        if 'freq_history' not in metrics:
-            metrics['freq_history'] = []
-        if final_freq_metrics is not None:
-            metrics['freq_history'].append((epochs, final_freq_metrics))
-    
-    # Post-run shaded overlays for mid-training metrics (if collected)
-    _maybe_plot_ncc_history(metrics, run_dir)
-    _maybe_plot_probe_history(metrics, run_dir)
-    _maybe_plot_deriv_history(metrics, run_dir)
 
     # Final adaptive PINN outputs
     if is_adaptive and hasattr(model, 'num_experts') and model.num_experts > 0:
@@ -3818,90 +3707,3 @@ def _load_pretrained_base(model: nn.Module, ckpt_path: str, cfg: Dict) -> None:
     # Re-sync AToE's batched container so the forward pass sees the loaded base.
     if hasattr(model, 'batched_models'):
         model.batched_models.sync_from_models(model.base_model, model.experts)
-
-
-def _run_intermediate_ncc(model, cfg, run_dir, epoch):
-    """Run NCC analysis at intermediate epoch."""
-    from ncc.ncc_runner import run_ncc
-    
-    # Get NCC data path
-    ncc_data_path = Path("datasets") / cfg['problem'] / "ncc_data.pt"
-    
-    # Run NCC with epoch-specific output dir nested inside ncc_plots
-    return run_ncc(
-        model=model,
-        eval_data_path=str(ncc_data_path),
-        cfg=cfg,
-        run_dir=run_dir,
-        epoch_suffix=f"_epoch_{epoch}"
-    )
-
-
-def _run_intermediate_probes(model, cfg, run_dir, epoch):
-    """Run probe analysis at intermediate epoch."""
-    from probes.probe_runner import run_probes
-    train_data_path = Path("datasets") / cfg['problem'] / "training_data.pt"
-    eval_data_path = Path("datasets") / cfg['problem'] / "eval_data.pt"
-    return run_probes(
-        model=model,
-        train_data_path=str(train_data_path),
-        eval_data_path=str(eval_data_path),
-        cfg=cfg,
-        run_dir=run_dir,
-        epoch_suffix=f"_epoch_{epoch}"
-    )
-
-
-def _run_intermediate_derivatives(model, cfg, run_dir, epoch):
-    """Run derivatives tracker at intermediate epoch."""
-    from derivatives_tracker.derivatives_runner import run_derivatives_tracker
-    train_data_path = Path("datasets") / cfg['problem'] / "training_data.pt"
-    eval_data_path = Path("datasets") / cfg['problem'] / "eval_data.pt"
-    return run_derivatives_tracker(
-        model=model,
-        train_data_path=str(train_data_path),
-        eval_data_path=str(eval_data_path),
-        cfg=cfg,
-        run_dir=run_dir,
-        epoch_suffix=f"_epoch_{epoch}"
-    )
-
-
-def _run_intermediate_frequency(model, cfg, run_dir, epoch):
-    """Run frequency tracker at intermediate epoch."""
-    from frequency_tracker.frequency_runner import run_frequency_tracker
-    train_data_path = Path("datasets") / cfg['problem'] / "training_data.pt"
-    eval_data_path = Path("datasets") / cfg['problem'] / "eval_data.pt"
-    return run_frequency_tracker(
-        model=model,
-        train_data_path=str(train_data_path),
-        eval_data_path=str(eval_data_path),
-        cfg=cfg,
-        run_dir=run_dir,
-        epoch_suffix=f"_epoch_{epoch}"
-    )
-
-
-def _maybe_plot_ncc_history(metrics: Dict, run_dir: Path):
-    history = metrics.get('ncc_history')
-    if not history:
-        return
-    from ncc.ncc_plotting import plot_ncc_history_shaded
-    plot_ncc_history_shaded(history, run_dir / "ncc_plots")
-
-
-def _maybe_plot_probe_history(metrics: Dict, run_dir: Path):
-    history = metrics.get('probe_history')
-    if not history:
-        return
-    from probes.probe_plotting import plot_probe_history_shaded
-    plot_probe_history_shaded(history, run_dir / "probe_plots")
-
-
-def _maybe_plot_deriv_history(metrics: Dict, run_dir: Path):
-    history = metrics.get('deriv_history')
-    if not history:
-        return
-    from derivatives_tracker.derivatives_plotting import plot_derivative_history_shaded
-    plot_derivative_history_shaded(history, run_dir / "derivatives_plots")
-

@@ -4,7 +4,6 @@ import torch
 import torch.nn as nn
 from functools import partial
 from typing import List, Dict, Optional
-from torch.utils.hooks import RemovableHandle
 from models.rwf_layer import RWFLinear
 from models.fourier_features import FourierFeatureEmbedding, PeriodicSpatialFourierEmbedding
 
@@ -31,8 +30,7 @@ class ResNetModel(nn.Module):
     """Residual neural network for PINN problems.
 
     Drop-in replacement for FCNet with identical constructor signature
-    and public API (forward, get_activation_dim, get_layer_names,
-    register_ncc_hooks, remove_hooks).
+    and public API (forward, get_activation_dim, get_layer_names).
 
     Architecture list ``[in, h, h, ..., h, out]`` is interpreted as:
 
@@ -128,9 +126,6 @@ class ResNetModel(nn.Module):
         # Output projection always plain nn.Linear for output scale stability
         self.output_proj = nn.Linear(h, layers[-1])
 
-        self.activations: Dict[str, torch.Tensor] = {}
-        self.hook_handles: List[RemovableHandle] = []
-
     def _get_activation(self, activation: str) -> nn.Module:
         activations = {
             'tanh': nn.Tanh(),
@@ -176,60 +171,6 @@ class ResNetModel(nn.Module):
             names.append('leftover')
         names.append('output_proj')
         return names
-
-    def register_ncc_hooks(
-        self,
-        layer_names: List[str],
-        keep_gradients: bool = False
-    ) -> List[RemovableHandle]:
-        self.remove_hooks()
-        self.activations = {}
-
-        module_map = {
-            'input_proj': self.input_proj,
-            'output_proj': self.output_proj,
-        }
-        for i, block in enumerate(self.res_blocks):
-            module_map[f'res_block_{i}'] = block
-        if self.leftover is not None:
-            module_map['leftover'] = self.leftover
-
-        handles = []
-        for name in layer_names:
-            if name not in module_map:
-                avail = list(module_map.keys())
-                raise ValueError(
-                    f"Layer '{name}' not found. "
-                    f"Available: {avail}"
-                )
-
-            def make_hook(n, is_output):
-                def hook(module, input, output):
-                    if is_output:
-                        val = output
-                    elif isinstance(module, ResBlock):
-                        val = output
-                    else:
-                        val = self.activation(output)
-                    if keep_gradients:
-                        self.activations[n] = val
-                    else:
-                        self.activations[n] = val.detach()
-                return hook
-
-            handle = module_map[name].register_forward_hook(
-                make_hook(name, name == 'output_proj')
-            )
-            handles.append(handle)
-
-        self.hook_handles = handles
-        return handles
-
-    def remove_hooks(self):
-        for handle in self.hook_handles:
-            handle.remove()
-        self.hook_handles = []
-        self.activations = {}
 
     def __repr__(self) -> str:
         layers_str = " -> ".join(map(str, self.layers))

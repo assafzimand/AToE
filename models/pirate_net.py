@@ -190,10 +190,6 @@ class PirateNet(nn.Module):
         # Output projection — always plain nn.Linear for output scale stability
         self.output_proj = nn.Linear(h, layers[-1])
 
-        # Empty NCC hooks interface (not supported for PirateNet)
-        self.activations: Dict[str, torch.Tensor] = {}
-        self.hook_handles = []
-
     def forward(self, x: torch.Tensor, return_activation: bool = False):
         """Forward pass.
 
@@ -226,17 +222,8 @@ class PirateNet(nn.Module):
         return self.hidden_dim
 
     def get_layer_names(self) -> List[str]:
-        """PirateNet does not support NCC hook analysis — returns empty list."""
+        """PirateNet has no named-layer dict — returns empty list."""
         return []
-
-    def register_ncc_hooks(self, layer_names, keep_gradients=False):
-        """NCC hooks not supported — no-op."""
-        return []
-
-    def remove_hooks(self):
-        """No-op."""
-        self.activations = {}
-        self.hook_handles = []
 
     def debug_state(self):
         """Return per-block alpha values and W1/W2/W3 weight L2-norms for diagnostics."""

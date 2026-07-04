@@ -64,7 +64,6 @@ def calculate_dataset_sizes(config: Dict) -> Dict[str, int]:
         'n_residual_eval': int(round(n_residual_train * sampling['eval_train_ratio'])),
         'n_initial_eval': int(round(n_initial_train * sampling['eval_train_ratio'])),
         'n_boundary_eval': int(round(n_boundary_train * sampling['eval_train_ratio'])),
-        'n_samples_ncc': int(round(n_residual_train * sampling['ncc_train_ratio'])),
     }
     
     # Print calculated values
@@ -83,7 +82,6 @@ def calculate_dataset_sizes(config: Dict) -> Dict[str, int]:
     logger.info(f"    n_residual_eval:  {sizes['n_residual_eval']:,}")
     logger.info(f"    n_initial_eval:   {sizes['n_initial_eval']:,}")
     logger.info(f"    n_boundary_eval:  {sizes['n_boundary_eval']:,}")
-    logger.info(f"    n_samples_ncc:    {sizes['n_samples_ncc']:,}")
     logger.info(f"{'='*60}\n")
     
     return sizes
@@ -177,83 +175,6 @@ def generate_and_save_datasets(config: Dict) -> None:
             pass  # No custom visualization for this problem
     else:
         logger.info(f"Evaluation data already exists: {eval_path}")
-
-    # Generate NCC data if missing (stratified)
-    ncc_path = dataset_dir / "ncc_data.pt"
-    if not ncc_path.exists():
-        logger.info(f"Generating stratified NCC data for {problem}...")
-        
-        # Generate large dataset for stratification (10x target size)
-        n_large = sizes['n_samples_ncc'] * 10
-        logger.info(f"  Generating large dataset ({n_large} samples) for stratification...")
-        large_data = solver_module.generate_dataset(
-            n_residual=n_large,
-            n_ic=0,  # NCC only needs residual points
-            n_bc=0,
-            device=device,
-            config=config
-        )
-        
-        # Determine output dimension
-        output_dim = large_data['h_gt'].shape[1]
-        
-        # Apply uniform sampling
-        logger.info(f"  Applying uniform sampling (target: {sizes['n_samples_ncc']} samples)...")
-        from utils.stratified_sampling import stratify_by_bins
-        ncc_data = stratify_by_bins(
-            large_data, 
-            bins=config['bins'],
-            output_dim=output_dim,
-            target_size=sizes['n_samples_ncc'],
-            device=device
-        )
-        
-        torch.save(ncc_data, ncc_path)
-        logger.info(f"  Saved {len(ncc_data['x'])} samples to {ncc_path}")
-        logger.info(f"  All {config['bins']**output_dim} classes should be represented")
-        
-        # Create visualizations
-        plot_path = dataset_dir / "ncc_data_visualization.png"
-        title = f"{problem} - NCC Data (Stratified)"
-        plot_dataset(ncc_data, str(plot_path), title=title)
-        
-        stats_path = dataset_dir / "ncc_data_statistics.png"
-        plot_dataset_statistics(ncc_data, str(stats_path))
-        
-        # Problem-specific NCC visualization
-        try:
-            from utils.problem_specific import get_visualization_module
-            _, _, visualize_ncc_dataset, _, _ = get_visualization_module(problem)
-            visualize_ncc_dataset(ncc_data, dataset_dir, config, 'ncc')
-        except ValueError:
-            pass  # No custom NCC visualization for this problem
-    else:
-        logger.info(f"NCC data already exists: {ncc_path}")
-
-    # Generate frequency grid if missing
-    freq_grid_path = dataset_dir / "frequency_grid.pt"
-    if not freq_grid_path.exists():
-        logger.info(f"Generating frequency grid for {problem}...")
-        from frequency_tracker.frequency_core import generate_frequency_grid
-        
-        x_grid, grid_shape, n_dims = generate_frequency_grid(config)
-        N_grid = x_grid.shape[0]
-        logger.info(f"  Grid shape: {grid_shape} ({N_grid:,} total points)")
-        
-        # Compute h_gt on grid using solver
-        logger.info(f"  Computing ground truth on grid...")
-        h_gt_grid = solver_module.evaluate_on_grid(x_grid, config)
-        
-        freq_data = {
-            'x_grid': x_grid,           # (N_grid, d_in)
-            'h_gt_grid': h_gt_grid,     # (N_grid, d_o)
-            'grid_shape': list(grid_shape),  # Convert tuple to list for JSON serialization
-            'n_dims': n_dims            # int
-        }
-        torch.save(freq_data, freq_grid_path)
-        logger.info(f"  Saved to {freq_grid_path}")
-    else:
-        logger.info(f"Frequency grid already exists: {freq_grid_path}")
 
 
 def _analytic_ic(problem: str, x: torch.Tensor, pc: Dict) -> torch.Tensor:

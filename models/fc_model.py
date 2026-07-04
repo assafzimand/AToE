@@ -1,10 +1,9 @@
-"""Fully-connected neural network with named layers and NCC hooks."""
+"""Fully-connected neural network with named layers."""
 
 import torch
 import torch.nn as nn
 from functools import partial
 from typing import List, Dict, Optional
-from torch.utils.hooks import RemovableHandle
 from models.rwf_layer import RWFLinear
 from models.fourier_features import FourierFeatureEmbedding, PeriodicSpatialFourierEmbedding
 
@@ -14,9 +13,9 @@ class FCNet(nn.Module):
     Fully-connected neural network for PINN problems.
 
     Features:
-    - Named layers for NCC analysis (layer_1, layer_2, ...)
-    - Hook registration for activation capture
+    - Named layers (layer_1, layer_2, ...)
     - Configurable architecture and activation function
+    - Optional Fourier-feature input embedding and RWF hidden layers
     """
 
     def __init__(self, layers: List[int], activation: str, config: Dict,
@@ -106,12 +105,6 @@ class FCNet(nn.Module):
             LinearCls = nn.Linear if is_output_layer else LinearCls_hidden
             self.network[layer_name] = LinearCls(in_dim, out_dim)
 
-        # Storage for activations captured by hooks
-        self.activations: Dict[str, torch.Tensor] = {}
-
-        # Storage for hook handles
-        self.hook_handles: List[RemovableHandle] = []
-
     def _get_activation(self, activation: str) -> nn.Module:
         """Get activation function by name."""
         activations = {
@@ -172,86 +165,6 @@ class FCNet(nn.Module):
     def get_activation_dim(self) -> int:
         """Size of the last hidden layer (used by ANT to determine child input dim)."""
         return self.layers[-2]
-
-    def register_ncc_hooks(
-        self,
-        layer_names: List[str],
-        keep_gradients: bool = False
-    ) -> List[RemovableHandle]:
-        """
-        Register forward hooks to capture activations for NCC analysis.
-
-        Args:
-            layer_names: List of layer names to hook (e.g., ['layer_1',
-                        'layer_2'])
-            keep_gradients: If True, don't detach activations (for derivatives
-                          tracking). Default False for NCC/probes.
-
-        Returns:
-            List of RemovableHandle objects for hook management
-
-        Example:
-            handles = model.register_ncc_hooks(['layer_1', 'layer_2'])
-            # ... run forward pass ...
-            activations = model.activations  # {'layer_1': tensor, ...}
-            # ... cleanup ...
-            for handle in handles:
-                handle.remove()
-        """
-        # Clear previous hooks
-        self.remove_hooks()
-        self.activations = {}
-
-        handles = []
-
-        for layer_name in layer_names:
-            if layer_name not in self.network:
-                raise ValueError(
-                    f"Layer '{layer_name}' not found. "
-                    f"Available: {list(self.network.keys())}"
-                )
-
-            # Create hook function for this layer
-            def make_hook(name):
-                def hook(module, input, output):
-                    # Store post-activation values
-                    self.activations[name] = output.detach()
-                return hook
-
-            # Register hook on the layer
-            # We want post-activation, so we hook after linear + activation
-            # We need to hook the activation, not the linear layer
-            # But since we apply activation explicitly, we hook the output
-            # after activation in the forward pass
-
-            # Actually, let's hook at the Linear layer and apply
-            # activation in the hook
-            def make_hook_with_activation(name):
-                def hook(module, input, output):
-                    # Apply activation and store
-                    if name != list(self.network.keys())[-1]:
-                        # Not the output layer - apply activation
-                        activated = self.activation(output)
-                        self.activations[name] = activated if keep_gradients else activated.detach()
-                    else:
-                        # Output layer - no activation
-                        self.activations[name] = output if keep_gradients else output.detach()
-                return hook
-
-            handle = self.network[layer_name].register_forward_hook(
-                make_hook_with_activation(layer_name)
-            )
-            handles.append(handle)
-
-        self.hook_handles = handles
-        return handles
-
-    def remove_hooks(self):
-        """Remove all registered hooks."""
-        for handle in self.hook_handles:
-            handle.remove()
-        self.hook_handles = []
-        self.activations = {}
 
     def get_layer_names(self) -> List[str]:
         """Get list of all layer names in the network."""
