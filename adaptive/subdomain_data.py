@@ -40,7 +40,88 @@ KIND_NAMES = {
 ADJACENCY_TOL = 1e-8
 
 
-def build_subdomain_data(
+def _face_counts(cfg: Dict) -> tuple:
+    """Resolve (n_ic_per_face, n_bc_per_face) from the sampling config."""
+    sampling = cfg.get('sampling', {})
+    n_res_total = sampling.get('n_residual_train', 10000)
+    n_ic_per_face = sampling.get('n_initial_train')
+    if n_ic_per_face is None:
+        ic_ratio = sampling.get('initial_train_ratio', 0.026)
+        n_ic_per_face = round(n_res_total * ic_ratio)
+    n_bc_per_face = sampling.get('n_boundary_train')
+    if n_bc_per_face is None:
+        bc_ratio = sampling.get('boundary_train_ratio', 0.026)
+        n_bc_per_face = round(n_res_total * bc_ratio)
+    return max(1, int(n_ic_per_face)), max(1, int(n_bc_per_face))
+
+
+def sample_subdomain_residuals(
+    new_expert_indices: List[int],
+    regions,
+    cfg: Dict,
+    device: torch.device,
+    seed: int = 0,
+) -> Dict[str, torch.Tensor]:
+    """Draw fresh residual collocation points tagged per owning expert.
+
+    A global uniform draw over the domain is filtered into each expert's
+    region, so the point density matches a plain uniform collocation set.
+    This is the only part of the split dataset that changes on resample.
+    """
+    torch.manual_seed(seed)
+
+    problem = cfg['problem']
+    pc = cfg[problem]
+    spatial_dim = pc['spatial_dim']
+    spatial_domain = pc['spatial_domain']
+    t_min_global, t_max_global = pc['temporal_domain']
+    output_dim = pc['output_dim']
+    n_res_total = cfg.get('sampling', {}).get('n_residual_train', 10000)
+
+    x_g = torch.zeros(n_res_total, spatial_dim, device=device)
+    t_g = torch.zeros(n_res_total, 1, device=device)
+    for d in range(spatial_dim):
+        lo, hi = spatial_domain[d]
+        x_g[:, d] = torch.rand(n_res_total, device=device) * (hi - lo) + lo
+    t_g[:, 0] = (torch.rand(n_res_total, device=device)
+                 * (t_max_global - t_min_global) + t_min_global)
+
+    xs, ts, gs, eids, ks, bc_fids = [], [], [], [], [], []
+    for eidx in new_expert_indices:
+        region = regions[eidx]
+        bl, bu = region.bounds_lower, region.bounds_upper
+
+        mask = torch.ones(n_res_total, dtype=torch.bool, device=device)
+        for d in range(spatial_dim):
+            mask &= (x_g[:, d] >= bl[d]) & (x_g[:, d] <= bu[d])
+        mask &= (t_g[:, 0] >= bl[spatial_dim]) & (t_g[:, 0] <= bu[spatial_dim])
+
+        n = mask.sum().item()
+        if n > 0:
+            xs.append(x_g[mask])
+            ts.append(t_g[mask])
+            gs.append(torch.zeros(n, output_dim, device=device))
+            eids.append(torch.full((n,), eidx, dtype=torch.long, device=device))
+            ks.append(torch.full((n,), KIND_RESIDUAL, dtype=torch.long, device=device))
+            bc_fids.append(torch.full((n,), -1, dtype=torch.long, device=device))
+
+    if not xs:
+        return _empty(spatial_dim, output_dim, device)
+
+    n_pts = sum(x.shape[0] for x in xs)
+    return {
+        'x': torch.cat(xs, dim=0),
+        't': torch.cat(ts, dim=0),
+        'h_gt': torch.cat(gs, dim=0),
+        'expert_id': torch.cat(eids, dim=0),
+        'kind': torch.cat(ks, dim=0),
+        'bc_face_id': torch.cat(bc_fids, dim=0),
+        'cont_neighbor': torch.full((n_pts,), -1, dtype=torch.long, device=device),
+        'cont_dim': torch.full((n_pts,), -1, dtype=torch.long, device=device),
+    }
+
+
+def build_subdomain_static(
     model: torch.nn.Module,
     new_expert_indices: List[int],
     regions,
@@ -49,18 +130,12 @@ def build_subdomain_data(
     seed: int = 0,
     interface_model: torch.nn.Module = None,
 ) -> Dict[str, torch.Tensor]:
-    """Build per-expert dataset for split-loss training.
+    """Build the static (non-residual) part of the split dataset.
 
-    Returns dict with keys ``x``, ``t``, ``h_gt``,
-    ``expert_id``, ``kind``, ``bc_face_id``, ``cont_neighbor``, ``cont_dim``.
-
-    ``bc_face_id`` encodes which spatial boundary face
-    for periodic pairing: ``dim * 2 + side`` where
-    side=0 for lower, side=1 for upper.
-
-    For periodic BC, left (side=0) and right (side=1) points
-    on the same dimension share identical t-values to enable
-    cross-expert pairing.
+    IC/BC/interface faces, their minted targets, and the O(K²)
+    continuity-neighbor pairs depend only on the regions and the frozen
+    snapshot — both constant within a training segment — so this is built
+    ONCE per segment and reused across resamples.
     """
     torch.manual_seed(seed)
 
@@ -73,27 +148,13 @@ def build_subdomain_data(
     t_max_global = temporal_domain[1]
     output_dim = pc['output_dim']
 
-    sampling = cfg.get('sampling', {})
-    n_res_total = sampling.get('n_residual_train', 10000)
-    # Allow explicit override via sampling.n_initial_train / n_boundary_train
-    # (absolute counts); falls back to the ratio-based calculation otherwise.
-    n_ic_per_face = sampling.get('n_initial_train')
-    if n_ic_per_face is None:
-        ic_ratio = sampling.get('initial_train_ratio', 0.026)
-        n_ic_per_face = round(n_res_total * ic_ratio)
-    n_bc_per_face = sampling.get('n_boundary_train')
-    if n_bc_per_face is None:
-        bc_ratio = sampling.get('boundary_train_ratio', 0.026)
-        n_bc_per_face = round(n_res_total * bc_ratio)
-    n_ic_per_face = max(1, int(n_ic_per_face))
-    n_bc_per_face = max(1, int(n_bc_per_face))
+    n_ic_per_face, n_bc_per_face = _face_counts(cfg)
 
-    num_experts = len(new_expert_indices)
-    if num_experts == 0:
+    if len(new_expert_indices) == 0:
         return _empty(spatial_dim, output_dim, device)
 
-    # Fix 3+4: Generate shared t-values per dimension (full global range)
-    # Each expert will filter to its own temporal range
+    # Shared t-values per dimension (full global range); each expert filters
+    # to its own temporal range so periodic pairing lines up across experts.
     bc_t_global = {}
     for d in range(spatial_dim):
         bc_t_global[d] = (
@@ -101,46 +162,7 @@ def build_subdomain_data(
             * (t_max_global - t_min_global) + t_min_global
         )
 
-    # ── Residual: global uniform, filter into regions ──
-    x_g = torch.zeros(n_res_total, spatial_dim, device=device)
-    t_g = torch.zeros(n_res_total, 1, device=device)
-    for d in range(spatial_dim):
-        lo, hi = spatial_domain[d]
-        x_g[:, d] = (torch.rand(n_res_total, device=device)
-                      * (hi - lo) + lo)
-    t_g[:, 0] = (torch.rand(n_res_total, device=device)
-                  * (t_max_global - t_min_global) + t_min_global)
-
     xs, ts, gs, eids, ks, bc_fids = [], [], [], [], [], []
-
-    for eidx in new_expert_indices:
-        region = regions[eidx]
-        bl, bu = region.bounds_lower, region.bounds_upper
-
-        mask = torch.ones(
-            n_res_total, dtype=torch.bool, device=device
-        )
-        for d in range(spatial_dim):
-            mask &= ((x_g[:, d] >= bl[d])
-                      & (x_g[:, d] <= bu[d]))
-        mask &= ((t_g[:, 0] >= bl[spatial_dim])
-                  & (t_g[:, 0] <= bu[spatial_dim]))
-
-        n = mask.sum().item()
-        if n > 0:
-            xs.append(x_g[mask])
-            ts.append(t_g[mask])
-            gs.append(torch.zeros(n, output_dim, device=device))
-            eids.append(torch.full(
-                (n,), eidx, dtype=torch.long, device=device
-            ))
-            ks.append(torch.full(
-                (n,), KIND_RESIDUAL, dtype=torch.long,
-                device=device
-            ))
-            bc_fids.append(torch.full(
-                (n,), -1, dtype=torch.long, device=device
-            ))
 
     # ── IC / BC faces per expert ──
     for eidx in new_expert_indices:
@@ -168,20 +190,18 @@ def build_subdomain_data(
         cont_neighbors, cont_dims,
     )
 
-    # ── Concatenate main data ──
     x_cat = torch.cat(xs, dim=0)
     t_cat = torch.cat(ts, dim=0)
     h_gt_cat = torch.cat(gs, dim=0)
     eid_cat = torch.cat(eids, dim=0)
     kind_cat = torch.cat(ks, dim=0)
     bc_fid_cat = torch.cat(bc_fids, dim=0)
-    
-    # Initialize cont_neighbor and cont_dim for main data (all -1)
+
     n_main = x_cat.shape[0]
     cont_neighbor_main = torch.full((n_main,), -1, dtype=torch.long, device=device)
     cont_dim_main = torch.full((n_main,), -1, dtype=torch.long, device=device)
 
-    # ── Mint interface targets ──
+    # ── Mint interface targets from the frozen field ──
     # interface_model overrides which frozen field defines the interface targets.
     # For AToE-Leaves it is the base (root), so targets are good root predictions
     # even when experts differ in shape from the base; None falls back to `model`
@@ -191,18 +211,14 @@ def build_subdomain_data(
     iface_mask = (kind_cat == KIND_INTERFACE)
     if iface_mask.sum() > 0:
         with torch.no_grad():
-            xt_if = torch.cat(
-                [x_cat[iface_mask], t_cat[iface_mask]], dim=1
-            )
+            xt_if = torch.cat([x_cat[iface_mask], t_cat[iface_mask]], dim=1)
             h_gt_cat[iface_mask] = iface_src(xt_if)
 
     # x-face interfaces (KIND_INTERFACE_BC, weighted by w_bc)
     iface_bc_mask = (kind_cat == KIND_INTERFACE_BC)
     if iface_bc_mask.sum() > 0:
         with torch.no_grad():
-            xt_if_bc = torch.cat(
-                [x_cat[iface_bc_mask], t_cat[iface_bc_mask]], dim=1
-            )
+            xt_if_bc = torch.cat([x_cat[iface_bc_mask], t_cat[iface_bc_mask]], dim=1)
             h_gt_cat[iface_bc_mask] = iface_src(xt_if_bc)
     _src = 'base(root)' if interface_model is not None else 'composed'
     logger.info(f"[SplitData] interface targets minted from {_src} model")
@@ -217,34 +233,24 @@ def build_subdomain_data(
             f"unique face_ids: {unique_fids}"
         )
 
-    # ── Concatenate continuity data (if any) ──
+    # ── Append continuity data (if any) ──
     if cont_xs:
         cont_x_cat = torch.cat(cont_xs, dim=0)
-        cont_t_cat = torch.cat(cont_ts, dim=0)
-        cont_g_cat = torch.cat(cont_gs, dim=0)
-        cont_eid_cat = torch.cat(cont_eids, dim=0)
-        cont_kind_cat = torch.cat(cont_ks, dim=0)
-        cont_neighbor_cat = torch.cat(cont_neighbors, dim=0)
-        cont_dim_cat = torch.cat(cont_dims, dim=0)
-        
-        # BC face id is -1 for continuity points
-        cont_bc_fid_cat = torch.full(
-            (cont_x_cat.shape[0],), -1, dtype=torch.long, device=device
-        )
-        
-        # Merge main + continuity
+        n_cont = cont_x_cat.shape[0]
         x_cat = torch.cat([x_cat, cont_x_cat], dim=0)
-        t_cat = torch.cat([t_cat, cont_t_cat], dim=0)
-        h_gt_cat = torch.cat([h_gt_cat, cont_g_cat], dim=0)
-        eid_cat = torch.cat([eid_cat, cont_eid_cat], dim=0)
-        kind_cat = torch.cat([kind_cat, cont_kind_cat], dim=0)
-        bc_fid_cat = torch.cat([bc_fid_cat, cont_bc_fid_cat], dim=0)
-        cont_neighbor_main = torch.cat([cont_neighbor_main, cont_neighbor_cat], dim=0)
-        cont_dim_main = torch.cat([cont_dim_main, cont_dim_cat], dim=0)
-        
-        logger.info(
-            f"[SplitData] continuity points: {cont_x_cat.shape[0]}"
-        )
+        t_cat = torch.cat([t_cat, torch.cat(cont_ts, dim=0)], dim=0)
+        h_gt_cat = torch.cat([h_gt_cat, torch.cat(cont_gs, dim=0)], dim=0)
+        eid_cat = torch.cat([eid_cat, torch.cat(cont_eids, dim=0)], dim=0)
+        kind_cat = torch.cat([kind_cat, torch.cat(cont_ks, dim=0)], dim=0)
+        bc_fid_cat = torch.cat([
+            bc_fid_cat,
+            torch.full((n_cont,), -1, dtype=torch.long, device=device),
+        ], dim=0)
+        cont_neighbor_main = torch.cat(
+            [cont_neighbor_main, torch.cat(cont_neighbors, dim=0)], dim=0)
+        cont_dim_main = torch.cat(
+            [cont_dim_main, torch.cat(cont_dims, dim=0)], dim=0)
+        logger.info(f"[SplitData] continuity points: {n_cont}")
 
     return {
         'x': x_cat,
@@ -256,6 +262,47 @@ def build_subdomain_data(
         'cont_neighbor': cont_neighbor_main,
         'cont_dim': cont_dim_main,
     }
+
+
+def build_subdomain_data(
+    model: torch.nn.Module,
+    new_expert_indices: List[int],
+    regions,
+    cfg: Dict,
+    device: torch.device,
+    seed: int = 0,
+    interface_model: torch.nn.Module = None,
+    static: Dict[str, torch.Tensor] = None,
+) -> Dict[str, torch.Tensor]:
+    """Build per-expert dataset for split-loss training.
+
+    Returns dict with keys ``x``, ``t``, ``h_gt``,
+    ``expert_id``, ``kind``, ``bc_face_id``, ``cont_neighbor``, ``cont_dim``.
+
+    ``bc_face_id`` encodes which spatial boundary face
+    for periodic pairing: ``dim * 2 + side`` where
+    side=0 for lower, side=1 for upper.
+
+    Args:
+        static: Optional pre-built static part (from
+            :func:`build_subdomain_static`). Pass the cached value on
+            resample so only residual interiors are redrawn; when None the
+            static part is built here.
+    """
+    problem = cfg['problem']
+    pc = cfg[problem]
+    if len(new_expert_indices) == 0:
+        return _empty(pc['spatial_dim'], pc['output_dim'], device)
+
+    residuals = sample_subdomain_residuals(
+        new_expert_indices, regions, cfg, device, seed=seed)
+
+    if static is None:
+        static = build_subdomain_static(
+            model, new_expert_indices, regions, cfg, device,
+            seed=seed, interface_model=interface_model)
+
+    return {k: torch.cat([residuals[k], static[k]], dim=0) for k in residuals}
 
 
 # ── Helpers ─────────────────────────────────────────────

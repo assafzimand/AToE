@@ -200,7 +200,7 @@ def train_orchestrator(ctx: TrainingContext) -> None:
     _set_trainable(model, 'leaves')
 
     if split_enabled:
-        _run_split_segment(ctx, 'phase3', cfg['epochs'], cfg, variant='AToE-Leaves')
+        _run_split_segment(ctx, 'phase3', cfg['epochs'], cfg)
     else:
         res = _train_segment(ctx, 'phase3', cfg['epochs'], cfg)
 

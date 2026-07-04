@@ -37,7 +37,9 @@ from losses.causal_weighting import advance_causal_schedule, create_causal_state
 from losses.lra import LRAWeights
 import losses.ks_loss as _ks_loss_module
 from losses.split_loss import build_split_loss
-from adaptive.subdomain_data import build_subdomain_data, KIND_NAMES
+from adaptive.subdomain_data import (
+    build_subdomain_data, build_subdomain_static, KIND_NAMES,
+)
 
 from trainer.setup import _create_split_dataloader
 from trainer.epoch_loop import _train_segment
@@ -49,7 +51,6 @@ def _run_split_segment(
     epoch_budget: int,
     segment_cfg: Dict,
     *,
-    variant: str,
     lr_override=None,
     min_epochs_override=None,
 ) -> SegmentResult:
@@ -61,8 +62,8 @@ def _run_split_segment(
     model = ctx.model
     cfg = ctx.cfg
 
-    # Fix 5: Snapshot model BEFORE training for stable interface targets
-    # This frozen snapshot is used to mint targets for interface points
+    # Snapshot the model BEFORE training so interface targets stay stable
+    # across the whole segment (and across resamples).
     model_snapshot = copy.deepcopy(model)
     model_snapshot.eval()
     for p in model_snapshot.parameters():
@@ -84,11 +85,18 @@ def _run_split_segment(
     interface_model = model_snapshot.base_model
     logger.info("[SplitLoss] Interface targets minted from frozen base (root).")
 
-    # Use snapshot for interface target minting
+    # Static faces (IC/BC/interface/continuity + minted targets) are constant
+    # within the segment: built once here, reused on every resample.
+    split_static = build_subdomain_static(
+        model_snapshot, new_expert_indices, regions_list, cfg,
+        ctx.device, seed=ctx.epoch,
+        interface_model=interface_model,
+    )
     split_data = build_subdomain_data(
         model_snapshot, new_expert_indices, regions_list, cfg,
         ctx.device, seed=ctx.epoch,
         interface_model=interface_model,
+        static=split_static,
     )
 
     _log_subdomain_summary(new_expert_indices, regions_list, split_data)
@@ -114,7 +122,7 @@ def _run_split_segment(
 
     # Build split loss with original loss as fallback for eval batches
     split_loss = build_split_loss(
-        model, cfg, variant=variant, orig_loss_fn=orig_loss_fn,
+        model, cfg, orig_loss_fn=orig_loss_fn,
     )
 
     # Swap to split data/loss
@@ -128,8 +136,8 @@ def _run_split_segment(
         'model_snapshot': model_snapshot,  # frozen snapshot reused on resample
         'new_expert_indices': new_expert_indices,
         'regions': regions_list,
-        'variant': variant,
         'interface_model': interface_model,  # frozen base for interface targets
+        'static': split_static,  # cached faces + targets; resample redraws residuals only
     }
 
     res = _train_segment(ctx, segment_name, epoch_budget, segment_cfg,

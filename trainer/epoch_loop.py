@@ -231,12 +231,14 @@ def _train_segment(
         if resample_every > 0 and epoch > 1 and (epoch - 1) % resample_every == 0 and allow_resample_optimizer:
             resample_seed = base_seed + epoch
             if _split_ctx is not None:
-                logger.info(f"  [Resample-Split] Rebuilding subdomain data at epoch {epoch}")
-                # Use the frozen snapshot for stable interface targets
+                logger.info(f"  [Resample-Split] Redrawing residual interiors at epoch {epoch}")
+                # Static faces + interface targets are cached for the segment;
+                # only the residual collocation points are redrawn.
                 train_data = build_subdomain_data(
                     _split_ctx['model_snapshot'], _split_ctx['new_expert_indices'],
                     _split_ctx['regions'], cfg, device, seed=resample_seed,
                     interface_model=_split_ctx.get('interface_model'),
+                    static=_split_ctx.get('static'),
                 )
                 ctx.train_data = train_data
                 torch.set_default_device(None)
@@ -279,6 +281,8 @@ def _train_segment(
                         run_dir, epoch, cfg,
                         causal_state=causal_state,
                     )
+                # In-place mutation: the existing DataLoader's TensorDataset holds
+                # references to these same tensors, so no loader rebuild is needed.
                 train_data = resample_residual_inplace(
                     train_data, cfg, device,
                     resample_seed=resample_seed,
@@ -287,8 +291,6 @@ def _train_segment(
                     epoch=epoch,
                     causal_state=causal_state,
                 )
-                torch.set_default_device(None)
-                train_loader = _create_dataloader(train_data, cfg['batch_size'], shuffle=True)
                 metrics['resample_events'].append({
                     'epoch': epoch,
                     'action': 'resampled',
