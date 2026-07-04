@@ -12,8 +12,8 @@ set -e
 # there when you restart the instance.
 #
 # Usage:
-#   screen -S ncc_experiment
-#   bash ~/NCC-PINN/AWS_scripts/run_and_terminate.sh
+#   screen -S atoe_experiment
+#   bash ~/AToE/AWS_scripts/run_and_terminate.sh [repo_dir]
 #   # Detach with Ctrl+A, D - safe to disconnect!
 #
 # After experiments complete:
@@ -21,8 +21,16 @@ set -e
 #   2. SSH in and download results with download_AWS_results.ps1
 # =============================================================================
 
-REPO_DIR="$HOME/NCC-PINN"
-VENV_DIR="$HOME/.venv_ncc_pinn"
+# Repo dir: first argument, else first existing of ~/AToE, ~/NCC-PINN
+if [ -n "$1" ]; then
+    REPO_DIR="$1"
+elif [ -d "$HOME/AToE" ]; then
+    REPO_DIR="$HOME/AToE"
+else
+    REPO_DIR="$HOME/NCC-PINN"
+fi
+REPO_NAME="$(basename "$REPO_DIR")"
+VENV_DIR="$HOME/.venv_$(echo "$REPO_NAME" | tr '[:upper:]-' '[:lower:]_')"
 
 # === Colors for output ===
 RED='\033[0;31m'
@@ -50,7 +58,7 @@ log_error() {
 
 # === Main script ===
 echo "============================================================================="
-echo "  NCC-PINN: Run Experiments and Auto-Shutdown"
+echo "  $REPO_NAME: Run Experiments and Auto-Shutdown"
 echo "============================================================================="
 echo ""
 

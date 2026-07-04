@@ -1,18 +1,44 @@
 #!/usr/bin/env bash
 set -e
 
-# Helper script to prepare an EC2 GPU instance for running NCC-PINN.
+# Helper script to prepare an EC2 GPU instance for running AToE / NCC-PINN.
 # Run this *on the EC2 machine* after you SSH in.
 #
 # Usage:
-#   bash ~/NCC-PINN/AWS_scripts/prepare_AWS_run.sh
+#   bash ~/AToE/AWS_scripts/prepare_AWS_run.sh
 #   # or if copied elsewhere:
 #   bash prepare_AWS_run.sh
 
+# === Repo selection ===
+GITHUB_USER="assafzimand"
+REPOS=("AToE" "NCC-PINN")
+
+echo "=== Select repository ==="
+for i in "${!REPOS[@]}"; do
+  if [ "$i" -eq 0 ]; then
+    echo "  $((i+1))) ${REPOS[$i]} (default)"
+  else
+    echo "  $((i+1))) ${REPOS[$i]}"
+  fi
+done
+
+echo
+read -p "Enter repo number [1]: " REPO_CHOICE
+if [ -z "$REPO_CHOICE" ]; then
+  REPO_CHOICE=1
+fi
+if ! [[ "$REPO_CHOICE" =~ ^[0-9]+$ ]] || [ "$REPO_CHOICE" -lt 1 ] || [ "$REPO_CHOICE" -gt ${#REPOS[@]} ]; then
+  echo "Invalid choice. Using repo: ${REPOS[0]}"
+  REPO_CHOICE=1
+fi
+SELECTED_REPO="${REPOS[$((REPO_CHOICE-1))]}"
+echo
+echo "Selected repo: $SELECTED_REPO"
+
 # === Configuration ===
-REPO_URL="https://github.com/assafzimand/NCC-PINN.git"
-REPO_DIR="$HOME/NCC-PINN"
-VENV_DIR="$HOME/.venv_ncc_pinn"
+REPO_URL="https://github.com/${GITHUB_USER}/${SELECTED_REPO}.git"
+REPO_DIR="$HOME/${SELECTED_REPO}"
+VENV_DIR="$HOME/.venv_$(echo "$SELECTED_REPO" | tr '[:upper:]-' '[:lower:]_')"
 
 echo "=== Updating apt and installing dependencies (python3, venv, git, git-lfs, screen) ==="
 sudo apt update
@@ -33,7 +59,7 @@ echo "=== Activating virtual environment ==="
 source "$VENV_DIR/bin/activate"
 
 echo
-echo "=== Cloning or updating NCC-PINN repo ==="
+echo "=== Cloning or updating $SELECTED_REPO repo ==="
 if [ ! -d "$REPO_DIR" ]; then
   git clone "$REPO_URL" "$REPO_DIR"
 fi
@@ -129,7 +155,7 @@ echo "To list all screen sessions:"
 echo "  screen -ls"
 echo
 echo "Or use run_and_terminate.sh (includes auto-shutdown):"
-echo "  bash ~/NCC-PINN/AWS_scripts/run_and_terminate.sh"
+echo "  bash $REPO_DIR/AWS_scripts/run_and_terminate.sh"
 echo
 echo "Or run directly without screen (will stop if you disconnect):"
 echo "  export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
