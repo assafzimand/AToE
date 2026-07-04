@@ -610,12 +610,15 @@ def _load_pretrained_base(model: nn.Module, ckpt_path: str, cfg: Dict) -> None:
     if not p.exists():
         raise FileNotFoundError(
             f"pretrained_base_checkpoint not found: {ckpt_path}")
-    # Trusted local checkpoint: weights_only=False (PyTorch 2.6+ defaults to True,
-    # which rejects the numpy scalars stored in the saved config/metrics).
+    # Converted root checkpoints are plain tensor dicts (safe load); legacy
+    # checkpoints with pickled config/metrics need weights_only=False.
     try:
+        ckpt = torch.load(p, map_location='cpu', weights_only=True)
+    except Exception:
+        logger.info("  [PretrainedBase] Not a plain state-dict checkpoint; "
+                    "loading legacy format (weights_only=False). Consider "
+                    "converting with scripts/convert_root_checkpoint.py.")
         ckpt = torch.load(p, map_location='cpu', weights_only=False)
-    except TypeError:  # older torch without the weights_only kwarg
-        ckpt = torch.load(p, map_location='cpu')
 
     adaptive_state = ckpt.get('adaptive_state') if isinstance(ckpt, dict) else None
     if adaptive_state and 'base_model' in adaptive_state:

@@ -59,6 +59,12 @@ class LRAWeights:
         batch: Dict[str, torch.Tensor],
     ) -> None:
         components = loss_fn(model, batch, return_components=True)
+        if any(isinstance(v, dict) for v in components.values()):
+            # Split-loss batches return per-expert nested dicts; LRA balances
+            # the global composed loss only, so skip the update here.
+            return
+        # 'total' is the weighted sum of the other terms, not a component
+        components = {k: v for k, v in components.items() if k != 'total'}
         trainable_params = [p for p in model.parameters() if p.requires_grad]
 
         grad_norms: Dict[str, float] = {}
@@ -95,13 +101,13 @@ class LRAWeights:
         model.zero_grad()
 
         if self.scheme == 'grad_norm':
-            mean_norm = sum(grad_norms.values()) / len(grad_norms)
+            # jaxpi formula: w_i = (Σ_j ‖∇L_j‖) / ‖∇L_i‖; epsilon prevents
+            # division-by-zero when a term is already well-satisfied
+            # (e.g. IC after LS-init).
+            sum_norm = sum(grad_norms.values())
             for key in grad_norms:
-                # epsilon prevents division-by-zero when a loss term is already
-                # well-satisfied (e.g. IC after LS-init). Matches jaxpi formula:
-                # w = mean_norm / (norm + epsilon * mean_norm)
                 epsilon = self.scheme_cfg['epsilon']
-                target = mean_norm / (grad_norms[key] + epsilon * mean_norm)
+                target = sum_norm / (grad_norms[key] + epsilon * sum_norm)
                 self.weights[key] = (
                     (1.0 - self.alpha) * self.weights.get(key, 1.0)
                     + self.alpha * target

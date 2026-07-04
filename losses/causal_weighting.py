@@ -66,7 +66,8 @@ def advance_causal_schedule(causal_state: Optional[Dict]) -> bool:
     if causal_state['min_weight'] > causal_state['threshold']:
         causal_state['schedule_idx'] = idx + 1
         causal_state['tol'] = float(schedule[idx + 1])
-        causal_state['min_weight'] = 0.0
+        # min_weight is reset by the trainer after the advance check
+        # (single owner: the per-epoch loop).
         return True
     return False
 
