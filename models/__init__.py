@@ -1,8 +1,6 @@
-"""Neural network models for NCC-PINN framework."""
+"""Neural network models for the AToE framework."""
 
 from models.fc_model import FCNet
-from models.atoe import AToE
 from models.atoe_leaves import AToELeaves
-from models.ant import ANT
 
-__all__ = ['FCNet', 'AToE', 'AToELeaves', 'ANT']
+__all__ = ['FCNet', 'AToELeaves']

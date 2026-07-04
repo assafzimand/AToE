@@ -88,9 +88,7 @@ def _find_run_dirs(batch_path):
 
 def _build_model(cfg):
     from models.network_factory import create_network
-    from models.atoe import AToE
     from models.atoe_leaves import AToELeaves
-    from models.ant import ANT
 
     architecture = cfg['base_architecture']
     activation = cfg.get('activation', 'tanh')
@@ -98,14 +96,7 @@ def _build_model(cfg):
     is_adaptive = adaptive_cfg.get('enabled', False)
 
     if is_adaptive:
-        model_type = cfg.get('model', 'AToE')
-        if model_type == 'ANT':
-            return ANT(architecture, activation, cfg, adaptive_cfg)
-        elif model_type == 'AToELeaves':
-            return AToELeaves(
-                architecture, activation, cfg, adaptive_cfg)
-        else:
-            return AToE(architecture, activation, cfg, adaptive_cfg)
+        return AToELeaves(architecture, activation, cfg, adaptive_cfg)
     expert_type = adaptive_cfg.get('expert_type', 'mlp')
     return create_network(architecture, activation, cfg,
                           is_base=True, expert_type=expert_type)

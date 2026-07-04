@@ -1,20 +1,14 @@
 """Per-expert split loss for PDD-style subdomain training.
 
-Each expert is trained on its OWN output (no PoU), with:
+Each leaf expert is trained on its OWN output (no PoU), with:
   - PDE residual inside its subdomain
-  - Dirichlet matching to frozen composed model on interior
-    faces (interface)
+  - Dirichlet matching to the frozen root on interior faces (interface)
   - True IC/BC on faces coinciding with global domain bounds
   - Neighbor-to-neighbor continuity on shared interior faces
 
 For Allen-Cahn with periodic BC, global boundary points are
 paired across experts (left/right at same t), penalizing both
 value and spatial derivative mismatches.
-
-When additive=True:
-  - Residual is computed on root + u_j (root frozen but differentiable)
-  - Interface/IC/BC targets are 0 (leaves are corrections)
-  - Continuity still enforces agreement between neighbors
 
 Total loss = SUM over experts of:
     w_res*L_res + w_ic*L_ic + w_bc*L_bc + w_cont*L_cont
@@ -37,28 +31,16 @@ def build_split_loss(
     model,
     cfg: Dict,
     *,
-    variant: str,
     orig_loss_fn: Callable = None,
-    additive: bool = False,
-    current_level: int = None,
 ) -> Callable:
     """Build a split loss for per-expert subdomain training.
 
     Returns a callable ``loss_fn(model, batch)`` compatible
     with ``_train_segment``.
-    
+
     If ``orig_loss_fn`` is provided, batches missing split-specific
     keys (expert_id, kind) will fall back to the original loss
     (used for eval batches).
-    
-    When additive=True:
-    - Residual is computed on frozen_composition + u_j
-    - For AToE: frozen_composition = u_0 + Σ_{ℓ<current_level} PoU_ℓ
-    - Interface/IC/BC targets are 0 (handled by subdomain data builder)
-    
-    Args:
-        current_level: For AToE per-level training, the depth being trained.
-            Used to compute frozen composition up to level-1.
     """
     problem = cfg['problem']
     pc = cfg[problem]
@@ -73,9 +55,6 @@ def build_split_loss(
 
     pde_res_fn, deriv_fn = _import_pde_helpers(problem)
     pde_params = _get_pde_params(problem, pc)
-    
-    if additive:
-        logger.info("[SplitLoss] additive=True: residual on root+u_j, targets=0")
 
     per_expert_history: Dict[int, Dict[str, list]] = {}
     # Per-epoch residual cache: list of (x, t, r²) tuples (detached CPU tensors).
@@ -122,9 +101,7 @@ def build_split_loss(
                 kinds[emask],
                 pde_res_fn, deriv_fn, pde_params,
                 w_res, w_ic, w_bc, is_allen_cahn,
-                variant, device,
-                additive=additive,
-                current_level=current_level,
+                device,
                 residual_cache=(
                     residual_cache
                     if split_loss_fn._cache_residuals else None
@@ -140,7 +117,6 @@ def build_split_loss(
             bc_loss_contrib = _compute_periodic_bc_loss(
                 model, x, t, expert_ids, kinds,
                 bc_face_ids, deriv_fn, device,
-                additive=additive,
             )
             if bc_loss_contrib.item() > 0:
                 logger.debug(
@@ -173,24 +149,16 @@ def build_split_loss(
     split_loss_fn._per_expert_history = per_expert_history
     split_loss_fn._residual_cache = residual_cache
     split_loss_fn._cache_residuals = False  # trainer sets True when a plot is due
-    split_loss_fn._variant = variant
     return split_loss_fn
 
 
 def _compute_expert_loss(
     model, expert_idx, x, t, h_gt, kinds,
     pde_res_fn, deriv_fn, pde_params,
-    w_res, w_ic, w_bc, is_allen_cahn, variant, device,
-    additive: bool = False,
-    current_level: int = None,
+    w_res, w_ic, w_bc, is_allen_cahn, device,
     residual_cache=None,
 ):
-    """Per-expert local loss (no PoU).
-    
-    When additive=True:
-    - Residual is computed on u_field = root + u_j (root frozen but differentiable)
-    - Interface/IC/BC targets are already 0 (handled by subdomain data builder)
-    """
+    """Per-expert local loss (no PoU)."""
     z = torch.tensor(0.0, device=device)
     comps = {
         'residual': z.clone(),
@@ -206,22 +174,8 @@ def _compute_expert_loss(
         xf = x[rmask].clone().detach().requires_grad_(True)
         tf = t[rmask].clone().detach().requires_grad_(True)
         xt = torch.cat([xf, tf], dim=1)
-        u_j = model.forward_single_expert(expert_idx, xt)
-        
-        if additive:
-            # In additive mode, compute residual on frozen_composition + u_j
-            # For AToE: frozen composition = u_0 + Σ_{ℓ<current_level} PoU_ℓ
-            # For AToELeaves: just base_model (leaves are a single level)
-            if variant == 'AToE' and hasattr(model, 'forward_frozen_composition'):
-                # Pass current_level - 1 to get composition up to (but not including) current level
-                frozen_depth = (current_level - 1) if current_level else 0
-                u_frozen = model.forward_frozen_composition(xt, max_depth=frozen_depth)
-            else:
-                u_frozen = model.base_model(xt)
-            u_field = u_frozen + u_j
-        else:
-            u_field = u_j
-        
+        u_field = model.forward_single_expert(expert_idx, xt)
+
         hf = u_field[:, 0]
         ht, hx, hxx = deriv_fn(hf, xf, tf)
         res = pde_res_fn(hf, ht, hx, hxx, **pde_params)
@@ -297,66 +251,16 @@ def _compute_expert_loss(
 
 def _compute_periodic_bc_loss(
     model, x, t, expert_ids, kinds, bc_face_ids, deriv_fn, device,
-    additive: bool = False,
 ):
-    """Compute periodic BC loss for Allen-Cahn.
-    
-    Non-additive mode: Cross-expert pairing
-    - Pairs left/right boundary points by sorting on t-value
-    - Penalizes (u_left - u_right)² + (∂u/∂x_left - ∂u/∂x_right)²
-    
-    Additive mode: Leaves output 0 at boundaries
-    - Root already satisfies periodic BC
-    - Each leaf expert u_j is penalized: u_j² + (∂u_j/∂x)²
+    """Compute periodic BC loss for Allen-Cahn via cross-expert pairing.
+
+    Pairs left/right boundary points by sorting on t-value and penalizes
+    (u_left - u_right)² + (∂u/∂x_left - ∂u/∂x_right)².
     """
     bc_mask = (kinds == KIND_BC_TRUE)
     if bc_mask.sum() == 0:
         return torch.tensor(0.0, device=device)
-    
-    # ── Additive mode: penalize leaves to be 0 at boundaries ──
-    if additive:
-        x_bc = x[bc_mask]
-        t_bc = t[bc_mask]
-        eid_bc = expert_ids[bc_mask]
-        fid_bc = bc_face_ids[bc_mask]
-        
-        dims = fid_bc // 2
-        unique_eids = eid_bc.unique().tolist()
-        
-        total_bc_loss = torch.tensor(0.0, device=device)
-        
-        for eid in unique_eids:
-            eid_mask = (eid_bc == eid)
-            x_e = x_bc[eid_mask].clone().detach().requires_grad_(True)
-            t_e = t_bc[eid_mask].clone().detach()
-            dim_e = dims[eid_mask]
-            
-            xt_e = torch.cat([x_e, t_e], dim=1)
-            u_e = model.forward_single_expert(eid, xt_e)[:, 0]
-            
-            # Penalize value to be 0
-            total_bc_loss = total_bc_loss + torch.sum(u_e ** 2)
-            
-            # Penalize spatial derivative to be 0 (per dimension)
-            for d in dim_e.unique().tolist():
-                d_mask = (dim_e == d)
-                if d_mask.sum() == 0:
-                    continue
-                u_d = u_e[d_mask]
-                x_d = x_e[d_mask]
-                
-                ux_d = torch.autograd.grad(
-                    u_d, x_d,
-                    grad_outputs=torch.ones_like(u_d),
-                    create_graph=True, retain_graph=True,
-                )[0][:, d]
-                
-                total_bc_loss = total_bc_loss + torch.sum(ux_d ** 2)
-        
-        return total_bc_loss
-    
-    # ── Non-additive mode: cross-expert pairing ──
-    
+
     x_bc = x[bc_mask]
     t_bc = t[bc_mask]
     eid_bc = expert_ids[bc_mask]
@@ -505,10 +409,7 @@ def _compute_continuity_loss(
     - Value: u_a = u_b
     - First derivative: ∂u_a/∂d = ∂u_b/∂d (where d is face-normal dim)
     - Second derivative: ∂²u_a/∂d² = ∂²u_b/∂d² (for PDE order >= 2)
-    
-    The root cancels in the difference since both experts are evaluated at
-    the same coordinates, so this is identical for additive/non-additive.
-    
+
     Returns:
         cont_loss: total continuity loss (scalar)
         cont_per_expert: dict mapping expert_idx -> continuity loss contribution

@@ -1,4 +1,4 @@
-"""Adaptive Tree-of-Experts PINN using only leaf experts.
+"""Adaptive Tree-of-Experts PINN using only leaf experts (AToE-Leaves).
 
 Only leaf experts (those with no children) participate in the solution.
 When a parent gets children, the parent is removed from the leaf set and
@@ -12,9 +12,6 @@ Blending modes:
 - Hard: normalized hard masks (mean on shared faces)
     u(x,t) = Σ_{j ∈ leaves} (hard_j / Z) · u_j(x,t)
     where Z = Σ_{k ∈ leaves} hard_k (only leaves, NOT root)
-
-Additive mode (optional): when enabled, the frozen root is added:
-    u(x,t) = u_root(x,t) + combine(leaves)
 """
 
 import torch
@@ -33,8 +30,6 @@ logger = get_logger(__name__)
 
 
 class AToELeaves(nn.Module):
-
-    supports_decomposed = True
 
     def __init__(
         self,
@@ -59,8 +54,6 @@ class AToELeaves(nn.Module):
         
         # Blending mode: 'soft' (PoU) or 'hard' (step functions, mean on shared faces)
         self.blending_mode = adaptive_config.get('blending_mode', 'soft')
-        # Additive mode: when true, u = root + combine(leaves)
-        self.additive = adaptive_config.get('additive', False)
 
         self.atoe_threshold_capacity = adaptive_config.get(
             'AToE_threshold_capacity', None
@@ -301,36 +294,14 @@ class AToELeaves(nn.Module):
 
         return expert_idx
 
-    def reinitialize_base(self):
-        """Reinitialize base model weights (fresh random init via reset_parameters)."""
-        for module in self.base_model.modules():
-            if hasattr(module, 'reset_parameters'):
-                module.reset_parameters()
-        n_params = sum(p.numel() for p in self.base_model.parameters())
-        logger.info(f"  [Reinit] Base model reinitialized ({n_params} params)")
-
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         # Base-only case (no experts spawned yet)
         if -1 in self.leaf_indices:
             return self.base_model(inputs)
-        
-        # Dispatch based on blending mode
+
         if self.blending_mode == 'hard':
-            leaf_output = self._forward_hard_only_leaves(inputs)
-        else:
-            # Soft blending (with optional sparse optimization)
-            threshold = self.adaptive_config.get('expert_activation_threshold', None)
-            if threshold is not None:
-                threshold = float(threshold)
-            if threshold is not None and len(self.leaf_indices - {-1}) > 0:
-                leaf_output = self._forward_soft_sparse_only_leaves(inputs, threshold)
-            else:
-                leaf_output = self._forward_soft_only_leaves(inputs)
-        
-        # Additive mode: add frozen root
-        if self.additive:
-            return self.base_model(inputs) + leaf_output
-        return leaf_output
+            return self._forward_hard_only_leaves(inputs)
+        return self._forward_soft_only_leaves(inputs)
 
     def _forward_soft_only_leaves(self, inputs: torch.Tensor) -> torch.Tensor:
         """
@@ -374,156 +345,15 @@ class AToELeaves(nn.Module):
         u_leaves = torch.stack([self.experts[i](inputs) for i in leaf_list], dim=1)  # (N, L, out_dim)
         return (hard_norm.unsqueeze(-1) * u_leaves).sum(dim=1)
 
-    def _forward_soft_sparse_only_leaves(self, inputs: torch.Tensor, threshold: float) -> torch.Tensor:
-        """
-        Sparse soft blending using only leaf experts.
-
-        Normalization uses the full set of leaves (same as non-sparse).
-        Inactive leaves contribute 0 to the output (their u_k is not evaluated).
-        
-        Note: base-only case is handled in forward() before calling this.
-        """
-        leaf_list = sorted(self.leaf_indices)
-        _, psi_experts = self.batched_indicators(inputs)  # (N, K)
-        psi_leaves = psi_experts[:, leaf_list]  # (N, L)
-
-        active_mask = psi_leaves > threshold  # (N, L)
-        _ms = self.adaptive_config.get(
-            'relevant_samples_to_activate_expert', 0)
-        active_any = active_mask.sum(dim=0) > _ms  # (L,)
-        active_local_indices = torch.nonzero(active_any, as_tuple=True)[0]
-
-        psi_sum = psi_leaves.sum(dim=1, keepdim=True)
-        psi_norm = psi_leaves / psi_sum
-
-        if len(active_local_indices) == 0:
-            u_leaves = torch.stack([self.experts[i](inputs) for i in leaf_list], dim=1)
-            return (psi_norm.unsqueeze(-1) * u_leaves).sum(dim=1)
-
-        N = inputs.shape[0]
-        output_dim = self.base_model.layers[-1]
-        device = inputs.device
-        u_leaves = torch.zeros(N, len(leaf_list), output_dim, device=device, dtype=inputs.dtype)
-        for local_idx in active_local_indices:
-            expert_idx = leaf_list[local_idx.item()]
-            u_leaves[:, local_idx.item(), :] = self.experts[expert_idx](inputs)
-
-        return (psi_norm.unsqueeze(-1) * u_leaves).sum(dim=1)
-
-    def forward_for_pde_derivatives(self, inputs: torch.Tensor) -> dict:
-        """
-        Forward pass returning decomposed components for product-rule derivative computation.
-
-        Returns individual expert outputs and their normalized weights so the loss
-        function can compute PDE derivatives via the product rule.
-
-        Supports both soft and hard blending modes.
-        When additive=True, includes root as a separate component with weight=1.
-        """
-        _t = self._timer
-        N = inputs.shape[0]
-        output_dim = self.base_model.layers[-1]
-        device = inputs.device
-
-        if -1 in self.leaf_indices:
-            inputs_base = inputs.detach().clone().requires_grad_(True)
-            u_base = self.base_model(inputs_base)
-            components = [{
-                'u': u_base,
-                'inputs': inputs_base,
-                'psi_norm': torch.ones(N, 1, device=device, dtype=inputs.dtype),
-                'constant_psi': True,
-            }]
-            return {
-                'components': components,
-                'composed': u_base,
-                'indicator_data': {
-                    'all_lower': None, 'all_upper': None, 'all_sigma': None,
-                    'psi_base': torch.ones(N, 1, device=device),
-                    'psi_experts_filtered': torch.zeros(N, 0, device=device),
-                    'active_expert_indices': [],
-                },
-            }
-
-        leaf_list = sorted(self.leaf_indices)
-
-        if _t: _t.start('fwd.compute_masks')
-        # Compute masks based on blending mode
-        if self.blending_mode == 'hard':
-            hard_masks = self.batched_indicators.compute_hard_masks_only(inputs)  # (N, K)
-            psi_leaves = hard_masks[:, leaf_list]  # (N, L)
-            Z = psi_leaves.sum(dim=1, keepdim=True).clamp(min=1e-8)  # (N, 1)
-            psi_norm_leaves = psi_leaves / Z  # (N, L)
-        else:
-            _, psi_experts = self.batched_indicators(inputs)  # (N, K)
-            psi_leaves = psi_experts[:, leaf_list]  # (N, L)
-            Z = psi_leaves.sum(dim=1, keepdim=True)  # (N, 1)
-            psi_norm_leaves = psi_leaves / Z  # (N, L)
-        if _t: _t.stop('fwd.compute_masks')
-
-        if _t: _t.start('fwd.sparse_eval')
-        components = []
-        
-        # Additive mode: prepend root as a separate component with weight=1
-        if self.additive:
-            inputs_root = inputs.detach().clone().requires_grad_(True)
-            u_root = self.base_model(inputs_root)
-            components.append({
-                'u': u_root,
-                'inputs': inputs_root,
-                'psi_norm': torch.ones(N, 1, device=device, dtype=inputs.dtype),
-                'constant_psi': True,  # Root weight is constant=1
-            })
-        
-        for local_idx, expert_idx in enumerate(leaf_list):
-            inputs_k = inputs.detach().clone().requires_grad_(True)
-            u_k = self.experts[expert_idx](inputs_k)
-            components.append({
-                'u': u_k,
-                'inputs': inputs_k,
-                'psi_norm': psi_norm_leaves[:, local_idx:local_idx+1],
-                'constant_psi': (self.blending_mode == 'hard'),  # Hard masks are constant
-            })
-        if _t: _t.stop('fwd.sparse_eval')
-
-        composed = torch.zeros(N, output_dim, device=device, dtype=inputs.dtype)
-        for c in components:
-            composed = composed + c['psi_norm'].detach() * c['u']
-
-        active_expert_indices = torch.tensor(leaf_list, device=device)
-
-        # Build psi_experts_filtered for indicator_data
-        if self.blending_mode == 'hard':
-            psi_experts_filtered = torch.zeros(N, len(self.experts), device=device, dtype=inputs.dtype)
-        else:
-            _, psi_experts_full = self.batched_indicators(inputs)
-            psi_experts_filtered = torch.zeros_like(psi_experts_full)
-        for local_idx, expert_idx in enumerate(leaf_list):
-            psi_experts_filtered[:, expert_idx] = psi_leaves[:, local_idx]
-
-        indicator_data = {
-            'all_lower': self.batched_indicators.all_lower,
-            'all_upper': self.batched_indicators.all_upper,
-            'all_sigma': self.batched_indicators.all_sigma,
-            'psi_base': torch.ones(N, 1, device=device) if self.additive else torch.zeros(N, 1, device=device),
-            'psi_experts_filtered': psi_experts_filtered,
-            'active_expert_indices': active_expert_indices,
-        }
-
-        return {
-            'components': components,
-            'composed': composed,
-            'indicator_data': indicator_data,
-        }
-
     def forward_decomposed(self, inputs: torch.Tensor) -> Dict[str, torch.Tensor]:
         """
         Forward pass returning individual model contributions.
 
+        Used by visualization and diagnostics (not by training losses).
+
         Returns:
             Dict with per-expert outputs, composed output, masks, and normalized weights.
             Supports both soft and hard blending modes.
-            When additive=True, includes root contribution.
         """
         result = {}
         N = inputs.shape[0]
@@ -559,16 +389,7 @@ class AToELeaves(nn.Module):
         result['weights_normalized'] = {}
 
         u_total = torch.zeros(N, output_dim, device=device, dtype=inputs.dtype)
-        
-        # Additive mode: add root contribution
-        if self.additive:
-            u_base = self.base_model(inputs)
-            result['base'] = u_base
-            result['masks']['base'] = torch.ones(N, 1, device=device)
-            result['weights_normalized']['base'] = torch.ones(N, 1, device=device)
-            u_total = u_total + u_base
-            blending_info = f'{blending_info}_additive'
-        
+
         for local_idx, expert_idx in enumerate(leaf_list):
             u_k = self.experts[expert_idx](inputs)
             result[f'expert_{expert_idx}'] = u_k
@@ -745,9 +566,8 @@ class AToELeaves(nn.Module):
             for i in range(len(self.experts))
         ]
 
-        additive_str = "+root" if self.additive else ""
-        blending_str = f"{self.blending_mode}{additive_str} (leaves only)"
-        
+        blending_str = f"{self.blending_mode} (leaves only)"
+
         repr_str = (
             f"AToELeaves(\n"
             f"  base: {base_str}\n"

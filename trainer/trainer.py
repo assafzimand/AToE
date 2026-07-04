@@ -22,9 +22,7 @@ from trainer.plotting import (
 from trainer.utils import compute_infinity_norm_error
 from trainer.timing import EpochTimer
 from trainer.training_context import TrainingContext, SegmentResult
-from models.atoe import AToE
 from models.atoe_leaves import AToELeaves
-from models.ant import ANT
 from utils.dataset_gen import (
     regenerate_training_data,
     resample_residual_inplace,
@@ -265,21 +263,10 @@ def _debug_print_model_state(model: nn.Module, segment_name: str,
         if region:
             logger.info(f"    Region: {region.bounds_lower} -> {region.bounds_upper}")
     
-    # AToE-specific: leaf indices
+    # Leaf indices
     if hasattr(model, 'leaf_indices'):
         logger.info(f"  Leaf indices: {sorted(model.leaf_indices)}")
-    
-    # ANT-specific: base_is_leaf
-    if hasattr(model, 'base_is_leaf'):
-        logger.info(f"  base_is_leaf: {model.base_is_leaf}")
-    if hasattr(model, 'parent_indices'):
-        logger.info(f"  parent_indices: {model.parent_indices}")
-    
-    # Composition mode
-    if hasattr(model, 'composition_mode'):
-        logger.info(f"  Composition mode: {model.composition_mode}")
-    if hasattr(model, 'indicator_type'):
-        logger.info(f"  Indicator type: {model.indicator_type}")
+
     if hasattr(model, 'base_weight'):
         logger.info(f"  Base weight: {model.base_weight}")
     
@@ -1241,12 +1228,10 @@ def _train_segment(
             resample_seed = base_seed + epoch
             if _split_ctx is not None:
                 logger.info(f"  [Resample-Split] Rebuilding subdomain data at epoch {epoch}")
-                # Fix 5: Use frozen snapshot for stable interface targets
-                _split_additive = _split_ctx.get('additive', True)  # default matches model
+                # Use the frozen snapshot for stable interface targets
                 train_data = build_subdomain_data(
                     _split_ctx['model_snapshot'], _split_ctx['new_expert_indices'],
                     _split_ctx['regions'], cfg, device, seed=resample_seed,
-                    additive=_split_additive,
                     interface_model=_split_ctx.get('interface_model'),
                 )
                 ctx.train_data = train_data
@@ -2205,14 +2190,13 @@ def _set_trainable(model: nn.Module, which: str, verbose: bool = True) -> int:
     """Set ``requires_grad`` across the model for a training segment.
 
     ``which``:
-      * ``'all'``      — every parameter trainable (root w/o experts, joint, fine-tune).
-      * ``'base'``     — only the base/root network (staged root segment).
-      * ``'level:L'``  — only experts whose ``RegionDescriptor.depth == L``.
-      * ``'leaves'``   — all leaf experts trainable, base frozen (AToE-Leaves Phase 3).
+      * ``'all'``      — every parameter trainable (root w/o experts, joint fine-tune).
+      * ``'base'``     — only the base/root network (Phase-1 root segment).
+      * ``'leaves'``   — all leaf experts trainable, base frozen (Phase 3).
 
-    Frozen params still participate in the forward composition (AToE additive
-    background, ANT routing); only the optimizer (which filters on
-    ``requires_grad``) skips them. Returns the count of trainable param tensors.
+    Frozen params still participate in the forward composition; only the
+    optimizer (which filters on ``requires_grad``) skips them. Returns the
+    count of trainable param tensors.
     """
     trainable_details = []
     
@@ -2240,19 +2224,6 @@ def _set_trainable(model: nn.Module, which: str, verbose: bool = True) -> int:
                 for p in expert.parameters():
                     p.requires_grad = True
                 trainable_details.append(f"  expert[{idx}]: TRAINABLE")
-        elif which.startswith('level:'):
-            target_depth = int(which.split(':', 1)[1])
-            regions = getattr(model, 'regions', [])
-            experts = getattr(model, 'experts', [])
-            trainable_details.append(f"base_model: FROZEN (target level={target_depth})")
-            for idx, expert in enumerate(experts):
-                depth = regions[idx].depth if idx < len(regions) else None
-                if depth == target_depth:
-                    for p in expert.parameters():
-                        p.requires_grad = True
-                    trainable_details.append(f"  expert[{idx}] depth={depth}: TRAINABLE")
-                else:
-                    trainable_details.append(f"  expert[{idx}] depth={depth}: FROZEN")
         else:
             raise ValueError(f"_set_trainable: unknown which={which!r}")
     
@@ -2292,7 +2263,7 @@ def _build_tree_once(ctx: TrainingContext, retain_siblings: bool) -> Dict:
     X_eval = eval_inputs.cpu().numpy()
     y_eval = u_pred.cpu().numpy()
 
-    closure_desc = ("ancestors-only (AToE)" if not retain_siblings
+    closure_desc = ("ancestors-only" if not retain_siblings
                     else "ancestors+siblings")
     logger.info(f"\n[Tree] Computing M-term tree (retain_siblings={retain_siblings}) — "
           f"closure: {closure_desc}")
@@ -2423,10 +2394,6 @@ def _spawn_nodes(ctx: TrainingContext, level_nodes, copy_output: bool,
                               apply_spectral_norm)
     from adaptive.indicators import RegionDescriptor
 
-    is_copy_spawn = isinstance(model, AToELeaves)
-    is_atoe_plain = (isinstance(model, AToE)
-                     and not isinstance(model, (AToELeaves, ANT)))
-    atoe_zero_init = not reinit_base_after_spawn
     init_mode = problem_cfg['init']['hidden']
 
     new_expert_indices = []
@@ -2443,13 +2410,8 @@ def _spawn_nodes(ctx: TrainingContext, level_nodes, copy_output: bool,
             parent_idx=parent_expert_idx,
             smoothness_alpha=node.smoothness_alpha,
         )
-        if is_copy_spawn:
-            expert_idx = model.spawn_expert(child_region,
-                                            copy_from_idx=parent_expert_idx)
-        elif is_atoe_plain:
-            expert_idx = model.spawn_expert(child_region, zero_init=atoe_zero_init)
-        else:
-            expert_idx = model.spawn_expert(child_region)
+        expert_idx = model.spawn_expert(child_region,
+                                        copy_from_idx=parent_expert_idx)
         if expert_idx >= 0:
             node_to_expert[node.node_id] = expert_idx
             new_expert_indices.append(expert_idx)
@@ -2466,8 +2428,7 @@ def _spawn_nodes(ctx: TrainingContext, level_nodes, copy_output: bool,
     # Init newly spawned experts (after spawn so copy-init parents already exist).
     logger.info(f"\n[DEBUG] _spawn_nodes: Initializing {len(new_expert_indices)} new experts")
     logger.info(f"  copy_output={copy_output}, init_mode='{init_mode}'")
-    logger.info(f"  is_copy_spawn={is_copy_spawn}, is_atoe_plain={is_atoe_plain}, atoe_zero_init={atoe_zero_init}")
-    
+
     for expert_idx in new_expert_indices:
         new_exp = model.experts[expert_idx]
         region = model.regions[expert_idx] if hasattr(model, 'regions') and expert_idx < len(model.regions) else None
@@ -2480,9 +2441,6 @@ def _spawn_nodes(ctx: TrainingContext, level_nodes, copy_output: bool,
         if init_mode == 'parent_weights':
             if hasattr(model, 'regions') and expert_idx < len(model.regions):
                 par_idx = model.regions[expert_idx].parent_idx
-            elif (hasattr(model, 'parent_indices')
-                  and expert_idx < len(model.parent_indices)):
-                par_idx = model.parent_indices[expert_idx]
             else:
                 par_idx = -1
             parent_model = (model.base_model if par_idx == -1
@@ -2492,7 +2450,6 @@ def _spawn_nodes(ctx: TrainingContext, level_nodes, copy_output: bool,
                                    copy_output=copy_output)
             logger.info(f"    [ParentInit] Expert {expert_idx}: copied from {par_label}, copy_output={copy_output}")
         else:
-            # zero_output=True for additive (residual), False for non-additive (full domain)
             zero_output = not copy_output
             apply_expert_init(new_exp, cfg, zero_output=zero_output)
             output_init = 'zeroed' if zero_output else f'{init_mode}'
@@ -2650,16 +2607,13 @@ def _log_continuity_diff(before: Dict, after: Dict) -> None:
 
 
 def train_orchestrator(ctx: TrainingContext) -> None:
-    """Drive training as a sequence of segments + staged tree spawning.
+    """Drive training as a sequence of segments.
 
-    Per-variant dispatch:
-      * non-adaptive          → one ``main`` segment.
-      * AToE-Leaves           → root → spawn all leaves → joint ``phase3`` →
-                                optional ``fine_tune`` (if additive=true).
-      * AToE / ANT (staged)   → root → per-level spawn+train (coarse→fine) →
-                                final joint ``fine_tune``.
-
-    Replaces the former monolithic ``_run_training_loop``.
+    Dispatch:
+      * non-adaptive → one ``main`` segment.
+      * AToE-Leaves  → root (Phase 1, or pretrained) → M-term tree → spawn all
+                       leaves → per-leaf split training (``phase3``) → joint
+                       PoU ``fine_tune``.
     """
     cfg = ctx.cfg
     model = ctx.model
@@ -2691,15 +2645,8 @@ def train_orchestrator(ctx: TrainingContext) -> None:
     ctx._emergency_metrics_save = _emergency_metrics_save
     ctx._atexit = _atexit
 
-    # ── Variant detection (classes are mutually exclusive) ──
-    if isinstance(model, AToELeaves):
-        variant = 'AToE-Leaves'
-    elif isinstance(model, ANT):
-        variant = 'ANT'
-    elif isinstance(model, AToE):
-        variant = 'AToE'
-    else:
-        variant = 'base'
+    # ── Variant detection ──
+    variant = 'AToE-Leaves' if isinstance(model, AToELeaves) else 'base'
     logger.info(f"\n[Orchestrator] variant={variant} | adaptive={ctx.is_adaptive}")
 
     # ── Non-adaptive: single segment over all params ──
@@ -2742,18 +2689,11 @@ def train_orchestrator(ctx: TrainingContext) -> None:
         logger.info(f"[Orchestrator] Could not compute root rel-L2: {_e}")
 
     # ── Tree build (once) + level selection ──
-    retain_siblings = True  # all variants use full binary tiling for complete PoU
-    leaves_only = variant == 'AToE-Leaves'
-    # Determine copy_output based on variant and additive mode:
-    # - Additive mode: zero output layer (residual learning)
-    # - Non-additive mode: copy output layer (experts own full domain)
-    additive = ctx.adaptive_cfg.get('additive', True)  # default matches model
-    if variant == 'AToE':
-        copy_output = not additive  # AToE additive: zero output; non-additive: copy
-    elif leaves_only:
-        copy_output = not additive  # AToELeaves same logic
-    else:
-        copy_output = True  # ANT always copies
+    retain_siblings = True  # full binary tiling gives a complete PoU over the domain
+    leaves_only = True
+    # Non-additive leaf composition: each leaf owns its subdomain, so it
+    # starts from a copy of the root's output layer (PoU continuity).
+    copy_output = True
     build_result = _build_tree_once(ctx, retain_siblings)
     levels, nodes_to_spawn = _select_levels(ctx, build_result, leaves_only)
     _record_tree_diagnostics(ctx, build_result, nodes_to_spawn)
@@ -2766,187 +2706,82 @@ def train_orchestrator(ctx: TrainingContext) -> None:
 
     node_to_expert: Dict = {}
 
-    # ── AToE-Leaves: spawn all leaves at once, then joint Phase 3 ──
+    # ── Spawn all leaves at once, then joint Phase 3 ──
     split_enabled = ctx.adaptive_cfg.get('split_icbc', {}).get('enabled', False)
-    if leaves_only:
-        _before_spawn = _check_output_continuity(ctx, "before_spawn")
-        
-        total = 0
-        for level in levels:
-            spawned, _ = _spawn_nodes(ctx, level, copy_output,
-                                      node_to_expert, node_tree_depth)
-            total += spawned
-        logger.info(f"[FullTree] Spawning complete. {total} leaves spawned.")
-        
-        _after_spawn = _check_output_continuity(ctx, "after_spawn")
-        _log_continuity_diff(_before_spawn, _after_spawn)
-        
-        _post_spawn_update(ctx)
-        _plot_after_spawn(ctx, f"epoch_{ctx.epoch}")
-        if total == 0:
-            logger.info("[Orchestrator] Zero experts spawned — finishing after root.")
-            ctx.total_epochs = ctx.epoch
-            return
-        logger.info(f"[Phase 3] Training {total} leaf experts (base retired from composition)")
-        _set_trainable(model, 'leaves')
+    _before_spawn = _check_output_continuity(ctx, "before_spawn")
 
-        if split_enabled:
-            _run_split_segment(ctx, 'phase3', cfg['epochs'], cfg, variant='AToE-Leaves')
-        else:
-            res = _train_segment(ctx, 'phase3', cfg['epochs'], cfg)
-        
-        # ── Optional fine-tune for AToELeaves (both additive and non-additive) ──
-        additive = ctx.adaptive_cfg.get('additive', True)  # default matches model
-        fine_tune_cfg = ctx.adaptive_cfg.get('fine_tune', None)
-        if fine_tune_cfg:
-            mode_str = "Additive" if additive else "Non-Additive"
-            blending = model.blending_mode if hasattr(model, 'blending_mode') else 'soft'
-            logger.info(f"[AToELeaves-{mode_str}] Unfreezing ALL params for final joint fine-tune.")
-            logger.info(f"[FineTune] Using composed loss with blending_mode='{blending}' (matches inference)")
-            _set_trainable(model, 'all')
-            
-            # Ensure split_context is cleared so eval uses configured blending_mode
-            ctx._split_context = None
-            
-            # L2-SP anchoring: snapshot weights and wrap loss
-            l2sp_lambda = fine_tune_cfg.get('l2sp_lambda', 0.0)
-            orig_loss_fn = ctx.loss_fn
-            if l2sp_lambda > 0:
-                ctx._l2sp_anchor = {
-                    name: p.clone().detach()
-                    for name, p in model.named_parameters()
-                    if p.requires_grad
-                }
-                _anchor = ctx._l2sp_anchor
-                _lam = l2sp_lambda
-                
-                def _l2sp_loss(model, batch, **kw):
-                    loss = orig_loss_fn(model, batch, **kw)
-                    if isinstance(loss, dict) or kw.get('return_components', False):
-                        return loss
-                    penalty = sum(
-                        (p - _anchor[n]).pow(2).sum()
-                        for n, p in model.named_parameters()
-                        if n in _anchor
-                    )
-                    return loss + (_lam / 2.0) * penalty
-                
-                ctx.loss_fn = _l2sp_loss
-                logger.info(f"[L2-SP] Anchoring enabled with lambda={l2sp_lambda}")
-            
-            ft_cfg = dict(cfg)
-            ft_cfg.update(fine_tune_cfg)
-            ft_min = fine_tune_cfg.get('min_epochs', ctx.min_epochs)
-            res = _train_segment(ctx, 'fine_tune', fine_tune_cfg['epochs'], ft_cfg,
-                           min_epochs_override=ft_min)
-            
-            # Restore original loss function
-            if l2sp_lambda > 0:
-                ctx.loss_fn = orig_loss_fn
-                ctx._l2sp_anchor = None
-        
-        ctx.total_epochs = ctx.epoch
-        return
-
-    # ── AToE / ANT staged: per-level spawn + train (coarse → fine) ──
-    adaptive_cfg = ctx.adaptive_cfg
-    base_lr = cfg['lr']
-    decay = adaptive_cfg.get('new_expert_lr_decay', 1.0)
-    min_per_level = adaptive_cfg.get('min_epochs_per_level', ctx.min_epochs)
-    max_per_level = adaptive_cfg.get('max_epochs_per_level', cfg['epochs'])
-
+    total = 0
     for level in levels:
-        level_depth = node_tree_depth.get(level[0][0].node_id, 1)
-        logger.info(f"\n[Staged] Level {level_depth}: spawning {len(level)} node(s)")
-        
-        _before_spawn = _check_output_continuity(ctx, f"before_level_{level_depth}")
-        
         spawned, _ = _spawn_nodes(ctx, level, copy_output,
                                   node_to_expert, node_tree_depth)
-        if spawned == 0:
-            logger.info(f"[Staged] Level {level_depth}: 0 experts spawned — skipping.")
-            continue
-        
-        _after_spawn = _check_output_continuity(ctx, f"after_level_{level_depth}")
-        _log_continuity_diff(_before_spawn, _after_spawn)
-        
-        _post_spawn_update(ctx)
-        _set_trainable(model, f'level:{level_depth}')
-        logger.info(f"[Freeze] Frozen base + levels < {level_depth}; training "
-              f"{spawned} expert(s) at level {level_depth}")
-        lr_level = base_lr * (decay ** level_depth)
+        total += spawned
+    logger.info(f"[FullTree] Spawning complete. {total} leaves spawned.")
 
-        # Non-additive mode: set active_max_depth BEFORE training so forward() uses correct level
-        if not additive and hasattr(model, 'active_max_depth'):
-            model.active_max_depth = level_depth
-            logger.info(f"[NonAdditive] Level {level_depth} now owns the domain; "
-                        f"previous levels retired from forward().")
+    _after_spawn = _check_output_continuity(ctx, "after_spawn")
+    _log_continuity_diff(_before_spawn, _after_spawn)
 
-        if split_enabled and variant in ('ANT', 'AToE'):
-            res = _run_split_segment(ctx, f'level_{level_depth}', max_per_level, cfg,
-                                     variant=variant, lr_override=lr_level,
-                                     min_epochs_override=min_per_level)
-        else:
-            res = _train_segment(ctx, f'level_{level_depth}', max_per_level, cfg,
-                                 lr_override=lr_level,
-                                 min_epochs_override=min_per_level)
-        _plot_after_spawn(ctx, f"level_{level_depth}")
-        if res.nan_detected or res.oom_stopped:
-            return
-        logger.info(f"[Freeze] Level {level_depth} training complete.")
-
-    # ── Final joint fine-tune (AToE / ANT) ──
-    fine_tune_cfg = adaptive_cfg.get('fine_tune', None)
-    if not fine_tune_cfg:
-        logger.info("[FinalTune] No adaptive_pinn.fine_tune block — skipping final "
-              "joint fine-tune.")
+    _post_spawn_update(ctx)
+    _plot_after_spawn(ctx, f"epoch_{ctx.epoch}")
+    if total == 0:
+        logger.info("[Orchestrator] Zero experts spawned — finishing after root.")
         ctx.total_epochs = ctx.epoch
         return
-    blending = model.blending_mode if hasattr(model, 'blending_mode') else 'soft'
-    logger.info("[FinalTune] Unfreezing ALL params for final joint fine-tune.")
-    logger.info(f"[FineTune] Using composed loss with blending_mode='{blending}' (matches inference)")
-    _set_trainable(model, 'all')
-    
-    # Ensure split_context is cleared so eval uses configured blending_mode
-    ctx._split_context = None
-    
-    # L2-SP anchoring: snapshot weights and wrap loss
-    l2sp_lambda = fine_tune_cfg.get('l2sp_lambda', 0.0)
-    orig_loss_fn = ctx.loss_fn
-    if l2sp_lambda > 0:
-        ctx._l2sp_anchor = {
-            name: p.clone().detach()
-            for name, p in model.named_parameters()
-            if p.requires_grad
-        }
-        _anchor = ctx._l2sp_anchor
-        _lam = l2sp_lambda
-        
-        def _l2sp_loss(model, batch, **kw):
-            loss = orig_loss_fn(model, batch, **kw)
-            if isinstance(loss, dict) or kw.get('return_components', False):
-                return loss
-            penalty = sum(
-                (p - _anchor[n]).pow(2).sum()
-                for n, p in model.named_parameters()
-                if n in _anchor
-            )
-            return loss + (_lam / 2.0) * penalty
-        
-        ctx.loss_fn = _l2sp_loss
-        logger.info(f"[L2-SP] Anchoring enabled with lambda={l2sp_lambda}")
-    
-    ft_cfg = dict(cfg)
-    ft_cfg.update(fine_tune_cfg)
-    ft_min = fine_tune_cfg.get('min_epochs', ctx.min_epochs)
-    res = _train_segment(ctx, 'fine_tune', fine_tune_cfg['epochs'], ft_cfg,
-                   min_epochs_override=ft_min)
-    
-    # Restore original loss function
-    if l2sp_lambda > 0:
-        ctx.loss_fn = orig_loss_fn
-        ctx._l2sp_anchor = None
-    
+    logger.info(f"[Phase 3] Training {total} leaf experts (base retired from composition)")
+    _set_trainable(model, 'leaves')
+
+    if split_enabled:
+        _run_split_segment(ctx, 'phase3', cfg['epochs'], cfg, variant='AToE-Leaves')
+    else:
+        res = _train_segment(ctx, 'phase3', cfg['epochs'], cfg)
+
+    # ── Final joint fine-tune with the PoU-composed loss ──
+    fine_tune_cfg = ctx.adaptive_cfg.get('fine_tune', None)
+    if fine_tune_cfg:
+        blending = model.blending_mode if hasattr(model, 'blending_mode') else 'soft'
+        logger.info("[FineTune] Unfreezing ALL params for final joint fine-tune.")
+        logger.info(f"[FineTune] Using composed loss with blending_mode='{blending}' (matches inference)")
+        _set_trainable(model, 'all')
+
+        # Ensure split_context is cleared so eval uses configured blending_mode
+        ctx._split_context = None
+
+        # L2-SP anchoring: snapshot weights and wrap loss
+        l2sp_lambda = fine_tune_cfg.get('l2sp_lambda', 0.0)
+        orig_loss_fn = ctx.loss_fn
+        if l2sp_lambda > 0:
+            ctx._l2sp_anchor = {
+                name: p.clone().detach()
+                for name, p in model.named_parameters()
+                if p.requires_grad
+            }
+            _anchor = ctx._l2sp_anchor
+            _lam = l2sp_lambda
+
+            def _l2sp_loss(model, batch, **kw):
+                loss = orig_loss_fn(model, batch, **kw)
+                if isinstance(loss, dict) or kw.get('return_components', False):
+                    return loss
+                penalty = sum(
+                    (p - _anchor[n]).pow(2).sum()
+                    for n, p in model.named_parameters()
+                    if n in _anchor
+                )
+                return loss + (_lam / 2.0) * penalty
+
+            ctx.loss_fn = _l2sp_loss
+            logger.info(f"[L2-SP] Anchoring enabled with lambda={l2sp_lambda}")
+
+        ft_cfg = dict(cfg)
+        ft_cfg.update(fine_tune_cfg)
+        ft_min = fine_tune_cfg.get('min_epochs', ctx.min_epochs)
+        res = _train_segment(ctx, 'fine_tune', fine_tune_cfg['epochs'], ft_cfg,
+                       min_epochs_override=ft_min)
+
+        # Restore original loss function
+        if l2sp_lambda > 0:
+            ctx.loss_fn = orig_loss_fn
+            ctx._l2sp_anchor = None
+
     ctx.total_epochs = ctx.epoch
 
 
@@ -2976,50 +2811,29 @@ def _run_split_segment(
         p.requires_grad = False
     logger.info(f"[SplitLoss] Created frozen model snapshot for interface targets")
 
-    # Identify the NEW experts being trained in this segment
-    if variant == 'AToE-Leaves':
-        leaf_info = model.get_leaf_info()
-        new_expert_indices = [idx for _, idx in leaf_info if idx >= 0]
-    elif variant in ('ANT', 'AToE'):
-        # AToE and ANT use the same per-level expert extraction
-        new_expert_indices = _get_new_ant_experts(model, segment_name)
-    else:
-        new_expert_indices = []
+    # Identify the leaf experts being trained in this segment
+    leaf_info = model.get_leaf_info()
+    new_expert_indices = [idx for _, idx in leaf_info if idx >= 0]
 
     regions_list = model.regions
 
-    # Get additive flag from adaptive config
-    additive = ctx.adaptive_cfg.get('additive', True)
-    
-    # Parse current level depth from segment name (for AToE additive frozen composition)
-    current_level = None
-    if segment_name.startswith('level_'):
-        try:
-            current_level = int(segment_name.split('_')[1])
-        except (IndexError, ValueError):
-            pass
-    
     logger.info(f"[SplitLoss] Building subdomain data for {len(new_expert_indices)} "
-                f"new expert(s): {new_expert_indices} (additive={additive}, level={current_level})")
+                f"new expert(s): {new_expert_indices}")
 
-    # For non-additive AToELeaves the leaves tile the domain and share the base
-    # (root) as their common parent, so mint interface targets from the frozen
-    # base — good root predictions regardless of expert architecture. (Composed
-    # minting only equals the root when leaves copy it, which is impossible when
-    # experts differ in shape from the base.)
-    interface_model = None
-    if variant == 'AToE-Leaves' and not additive and hasattr(model_snapshot, 'base_model'):
-        interface_model = model_snapshot.base_model
-        logger.info("[SplitLoss] Interface targets minted from frozen base (root).")
+    # The leaves tile the domain and share the base (root) as their common
+    # parent, so mint interface targets from the frozen base — good root
+    # predictions regardless of expert architecture.
+    interface_model = model_snapshot.base_model
+    logger.info("[SplitLoss] Interface targets minted from frozen base (root).")
 
-    # Use snapshot for interface target minting (Fix 5)
+    # Use snapshot for interface target minting
     split_data = build_subdomain_data(
         model_snapshot, new_expert_indices, regions_list, cfg,
-        ctx.device, seed=ctx.epoch, additive=additive,
+        ctx.device, seed=ctx.epoch,
         interface_model=interface_model,
     )
 
-    _log_subdomain_summary(new_expert_indices, regions_list, split_data, additive=additive)
+    _log_subdomain_summary(new_expert_indices, regions_list, split_data)
 
     # Freeze/trainable confirmation
     trainable = [n for n, p in model.named_parameters()
@@ -3040,10 +2854,9 @@ def _run_split_segment(
     orig_train_data = ctx.train_data
     orig_train_loader = ctx.train_loader
 
-    # Build split loss with original loss as fallback for eval (Fix 1)
+    # Build split loss with original loss as fallback for eval batches
     split_loss = build_split_loss(
         model, cfg, variant=variant, orig_loss_fn=orig_loss_fn,
-        additive=additive, current_level=current_level,
     )
 
     # Swap to split data/loss
@@ -3054,12 +2867,11 @@ def _run_split_segment(
     )
     ctx._split_context = {
         'model': model,
-        'model_snapshot': model_snapshot,  # Fix 5: for resample
+        'model_snapshot': model_snapshot,  # frozen snapshot reused on resample
         'new_expert_indices': new_expert_indices,
         'regions': regions_list,
         'variant': variant,
-        'additive': additive,
-        'interface_model': interface_model,  # frozen base for AToELeaves seams
+        'interface_model': interface_model,  # frozen base for interface targets
     }
 
     res = _train_segment(ctx, segment_name, epoch_budget, segment_cfg,
@@ -3114,27 +2926,12 @@ def _run_split_segment(
     return res
 
 
-def _get_new_ant_experts(model, segment_name: str) -> list:
-    """Extract the expert indices for the current ANT level from the segment name."""
-    if not segment_name.startswith('level_'):
-        return []
-    try:
-        depth = int(segment_name.split('_')[1])
-    except (IndexError, ValueError):
-        return []
-    return [i for i, r in enumerate(model.regions) if r.depth == depth]
-
-
-def _log_subdomain_summary(new_expert_indices, regions, split_data, additive: bool = False):
+def _log_subdomain_summary(new_expert_indices, regions, split_data):
     """Log per-expert point summaries for the subdomain dataset."""
     expert_ids = split_data['expert_id']
     kinds = split_data['kind']
     cont_neighbors = split_data.get('cont_neighbor', None)
-    
-    # Log additive mode and blending
-    if additive:
-        logger.info("[SplitData] additive=True: interface/ic/bc targets are 0 (leaves as corrections)")
-    
+
     for eidx in new_expert_indices:
         emask = (expert_ids == eidx)
         n_total = emask.sum().item()
@@ -3359,23 +3156,8 @@ def _finalize_training(ctx: TrainingContext) -> Path:
         leaf_expert_indices = set(
             idx for _, idx in leaf_info if idx >= 0)
 
-        is_ant = isinstance(model, ANT)
-        is_leaves_only = isinstance(model, AToELeaves) and not is_ant
-
-        # For ANT: non-leaf experts' output layers (last_hidden → output_dim)
-        # are unused in inference (only activations propagate to children).
-        # Count full params for leaves, subtract output layer for non-leaves.
-        if is_ant:
-            expert_params = []
-            for i, full_p in enumerate(expert_full_params):
-                arch = expert_archs[i]
-                if i not in leaf_expert_indices and len(arch) >= 2:
-                    out_layer = arch[-2] * arch[-1] + arch[-1]
-                    expert_params.append(full_p - out_layer)
-                else:
-                    expert_params.append(full_p)
-        else:
-            expert_params = expert_full_params
+        is_leaves_only = isinstance(model, AToELeaves)
+        expert_params = expert_full_params
 
         leaf_params = sum(
             expert_params[i] for i in leaf_expert_indices

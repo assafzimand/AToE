@@ -8,7 +8,7 @@ For bc_true points on global spatial boundaries, bc_face_id encodes
 dim*2 + side (side=0 lower, side=1 upper) to enable cross-expert
 pairing in periodic BC loss (Allen-Cahn).
 
-Used by the split-loss training path for AToE-Leaves and ANT.
+Used by the split-loss training path for AToE-Leaves.
 """
 
 import torch
@@ -47,26 +47,20 @@ def build_subdomain_data(
     cfg: Dict,
     device: torch.device,
     seed: int = 0,
-    additive: bool = False,
     interface_model: torch.nn.Module = None,
 ) -> Dict[str, torch.Tensor]:
     """Build per-expert dataset for split-loss training.
 
     Returns dict with keys ``x``, ``t``, ``h_gt``,
     ``expert_id``, ``kind``, ``bc_face_id``, ``cont_neighbor``, ``cont_dim``.
-    
+
     ``bc_face_id`` encodes which spatial boundary face
     for periodic pairing: ``dim * 2 + side`` where
     side=0 for lower, side=1 for upper.
-    
+
     For periodic BC, left (side=0) and right (side=1) points
     on the same dimension share identical t-values to enable
     cross-expert pairing.
-    
-    When ``additive=True``:
-      - Interface targets, ic_true targets, and bc_true targets are set to 0
-        (leaves must output 0 on their bounds as they are corrections to the root)
-      - Continuity points are still generated for neighbor-to-neighbor agreement
     """
     torch.manual_seed(seed)
 
@@ -155,13 +149,13 @@ def build_subdomain_data(
             eidx, region, spatial_dim, spatial_domain,
             t_min_global, n_ic_per_face, output_dim,
             problem, pc, device, xs, ts, gs, eids, ks,
-            bc_fids, additive=additive,
+            bc_fids,
         )
         _add_bc_faces_periodic(
             eidx, region, spatial_dim, spatial_domain,
             n_bc_per_face, output_dim, device,
             xs, ts, gs, eids, ks, bc_fids,
-            bc_t_global, additive=additive,
+            bc_t_global,
         )
 
     # ── Continuity faces: neighbor-to-neighbor on shared interior faces ──
@@ -187,34 +181,31 @@ def build_subdomain_data(
     cont_neighbor_main = torch.full((n_main,), -1, dtype=torch.long, device=device)
     cont_dim_main = torch.full((n_main,), -1, dtype=torch.long, device=device)
 
-    # ── Mint interface targets (skip if additive) ──
+    # ── Mint interface targets ──
     # interface_model overrides which frozen field defines the interface targets.
-    # For non-additive AToELeaves it is the base (root), so targets are good root
-    # predictions even when experts cannot inherit the root; None falls back to
-    # `model` (composed snapshot) for legacy behaviour.
-    if not additive:
-        iface_src = interface_model if interface_model is not None else model
-        # t-face interfaces (KIND_INTERFACE, weighted by w_ic)
-        iface_mask = (kind_cat == KIND_INTERFACE)
-        if iface_mask.sum() > 0:
-            with torch.no_grad():
-                xt_if = torch.cat(
-                    [x_cat[iface_mask], t_cat[iface_mask]], dim=1
-                )
-                h_gt_cat[iface_mask] = iface_src(xt_if)
+    # For AToE-Leaves it is the base (root), so targets are good root predictions
+    # even when experts differ in shape from the base; None falls back to `model`
+    # (composed snapshot).
+    iface_src = interface_model if interface_model is not None else model
+    # t-face interfaces (KIND_INTERFACE, weighted by w_ic)
+    iface_mask = (kind_cat == KIND_INTERFACE)
+    if iface_mask.sum() > 0:
+        with torch.no_grad():
+            xt_if = torch.cat(
+                [x_cat[iface_mask], t_cat[iface_mask]], dim=1
+            )
+            h_gt_cat[iface_mask] = iface_src(xt_if)
 
-        # x-face interfaces (KIND_INTERFACE_BC, weighted by w_bc)
-        iface_bc_mask = (kind_cat == KIND_INTERFACE_BC)
-        if iface_bc_mask.sum() > 0:
-            with torch.no_grad():
-                xt_if_bc = torch.cat(
-                    [x_cat[iface_bc_mask], t_cat[iface_bc_mask]], dim=1
-                )
-                h_gt_cat[iface_bc_mask] = iface_src(xt_if_bc)
-        _src = 'base(root)' if interface_model is not None else 'composed'
-        logger.info(f"[SplitData] interface targets minted from {_src} model")
-    else:
-        logger.info("[SplitData] additive=True: interface/ic/bc targets are 0")
+    # x-face interfaces (KIND_INTERFACE_BC, weighted by w_bc)
+    iface_bc_mask = (kind_cat == KIND_INTERFACE_BC)
+    if iface_bc_mask.sum() > 0:
+        with torch.no_grad():
+            xt_if_bc = torch.cat(
+                [x_cat[iface_bc_mask], t_cat[iface_bc_mask]], dim=1
+            )
+            h_gt_cat[iface_bc_mask] = iface_src(xt_if_bc)
+    _src = 'base(root)' if interface_model is not None else 'composed'
+    logger.info(f"[SplitData] interface targets minted from {_src} model")
 
     # Log BC statistics for periodic pairing
     bc_true_mask = (kind_cat == KIND_BC_TRUE)
@@ -302,12 +293,8 @@ def _add_ic_face(
     eidx, region, spatial_dim, spatial_domain,
     t_min_global, n_pts, output_dim, problem, pc,
     device, xs, ts, gs, eids, ks, bc_fids,
-    additive: bool = False,
 ):
-    """Add IC face points (t = region lower-t boundary).
-    
-    When additive=True, ic_true target is set to 0 (leaf should output 0 on boundary).
-    """
+    """Add IC face points (t = region lower-t boundary)."""
     bl, bu = region.bounds_lower, region.bounds_upper
     t_face = bl[spatial_dim]
     is_true = abs(t_face - t_min_global) < 1e-8
@@ -320,14 +307,10 @@ def _add_ic_face(
     t_ic = torch.full((n_pts, 1), t_face, device=device)
 
     if is_true:
-        if additive:
-            # In additive mode, leaves should output 0 on true boundaries
-            h_gt = torch.zeros(n_pts, output_dim, device=device)
-        else:
-            h_gt = _analytic_ic(problem, x_ic, pc)
+        h_gt = _analytic_ic(problem, x_ic, pc)
         kind_val = KIND_IC_TRUE
     else:
-        # Interface target: 0 if additive (model mints later if not additive)
+        # Interface target: placeholder 0; minted from the frozen root later
         h_gt = torch.zeros(n_pts, output_dim, device=device)
         kind_val = KIND_INTERFACE
 
@@ -350,19 +333,16 @@ def _add_bc_faces_periodic(
     n_pts, output_dim, device,
     xs, ts, gs, eids, ks, bc_fids,
     bc_t_global,
-    additive: bool = False,
 ):
     """Add BC face points with periodic pairing support.
-    
+
     For bc_true faces on global boundaries:
     - Uses shared t-values per dimension (both left and right sides)
     - Filters to t-values within this expert's temporal range
     - Assigns bc_face_id = dim*2 + side (side=0 lower, 1 upper)
-    
+
     For interior x-face interfaces (non-global boundaries):
     - Uses KIND_INTERFACE_BC (weighted by w_bc)
-    
-    When additive=True, all targets are set to 0.
     """
     bl, bu = region.bounds_lower, region.bounds_upper
     t_lo = bl[spatial_dim]
