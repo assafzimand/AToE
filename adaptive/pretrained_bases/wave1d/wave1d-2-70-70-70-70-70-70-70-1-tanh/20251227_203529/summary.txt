@@ -1,0 +1,21 @@
+Training Summary
+============================================================
+
+Problem: wave1d
+Architecture: [2, 70, 70, 70, 70, 70, 70, 70, 1]
+Activation: tanh
+Epochs: 10000
+Batch size: 512
+Learning rate: 0.0001
+Device: cuda
+
+Final train loss: 0.000000
+Final eval loss: 0.000000
+Final train rel-L2: 0.000314
+Final eval rel-L2: 0.000307
+Final train inf-norm: 0.001134
+Final eval inf-norm: 0.001023
+Best eval loss: 0.000000
+
+Best checkpoint: checkpoints/wave1d/wave1d-2-70-70-70-70-70-70-70-1-tanh/best_model.pt
+Final checkpoint: checkpoints/wave1d/wave1d-2-70-70-70-70-70-70-70-1-tanh/final_model.pt

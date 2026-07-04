@@ -1,0 +1,21 @@
+Training Summary
+============================================================
+
+Problem: burgers1d
+Architecture: [2, 70, 70, 70, 70, 70, 1]
+Activation: tanh
+Epochs: 10000
+Batch size: 512
+Learning rate: 0.0001
+Device: cuda
+
+Final train loss: 0.000005
+Final eval loss: 0.000002
+Final train rel-L2: 0.003331
+Final eval rel-L2: 0.002822
+Final train inf-norm: 0.033292
+Final eval inf-norm: 0.027395
+Best eval loss: 0.000002
+
+Best checkpoint: checkpoints/burgers1d/burgers1d-2-70-70-70-70-70-1-tanh/best_model.pt
+Final checkpoint: checkpoints/burgers1d/burgers1d-2-70-70-70-70-70-1-tanh/final_model.pt

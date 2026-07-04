@@ -1,0 +1,304 @@
+"""Smart initialization for PINN models.
+
+Three strategies (all configurable, architecture-agnostic):
+  hidden: glorot  — Glorot uniform + zero bias for all hidden linear layers.
+                    Also zero-inits fc2 in ResNet blocks for identity-like start.
+  output: zero    — Zero-initialize the output linear layer.
+  output: ls      — Least-squares fit of output layer to IC data (base model only).
+
+Reference: Wang et al. (2024) "PirateNets: Physics-informed Deep Learning with
+Residual Adaptive Networks." JMLR.
+"""
+
+import torch
+import torch.nn as nn
+from typing import Dict
+
+from utils.logging_config import get_logger
+
+logger = get_logger(__name__)
+
+
+def _get_output_layer(model: nn.Module) -> nn.Linear:
+    """Return the final output nn.Linear for any supported architecture."""
+    if hasattr(model, 'output_proj'):
+        return model.output_proj          # ResNetModel or PirateNet
+    names = model.get_layer_names()
+    return model.network[names[-1]]       # FCNet
+
+
+def apply_hidden_init(model: nn.Module, cfg: dict) -> None:
+    """Apply Glorot uniform + zero bias to all hidden linear layers.
+
+    When init.hidden == 'glorot':
+    - All nn.Linear / RWFLinear except the output layer get xavier_uniform_ with
+      the gain appropriate for the configured activation function.
+    - Biases are set to zero.
+    - For ResNet: fc2 in every ResBlock is additionally zero-initialized so each
+      block starts as an identity map (x + F(x) ≈ x), matching PirateNet's alpha=0.
+    """
+    init_cfg = cfg.get('init', {})
+    if init_cfg.get('hidden', 'default') != 'glorot':
+        return
+
+    try:
+        from models.rwf_layer import RWFLinear
+        linear_types = (nn.Linear, RWFLinear)
+    except ImportError:
+        linear_types = (nn.Linear,)
+
+    activation = cfg['activation']
+    gain = nn.init.calculate_gain(activation)
+    out_layer = _get_output_layer(model)
+
+    n_hidden = 0
+    for module in model.modules():
+        if isinstance(module, linear_types) and module is not out_layer:
+            nn.init.xavier_uniform_(module.weight, gain=gain)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+            n_hidden += 1
+
+    # ResNet identity-like start: zero fc2 in every ResBlock after Glorot
+    try:
+        from models.resnet_model import ResBlock
+        n_resblocks = 0
+        for module in model.modules():
+            if isinstance(module, ResBlock):
+                nn.init.zeros_(module.fc2.weight)
+                n_resblocks += 1
+        if n_resblocks:
+            logger.info(f"  [Init] ResNet: zeroed fc2 in {n_resblocks} residual blocks (identity start)")
+    except ImportError:
+        pass
+
+    logger.info(f"  [Init] Glorot uniform (gain={gain:.4f}) applied to {n_hidden} hidden layers")
+
+
+def apply_output_init(
+    model: nn.Module,
+    train_data: Dict[str, torch.Tensor],
+    cfg: dict,
+    device: torch.device,
+) -> None:
+    """Initialize the output layer of the BASE MODEL (only).
+
+    Modes (init.output):
+      'zero'    — zero weight and bias
+      'ls'      — least-squares fit to IC data
+      'default' — no-op (keep PyTorch default)
+
+    Raises ValueError if there are too few IC points for a well-determined LS system.
+    The ValueError is caught by the atexit emergency handler and saved to metrics.
+    """
+    init_cfg = cfg.get('init', {})
+    output_mode = init_cfg.get('output', 'default')
+    out_layer = _get_output_layer(model)
+
+    if output_mode == 'zero':
+        with torch.no_grad():
+            if init_cfg.get('spectral_norm', False):
+                std = init_cfg['spectral_norm_init_std']
+                nn.init.normal_(out_layer.weight, mean=0.0, std=std)
+            else:
+                nn.init.zeros_(out_layer.weight)
+            if out_layer.bias is not None:
+                nn.init.zeros_(out_layer.bias)
+        logger.info("  [Init] Output layer: zero-initialized")
+
+    elif output_mode == 'ls':
+        use_bias = init_cfg['ls_use_bias']
+
+        mask_ic = train_data['mask']['IC']
+        n_ic = int(mask_ic.sum().item())
+        hidden_dim = out_layer.weight.shape[1]
+        required = hidden_dim + (1 if use_bias else 0)
+
+        if n_ic < required:
+            raise ValueError(
+                f"[Init] LS-init requires ≥{required} IC points "
+                f"(hidden_dim={hidden_dim}, use_bias={use_bias}), got {n_ic}. "
+                f"Increase sampling.n_initial_train (or initial_train_ratio) or disable ls_init."
+            )
+
+        x_ic = train_data['x'][mask_ic].to(device)
+        t_ic = train_data['t'][mask_ic].to(device)
+        h_gt_ic = train_data['h_gt'][mask_ic].to(device)
+        inputs = torch.cat([x_ic, t_ic], dim=1)
+
+        model.eval()
+        with torch.no_grad():
+            _, features = model(inputs, return_activation=True)  # (N, hidden_dim)
+
+        if use_bias:
+            H = torch.cat(
+                [features, torch.ones(n_ic, 1, device=device)], dim=1
+            ).float()  # (N, hidden_dim+1)
+        else:
+            H = features.float()  # (N, hidden_dim)
+
+        solution = torch.linalg.lstsq(H, h_gt_ic.float()).solution
+        # solution shape: (hidden_dim[+1], output_dim)
+
+        with torch.no_grad():
+            if use_bias:
+                out_layer.weight.copy_(solution[:-1].T)   # (output_dim, hidden_dim)
+                if out_layer.bias is not None:
+                    out_layer.bias.copy_(solution[-1])     # (output_dim,)
+            else:
+                out_layer.weight.copy_(solution.T)
+
+        model.train()
+        output_dim = out_layer.weight.shape[0]
+        logger.info(
+            f"  [Init] Output layer: LS-init from {n_ic} IC points "
+            f"(hidden_dim={hidden_dim}, output_dim={output_dim}, use_bias={use_bias})"
+        )
+
+    # output_mode == 'default' → no-op
+
+
+def apply_expert_init(expert: nn.Module, cfg: dict, zero_output: bool = True) -> None:
+    """Initialize a newly spawned expert network.
+
+    Applies:
+    - Glorot hidden init (if init.hidden == 'glorot'), else PyTorch default
+    - Output layer based on zero_output:
+      - zero_output=True (additive mode): Zero output so expert starts at u=0
+      - zero_output=False (non-additive mode): Same init as hidden layers
+      When spectral_norm is enabled, uses tiny random (std=1e-6) instead of
+      strict zero to avoid sigma=0 → NaN in the spectral norm wrapper.
+
+    LS-init is NEVER applied to experts (only the base model gets it).
+    
+    Args:
+        expert: The expert network to initialize
+        cfg: Config dict containing 'init' and 'activation' settings
+        zero_output: If True, zero the output layer (additive/residual mode).
+                     If False, use same init as hidden (non-additive mode).
+    """
+    apply_hidden_init(expert, cfg)
+
+    out_layer = _get_output_layer(expert)
+    init_cfg = cfg.get('init', {})
+    use_spectral = init_cfg.get('spectral_norm', False)
+    hidden_mode = init_cfg.get('hidden', 'default')
+    
+    with torch.no_grad():
+        if zero_output:
+            # Additive mode: zero output for residual learning
+            if use_spectral:
+                std = init_cfg['spectral_norm_init_std']
+                nn.init.normal_(out_layer.weight, mean=0.0, std=std)
+            else:
+                nn.init.zeros_(out_layer.weight)
+            if out_layer.bias is not None:
+                nn.init.zeros_(out_layer.bias)
+        else:
+            # Non-additive mode: same init as hidden layers
+            if hidden_mode == 'glorot':
+                activation = cfg.get('activation', 'tanh')
+                gain = nn.init.calculate_gain(activation)
+                nn.init.xavier_uniform_(out_layer.weight, gain=gain)
+                if out_layer.bias is not None:
+                    nn.init.zeros_(out_layer.bias)
+            # else: keep PyTorch default (Kaiming uniform)
+
+
+def apply_parent_copy_init(
+    expert: nn.Module,
+    parent_model: nn.Module,
+    cfg: dict = None,
+    copy_output: bool = False,
+) -> None:
+    """Copy weights from parent_model into a newly spawned expert.
+
+    copy_output=False (AToE): output layer is zeroed after copy so the expert
+        contributes u_k=0 at spawn time (parent stays active; children add residuals).
+    copy_output=True (AToELeaves, ANT): output layer is also copied; parent is
+        retired on spawn so children must start from the parent's full solution.
+
+    Hidden layers are aligned from the output end (reversed zip) so that layers
+    closer to output match even when architectures differ (e.g., ANT expert [16,16,1]
+    spawned from base [2,16,16,1]). Only layers with matching shapes are copied.
+    """
+    try:
+        from models.rwf_layer import RWFLinear
+        linear_types = (nn.Linear, RWFLinear)
+    except ImportError:
+        linear_types = (nn.Linear,)
+
+    out_layer_new = _get_output_layer(expert)
+    out_layer_par = _get_output_layer(parent_model)
+
+    # Collect hidden layers only (exclude output) for both expert and parent.
+    expert_hidden = [m for m in expert.modules()
+                     if isinstance(m, linear_types) and m is not out_layer_new]
+    parent_hidden = [m for m in parent_model.modules()
+                     if isinstance(m, linear_types) and m is not out_layer_par]
+
+    # Align hidden layers from the output end (reversed) so output-adjacent layers
+    # match even when expert has fewer layers than parent (e.g., ANT depth-1).
+    n_hidden_copied = 0
+    for mod_new, mod_par in zip(reversed(expert_hidden), reversed(parent_hidden)):
+        if mod_new.weight.shape == mod_par.weight.shape:
+            mod_new.weight.data.copy_(mod_par.weight.data)
+            if mod_new.bias is not None and mod_par.bias is not None:
+                mod_new.bias.data.copy_(mod_par.bias.data)
+            n_hidden_copied += 1
+
+    # Handle output layer separately.
+    output_copied = False
+    use_spectral = (cfg or {}).get('init', {}).get('spectral_norm', False)
+    if copy_output:
+        if out_layer_new.weight.shape == out_layer_par.weight.shape:
+            out_layer_new.weight.data.copy_(out_layer_par.weight.data)
+            if out_layer_new.bias is not None and out_layer_par.bias is not None:
+                out_layer_new.bias.data.copy_(out_layer_par.bias.data)
+            output_copied = True
+    
+    if not output_copied:
+        with torch.no_grad():
+            if use_spectral:
+                std = cfg.get('init', {})['spectral_norm_init_std']
+                nn.init.normal_(out_layer_new.weight, mean=0.0, std=std)
+            else:
+                nn.init.zeros_(out_layer_new.weight)
+            if out_layer_new.bias is not None:
+                nn.init.zeros_(out_layer_new.bias)
+
+    # Log what actually happened.
+    if output_copied:
+        logger.info(f"  [Init] Copied {n_hidden_copied} hidden layers from parent; output copied")
+    else:
+        out_status = 'tiny-random' if use_spectral else 'zeroed'
+        logger.info(f"  [Init] Copied {n_hidden_copied} hidden layers from parent; output {out_status}")
+
+
+def apply_spectral_norm(model: nn.Module, cfg: dict) -> None:
+    """Apply spectral normalization to ALL linear layers (hidden + output).
+
+    Bounds each layer's Lipschitz constant via per-forward-call weight
+    normalization by the spectral radius (power iteration, 1 step per forward).
+    Prevents h_xxxx overflow in KS 4th-order autograd chain.
+
+    Called for base model at init AND for every new expert at spawn.
+    Must be called AFTER weight init so weight_orig receives the correct values.
+    Output layer must NOT be strict-zero before this call (use tiny random init).
+    """
+    if not cfg.get('init', {}).get('spectral_norm', False):
+        return
+
+    try:
+        from models.rwf_layer import RWFLinear
+        linear_types = (nn.Linear, RWFLinear)
+    except ImportError:
+        linear_types = (nn.Linear,)
+
+    n_wrapped = 0
+    for module in model.modules():
+        if isinstance(module, linear_types):
+            nn.utils.parametrizations.spectral_norm(module)
+            n_wrapped += 1
+
+    logger.info(f"  [Init] Spectral norm applied to {n_wrapped} layers (hidden + output)")

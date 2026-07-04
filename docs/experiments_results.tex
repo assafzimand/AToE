@@ -1,0 +1,95 @@
+\subsection{Experimental Setup and Results}
+Table~\ref{tab:benchmark_results} summarizes the experimental configuration and
+results for each benchmark PDE, alongside a vanilla PINN baseline for comparison.
+
+\begin{table}[H]
+\centering
+\scriptsize
+\renewcommand{\arraystretch}{1.8}
+\begin{adjustbox}{max width=\textwidth}
+\begin{tabular}{%
+C{1.0cm}   % CDE
+C{1.8cm}   % Optimizer (# Iterations)
+C{1.2cm}   % Batch Size
+C{2.7cm}   % Vanilla Architecture (# Total Params)
+C{2.8cm}   % Experts Architecture (# Total Params)
+C{2.1cm}   % Additional Methods
+C{1.2cm}   % Vanilla Rel-L2
+C{1.2cm}}  % Rel-L2
+\toprule
+\textbf{PDE} &
+\makecell[c]{\textbf{Optimizer}\\\textbf{(\# Iterations)}} &
+\makecell[c]{\textbf{Batch}\\\textbf{Size}} &
+\makecell[c]{\textbf{Vanilla}\\\textbf{Architecture}\\\textbf{(\# Total Params)}} &
+\makecell[c]{\textbf{Experts}\\\textbf{Architecture}\\\textbf{(\# Total Params)}} &
+\makecell[c]{\textbf{Additional}\\\textbf{Methods}} &
+\makecell[c]{\textbf{Vanilla}\\\textbf{Rel-L2}} &
+\textbf{Rel-L2} \\
+\midrule
+
+Burgers &
+&
+&
+&
+&
+&
+&
+\\
+
+NLS &
+&
+&
+&
+&
+&
+&
+\\
+
+Allen--Cahn &
+\makecell[c]{
+Adam (5k)\\
+SSBroyden (30k)} &
+\makecell[c]{4096} &
+\makecell[c]{
+MLP (3×70)\\
+10,221 params} &
+\makecell[c]{
+4 × MLP (3×30)\\
+7,924 params} &
+\makecell[c]{None} &
+&
+\\
+
+KdV &
+&
+&
+&
+&
+&
+&
+\\
+
+KS &
+&
+&
+&
+&
+&
+&
+\\
+
+\bottomrule
+\end{tabular}
+\end{adjustbox}
+\caption{Experimental configurations and results for the benchmark PDEs.\\
+\textbf{Notes:}
+(A)~The optimizer iteration counts listed are used
+identically for all three training stages - training the vanilla base,
+training the localized experts, and fine-tuning the global model.\\
+(B)~Ground-truth reference solutions are computed on a fine grid using
+high-accuracy spectral solvers: a Fourier pseudo-spectral discretization with
+ETDRK4 exponential time-differencing for Allen--Cahn, KdV, and KS, a split-step
+Fourier scheme for NLS, and the exact Cole-Hopf solution for Burgers.\\
+(C)~All results were generated on an NVIDIA A10G GPU (23~GB VRAM).}
+\label{tab:benchmark_results}
+\end{table}

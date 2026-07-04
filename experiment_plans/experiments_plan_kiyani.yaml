@@ -1,0 +1,692 @@
+# Experiment plan configuration
+# Kiyani et al. Reproduction (arXiv:2501.16371)
+experiment_name: "kiyani_reproduction"
+
+# Base configuration (will be used for all experiments)
+base_config:
+  problem: burgers1d
+  model: AToE                        # 'AToE' | 'AToELeaves' | 'ANT'
+  activation: tanh                   # Activation function for all networks
+  precision: float64                 # 'float32' or 'float64' (Kiyani: double precision)
+
+  # ── Training duration (Phase 3 when using 3-phase, or total when single-phase) ──
+  epochs: 1                          # Phase 3: unused when M=0 (all training in initial_train)
+  batch_size: 99999                  # Full-batch for Adam too (>= dataset size)
+  patience_epochs: 50000             # No early stopping
+  min_epochs: 1                      # No minimum
+  patience_rel_delta: 0.01            # min relative train-loss improvement to reset patience
+
+  # ── Primary optimizer ──
+  # ── Optimizer configuration ──
+  optimizer_1: adam                  # First optimizer: 'adam' | 'soap' | 'ssbroyden'
+  optimizer_2: ssbroyden             # Second optimizer (Kiyani: Adam warmup then SSBroyden)
+  optimizer_switch_epoch: 1000       # Switch to SSBroyden after 1000 Adam epochs
+  lr: 0.001                          # Base (peak) learning rate
+
+  # ── LR scheduling (applies to optimizer_1 only, step-based) ──
+  lr_schedule: none                  # 'none' (constant lr), 'exponential' (step decay), 'cosine' (cosine annealing to 0)
+  lr_warmup_steps: 0                 # No warmup (Kiyani: none mentioned)
+  lr_warmup_start_factor: 0.01       # Warmup starts at this fraction of base lr (0.01 = 1% of lr)
+  lr_decay_rate: 0.98                # For exponential: multiply lr by this factor every lr_decay_steps
+  lr_decay_steps: 1000               # Kiyani: decay every 1000 iterations for KS/Allen-Cahn
+
+  # ── SOAP-specific (only used when optimizer_1 or _2 is 'soap') ──
+  soap_betas: [0.95, 0.95]          # KS-tuned: symmetric betas work better for chaotic dynamics
+  soap_precondition_frequency: 10    # How often SOAP updates its Shampoo-style preconditioner.
+  soap_weight_decay: 0.0             # Weight decay for SOAP
+
+  # ── L-BFGS specific (only used when optimizer_1 or _2 is 'lbfgs') ──
+  lbfgs_lr: 1.0                     # L-BFGS learning rate (line search makes this effectively a max step size).
+  lbfgs_max_iter: 1                  # Kiyani: 1 quasi-Newton step per epoch (matches paper's "iteration" count)
+  lbfgs_history_size: 100            # L-BFGS history size (number of past updates stored).
+  lbfgs_line_search: 'strong_wolfe'  # L-BFGS line search algorithm.
+  lbfgs_tolerance_grad: 0.0          # Gradient tolerance for L-BFGS convergence. 0 = disabled.
+  lbfgs_tolerance_change: 0.0        # Loss change tolerance for L-BFGS convergence. 0 = disabled.
+
+  # ── SSBroyden-specific (only used when optimizer_1 or _2 is 'ssbroyden') ──
+  ssbroyden_lr: 1.0                  # SSBroyden learning rate (scimba default)
+  ssbroyden_tolerance_grad: 1.0e-10  # Gradient tolerance (scimba default)
+
+  # ── Adam hyperparameters (only used when optimizer_1 or _2 is 'adam') ──
+  adam_betas: [0.9, 0.999]           # Adam momentum parameters (beta1, beta2). Standard default.
+  adam_eps: 1.0e-8                   # Adam epsilon for numerical stability.
+
+  # ── General training settings ──
+  cuda: true
+  eval_only: false
+  resume_from: null
+  bins: 5
+  n_bin_visualize_ncc: 100
+  n_freq_grid: 128
+  eval_every: 100                    # Evaluate every N epochs
+  print_every: 100                   # Print progress every N epochs
+  save_every: 999999                   # Save checkpoint every N epochs
+  inner_metrics_eval_every: 1000     # Run NCC/probes/derivatives analysis every N epochs
+  seed: 42
+
+  # ══════════════════════════════════════════════════════════════════════════════
+  # PER-PROBLEM CONFIGURATION
+  # Each problem section MUST include all required fields. No global defaults.
+  # Required per-problem fields: rwf, fourier_features, init, lra, adaptive_sampling,
+  #                              grad_clip_norm, expert_grad_clip_norm
+  # ══════════════════════════════════════════════════════════════════════════════
+
+  schrodinger:
+    spatial_dim: 1
+    output_dim: 2                    # Complex-valued: h = [u, v]
+    spatial_domain: [[-5.0, 5.0]]
+    temporal_domain: [0.0, 1.5707963267948966]
+    wavelet_threshold: 0.1            # Geometric wavelet norm threshold for tree pruning
+    new_norm_threshold: 2.0           # New norm threshold (sum of children classic norms)
+    tree_smoothness_threshold: 0.7   # Besov smoothness threshold (per-problem override)
+    loss_weights:
+      residual: 1.0
+      ic: 1.0
+      bc: 1.0
+    # ── Per-problem features (no global defaults) ──
+    rwf:
+      enabled: false
+      mean: 1.0
+      std: 0.1
+    fourier_features:
+      enabled: false
+      dim: 128
+      scale: 1.0
+      periodic: false
+    init:
+      hidden: parent_weights
+      output: default
+      ls_use_bias: false
+      spectral_norm: false
+      spectral_norm_init_std: 1.0e-6
+    lra:
+      enabled: false
+      update_every: 100
+      alpha: 0.1
+      scheme: grad_norm
+      epsilon: 1.0e-5
+    adaptive_sampling:
+      enabled: true
+      adaptive_ratio: 0.3
+      per_leaf_sampling: false
+      phi: quadratic
+      phi_epsilon: 1.0
+      phi_power: 2.0
+    grad_clip_norm: null
+    expert_grad_clip_norm: null
+    time_marching:
+      enabled: false
+      num_windows: 5
+      freeze_previous_windows: true
+      m_distribution: quadratic
+
+  wave1d:
+    spatial_dim: 1
+    output_dim: 1
+    spatial_domain: [[-5.0, 5.0]]
+    temporal_domain: [0.0, 6.283185307179586]  # 2pi
+    wavelet_threshold: 0.3
+    new_norm_threshold: 1.5
+    tree_smoothness_threshold: 0.35
+    loss_weights:
+      residual: 1.0
+      ic: 1.0
+      bc: 1.0
+    # ── Per-problem features (no global defaults) ──
+    rwf:
+      enabled: false
+      mean: 1.0
+      std: 0.1
+    fourier_features:
+      enabled: false
+      dim: 128
+      scale: 1.0
+      periodic: false
+    init:
+      hidden: parent_weights
+      output: ls
+      ls_use_bias: true
+      spectral_norm: false
+      spectral_norm_init_std: 1.0e-6
+    lra:
+      enabled: false
+      update_every: 100
+      alpha: 0.1
+      scheme: grad_norm
+      epsilon: 1.0e-5
+    adaptive_sampling:
+      enabled: true
+      adaptive_ratio: 0.3
+      per_leaf_sampling: false
+      phi: quadratic
+      phi_epsilon: 1.0
+      phi_power: 2.0
+    grad_clip_norm: 1.0
+    expert_grad_clip_norm: 1.0
+    time_marching:
+      enabled: false
+      num_windows: 5
+      freeze_previous_windows: true
+      m_distribution: quadratic
+
+  burgers1d:
+    pretrained_base_checkpoint: null   # path to a base checkpoint to skip Phase-1 training; null = train Phase 1
+    spatial_dim: 1
+    output_dim: 1
+    spatial_domain: [[-1.0, 1.0]]
+    temporal_domain: [0.0, 1.0]
+    nu: 0.01
+    wavelet_threshold: 0.001
+    new_norm_threshold: 0.015
+    tree_smoothness_threshold: 0.5
+    loss_weights:
+      residual: 1.0
+      ic: 1.0
+      bc: 1.0
+    # ── Per-problem features (no global defaults) ──
+    rwf:
+      enabled: false
+      mean: 1.0
+      std: 0.1
+    fourier_features:
+      enabled: false
+      dim: 128
+      scale: 1.0
+      periodic: false
+    init:
+      hidden: parent_weights
+      output: default
+      ls_use_bias: false
+      spectral_norm: false
+    lra:
+      enabled: false
+      update_every: 100
+      alpha: 0.1
+      scheme: grad_norm
+      epsilon: 1.0e-5
+    adaptive_sampling:
+      enabled: true
+      adaptive_ratio: 0.5
+      per_leaf_sampling: false
+      phi: quadratic
+      phi_epsilon: 1.0
+      phi_power: 2.0
+    grad_clip_norm: null
+    expert_grad_clip_norm: null
+    time_marching:
+      enabled: false
+      num_windows: 5
+      freeze_previous_windows: true
+      m_distribution: quadratic
+
+  burgers2d:
+    spatial_dim: 2
+    output_dim: 1
+    spatial_domain: [[0.0, 1.0], [0.0, 1.0]]
+    temporal_domain: [0.0, 2.0]
+    nu: 0.1                          # Viscosity coefficient
+    wavelet_threshold: 0.0005
+    new_norm_threshold: 0.015
+    tree_smoothness_threshold: 0.5
+    loss_weights:
+      residual: 1.0
+      ic: 1.0
+      bc: 1.0
+    # ── Per-problem features (no global defaults) ──
+    rwf:
+      enabled: false
+      mean: 1.0
+      std: 0.1
+    fourier_features:
+      enabled: false
+      dim: 128
+      scale: 1.0
+      periodic: false
+    init:
+      hidden: parent_weights
+      output: ls
+      ls_use_bias: true
+      spectral_norm: false
+      spectral_norm_init_std: 1.0e-6
+    lra:
+      enabled: false
+      update_every: 100
+      alpha: 0.1
+      scheme: grad_norm
+      epsilon: 1.0e-5
+    adaptive_sampling:
+      enabled: true
+      adaptive_ratio: 0.3
+      per_leaf_sampling: false
+      phi: quadratic
+      phi_epsilon: 1.0
+      phi_power: 2.0
+    grad_clip_norm: 1.0
+    expert_grad_clip_norm: 1.0
+    time_marching:
+      enabled: false
+      num_windows: 5
+      freeze_previous_windows: true
+      m_distribution: quadratic
+
+  allen_cahn:
+    spatial_dim: 1
+    output_dim: 1
+    spatial_domain: [[-1.0, 1.0]]
+    temporal_domain: [0.0, 1.0]
+    D: 0.0001                        # Diffusion coefficient (SOTA benchmark standard)
+    wavelet_threshold: 0.002
+    new_norm_threshold: 0.04
+    tree_smoothness_threshold: 0.5
+    loss_weights:
+      residual: 1.0
+      ic: 1.0                        # Kiyani: equal weights
+      bc: 1.0
+    causal_training:                 # Kiyani: disabled
+      enabled: false
+      num_chunks: 32
+      tol_schedule: [0.01, 0.1, 1.0]
+      min_weight_threshold: 0.99
+    # ── Per-problem features (Kiyani: all disabled for vanilla PINN) ──
+    rwf:
+      enabled: false
+      mean: 1.0
+      std: 0.1
+    fourier_features:
+      enabled: false
+      dim: 128
+      scale: 3.0                     # Higher scale for very sharp interfaces (D=0.0001)
+      periodic: false
+    init:
+      hidden: parent_weights
+      output: default                # Kiyani: no LS init
+      ls_use_bias: false
+      spectral_norm: false
+      spectral_norm_init_std: 1.0e-6
+    lra:
+      enabled: false                 # Kiyani: disabled
+      update_every: 100
+      alpha: 0.1
+      scheme: grad_norm
+      epsilon: 1.0e-5
+    adaptive_sampling:
+      enabled: false                 # Kiyani: no RAD for Allen-Cahn
+      adaptive_ratio: 0.3
+      per_leaf_sampling: false
+      phi: quadratic
+      phi_epsilon: 1.0
+      phi_power: 2.0
+    grad_clip_norm: null
+    expert_grad_clip_norm: null
+    time_marching:
+      enabled: false
+      num_windows: 5
+      freeze_previous_windows: true
+      m_distribution: quadratic
+
+  kdv:
+    spatial_dim: 1
+    output_dim: 1
+    spatial_domain: [[-1.0, 1.0]]
+    temporal_domain: [0.0, 1.0]
+    mu: 0.022                        # Zabusky & Kruskal 1965 dispersion coefficient (code uses mu^2 = 0.000484)
+    wavelet_threshold: 0.0025
+    new_norm_threshold: 0.2
+    tree_smoothness_threshold: 0.4
+    loss_weights:
+      residual: 1.0
+      ic: 1.0
+      bc: 1.0
+    causal_training:                 # Paper-recommended params (Wang et al. 2022)
+      enabled: false
+      num_chunks: 50
+      tol_schedule: [0.1, 1.0, 10.0]
+      min_weight_threshold: 0.99
+    # ── Per-problem features (no global defaults) ──
+    rwf:
+      enabled: false
+      mean: 1.0
+      std: 0.1
+    fourier_features:
+      enabled: false
+      dim: 128
+      scale: 1.0
+      periodic: false
+    init:
+      hidden: parent_weights
+      output: default
+      ls_use_bias: false
+      spectral_norm: false
+    lra:
+      enabled: false
+      update_every: 100
+      alpha: 0.1
+      scheme: grad_norm
+    adaptive_sampling:
+      enabled: true
+      adaptive_ratio: 0.3
+      per_leaf_sampling: false
+      phi: quadratic
+      phi_epsilon: 1.0
+      phi_power: 2.0
+    grad_clip_norm: null
+    expert_grad_clip_norm: null
+    time_marching:
+      enabled: false
+      num_windows: 5
+      freeze_previous_windows: true
+      m_distribution: quadratic
+
+  fisher_kpp:
+    spatial_dim: 1
+    output_dim: 1
+    spatial_domain: [[0.0, 1.0]]
+    temporal_domain: [0.0, 1.0]
+    D: 1.0
+    kappa: 25.0
+    wavelet_threshold: 0.0005
+    new_norm_threshold: 0.005
+    tree_smoothness_threshold: 0.6
+    loss_weights:
+      residual: 1.0
+      ic: 1.0
+      bc: 1.0
+    # ── Per-problem features (no global defaults) ──
+    rwf:
+      enabled: false
+      mean: 1.0
+      std: 0.1
+    fourier_features:
+      enabled: false
+      dim: 128
+      scale: 1.0
+      periodic: false
+    init:
+      hidden: parent_weights
+      output: ls
+      ls_use_bias: true
+      spectral_norm: false
+      spectral_norm_init_std: 1.0e-6
+    lra:
+      enabled: false
+      update_every: 100
+      alpha: 0.1
+      scheme: grad_norm
+      epsilon: 1.0e-5
+    adaptive_sampling:
+      enabled: true
+      adaptive_ratio: 0.3
+      per_leaf_sampling: false
+      phi: quadratic
+      phi_epsilon: 1.0
+      phi_power: 2.0
+    grad_clip_norm: 1.0
+    expert_grad_clip_norm: 1.0
+    time_marching:
+      enabled: false
+      num_windows: 5
+      freeze_previous_windows: true
+      m_distribution: quadratic
+
+  conv_diff:
+    spatial_dim: 1
+    output_dim: 1
+    spatial_domain: [[-1.0, 1.0]]
+    temporal_domain: [0.0, 1.0]
+    beta: 1.0                        # Convection coefficient
+    epsilon: 0.01                    # Diffusion coefficient (Peclet = 100)
+    wavelet_threshold: 0.005
+    new_norm_threshold: 0.05
+    tree_smoothness_threshold: 0.6
+    loss_weights:
+      residual: 1.0
+      ic: 1.0
+      bc: 1.0
+    # ── Per-problem features (no global defaults) ──
+    rwf:
+      enabled: false
+      mean: 1.0
+      std: 0.1
+    fourier_features:
+      enabled: false
+      dim: 128
+      scale: 1.0
+      periodic: false
+    init:
+      hidden: parent_weights
+      output: ls
+      ls_use_bias: true
+      spectral_norm: false
+    lra:
+      enabled: false
+      update_every: 100
+      alpha: 0.1
+    adaptive_sampling:
+      enabled: true
+      adaptive_ratio: 0.3
+      per_leaf_sampling: false
+    grad_clip_norm: 1.0
+    expert_grad_clip_norm: 1.0
+    time_marching:
+      enabled: false
+      num_windows: 5
+      freeze_previous_windows: true
+      m_distribution: quadratic
+
+  ks:
+    spatial_dim: 1
+    output_dim: 1
+    spatial_domain: [[0.0, 6.283185307179586]]  # 2*pi
+    temporal_domain: [0.0, 1.0]
+    alpha: 6.25                      # 100/16
+    beta: 0.390625                   # 100/16^2
+    gamma: 0.00152587890625          # 100/16^4
+    wavelet_threshold: 0.04          
+    new_norm_threshold: 10.0
+    tree_smoothness_threshold: 0.3
+    loss_weights:
+      residual: 1.0
+      ic: 1.0                        # Kiyani: equal weights
+      bc: 1.0
+    causal_training:
+      enabled: false                 # Kiyani: disabled
+      num_chunks: 32
+      tol_schedule: [0.01, 0.1, 1]
+      min_weight_threshold: 0.99
+      per_leaf_causal: false
+    # ── Per-problem features (Kiyani: Fourier M=10, RAD enabled) ──
+    rwf:
+      enabled: false
+      mean: 1.0
+      std: 0.1
+    fourier_features:
+      enabled: true
+      dim: 10                        # Kiyani: M=10 Fourier modes (input dim = 1 + 2*10 = 21)
+      scale: 1.0
+      periodic: false
+    init:
+      hidden: parent_weights
+      output: default                # Kiyani: no LS init
+      ls_use_bias: false
+      spectral_norm: false
+      spectral_norm_init_std: 1.0e-6
+    lra:
+      enabled: false
+      update_every: 100
+      alpha: 0.1
+      scheme: grad_norm
+      epsilon: 1.0e-5
+    adaptive_sampling:
+      enabled: true                  # Kiyani: RAD enabled for KS
+      adaptive_ratio: 0.5
+      per_leaf_sampling: false
+      phi: quadratic
+      phi_epsilon: 1.0
+      phi_power: 2.0
+    grad_clip_norm: null
+    expert_grad_clip_norm: null
+    time_marching:
+      enabled: true                       # Kiyani: 20 windows for t in [0, 1]
+      num_windows: 20
+      freeze_previous_windows: true
+      m_distribution: equal               # Kiyani: equal distribution
+
+  # ── Dataset sampling ratios (global) ──
+  sampling:
+    sample_volume_ratio: 35          # Target: S^(1/d) / V^(1/d) = 35
+    n_initial_train: 256              # explicit count (was initial_train_ratio 0.026). Papers use 256-512.
+    n_boundary_train: 256             # explicit count (was boundary_train_ratio 0.026). Papers use 200+.
+    eval_train_ratio: 0.25           # eval = 25% of train (all types)
+    ncc_train_ratio: 0.25            # ncc = 25% of residual_train
+    resample_every_epochs: 500       # Kiyani: resample every 500 iterations (only during Adam phase)
+    min_points_per_leaf: 50          # Minimum adaptive points per leaf (per_leaf_sampling only); 0 = disabled
+
+  # ── Adaptive Expert PINN configuration (Tree-Based Spawning) ──
+  # Kiyani: M_experts_num=0 makes this a vanilla MLP (no spawning), all training in Phase 1
+  adaptive_pinn:
+    enabled: true                              # Toggle adaptive expert spawning on/off
+    max_experts: 150                           # Maximum number of expert networks
+    spawn_every_epochs: 99999                   # Match old config (2000 = initial_train.epochs)
+    variable_for_node_accept: norm             # "norm" | "new_norm" | "smoothness" -- metric to use for node acceptance/pruning
+    variable_for_expert_size: norm             # "norm" | "new_norm" | "smoothness" -- metric to use for expert architecture sizing
+    AToE_threshold_capacity: null              # null = same as base, int = base capacity at threshold norm
+    ANT_threshold_architecture: null           # null = uses ANT_default_hidden_layers, int = threshold width with scaling
+    ANT_default_hidden_layers: 50              # Neuron width for ANT experts (int; expands to [n] mlp or [n,n] resnet)
+    expert_type: mlp                           # Kiyani: vanilla MLP
+    blending_mode: soft                        # "hard" | "soft" (soft = partition of unity)
+    sigma_fraction: 0.2                        # For soft blending: sigma = fraction * region_size (per-dimension)
+    base_weight: 1.0                           # Uniform weight for base model (soft blending only)
+    base_everywhere: true                      # If false, u_0 has indicator = domain \ experts
+    tree_max_depth: 15                         # Max depth of decision tree for region splitting
+    tree_min_samples_leaf: 50                  # Min samples in tree leaf node
+    enable_timing: false                       # Enable epoch timing profiling (can slow down training)
+    inner_metrics_calculation: false            # Disable NCC/probes during training (complex with experts)
+    enable_gradient_diagnostics: false          # Enable detailed gradient flow diagnostics (verbose)
+    expert_activation_threshold: 0             # null = disabled, float = only evaluate experts with psi > threshold
+    relevant_samples_to_activate_expert: 0     # Min samples in batch for expert to be considered "active"
+    spawning_method: M_term_tree_by_norm          # "by_mean_residual" | "accept_split_by_norm" | "M_term_tree_by_norm" | "use_perfect_trees"
+    M_experts_num: 40                              # Number of top-norm nodes to select (only for M_term_tree_by_norm)
+
+    # ── Post-spawn freeze (Fix 2) ── DISABLED for tree verification
+    # After spawning, freeze base+old experts for N epochs so only the newest expert trains.
+    # 0 = disabled (all models train together immediately after spawn).
+
+    # ── Plateau-gated spawning (Fix 3) ── DISABLED for tree verification
+    # spawn_every_epochs = minimum interval between spawns.
+    # Once that interval elapses, plateau is checked every epoch until met, then spawn fires.
+    # Plateau measured on training loss to avoid using ground truth (pure PINN spirit).
+    # spawn_plateau_epochs should be a multiple of resample_every_epochs (currently 100) so both
+    # ends of the look-back window fall at the same phase in the resampling cycle (apples-to-apples).
+    # 300 = 3 × 100 ✓. With spawn_every=500 this fits well within one spawn interval.
+    spawn_require_plateau: false     # Disabled by default; plateau experiments enable this
+    spawn_plateau_epochs: 50        # look-back window (3× resample_every = fair loss comparison)
+    spawn_plateau_delta: 0.05        # spawn only if training loss improved <1% over the window
+    spawn_retries_before_stop: false  # false = never stop. 0 = stop on first failed spawn attempt.
+                                      # N = allow N retries; counter resets to N after any success.
+    spawn_retry_after: 10            # epochs to wait before retrying after a failed spawn attempt.
+                                      # Counted from the failure epoch (not aligned to spawn_every).
+                                      # Plateau gating still applies at the retry check.
+
+    # ── 3-Phase training config ──
+    # M_term_tree_by_norm: Phase 1 trains base, Phase 2 fits tree + spawns top M, Phase 3 trains full model.
+    # use_perfect_trees: SKIPS Phase 1, loads pre-computed tree from perfect_trees_path, spawns experts, then Phase 3.
+    # For other methods, initial_train is ignored.
+    # If initial_train is absent, single-phase behavior is preserved (backwards compatible).
+    reinitialize_base_after_spawn: false        # If true, reinitialize base model weights after expert creation (before Phase 3)
+    split_icbc: { enabled: false }
+    initial_train:
+      epochs: 31000                            # Kiyani Burgers: 1000 Adam + 30000 SSBroyden
+      optimizer_1: adam
+      optimizer_2: ssbroyden
+      optimizer_switch_epoch: 1000
+      lr: 0.001
+      lr_schedule: none
+      lr_warmup_steps: 0
+
+    # ── Staged per-level (AToE / ANT) ──
+    new_expert_lr_decay: 1.0
+    min_epochs_per_level: 1
+    max_epochs_per_level: 15000
+
+    # ── Final joint fine-tune (AToE / ANT) ──
+    fine_tune:
+      epochs: 0
+      optimizer_1: adam
+      optimizer_2: ssbroyden
+      optimizer_switch_epoch: 7500
+      lr: 0.001
+      lr_schedule: none
+      lr_warmup_steps: 0
+
+
+experiments:
+  # ══════════════════════════════════════════════════════════════════════════════
+  # Kiyani et al. Reproduction Experiments (arXiv:2501.16371)
+  # Vanilla PINNs with Adam + SSBroyden optimizer, float64 precision
+  # ══════════════════════════════════════════════════════════════════════════════
+
+  # BURGERS (Case 4 from paper - 8 hidden x 20, 3021 params)
+  # Paper result: ~1e-5 relative L2 error with SSBroyden
+  - name: burgers_kiyani
+    problem: burgers1d
+    base_architecture: [2, 20, 20, 20, 20, 20, 20, 20, 20, 1]
+    adaptive_pinn:
+      initial_train:
+        epochs: 100000
+        optimizer_1: adam
+        optimizer_2: lbfgs
+        optimizer_switch_epoch: 90000
+        lr: 0.0001
+        lr_schedule: none
+        lr_warmup_steps: 0
+
+      # ── Staged per-level (AToE / ANT) ──
+      new_expert_lr_decay: 1.0
+      min_epochs_per_level: 1
+      max_epochs_per_level: 15000
+
+      # ── Final joint fine-tune (AToE / ANT) ──
+      fine_tune:
+        epochs: 0
+        optimizer_1: adam
+        optimizer_2: lbfgs
+        optimizer_switch_epoch: 13500
+        lr: 0.0001
+        lr_schedule: none
+        lr_warmup_steps: 0
+
+  # # ALLEN-CAHN (Case 3 from paper - 3 hidden x 30, 1981 params)
+  # # Paper result: ~9.43e-7 with kappa continuation (we cannot reproduce kappa trick)
+  # # Expected without kappa continuation: ~1e-4
+  # - name: allen_cahn_kiyani
+  #   problem: allen_cahn
+  #   base_architecture: [2, 30, 30, 30, 1]
+  #   adaptive_pinn:
+  #     initial_train:
+  #       epochs: 35000
+  #       optimizer_1: adam
+  #       optimizer_2: ssbroyden
+  #       optimizer_switch_epoch: 5000
+  #       lr: 0.005
+  #       lr_schedule: exponential
+  #       lr_decay_rate: 0.98
+  #       lr_decay_steps: 1000
+  #       lr_warmup_steps: 0
+
+  # # KS (Case 2 from paper - 5 hidden x 30, with Fourier features M=10)
+  # # Paper: 20 windows, t in [0, 1], SSBroyden + RAD resampling
+  # # Paper result: ~6.51e-4 relative L2 error
+  # - name: ks_kiyani
+  #   problem: ks
+  #   base_architecture: [2, 30, 30, 30, 30, 30, 1]
+  #   adaptive_pinn:
+  #     initial_train:
+  #       epochs: 10000
+  #       optimizer_1: adam
+  #       optimizer_2: ssbroyden
+  #       optimizer_switch_epoch: 1000
+  #       lr: 0.005
+  #       lr_schedule: exponential
+  #       lr_decay_rate: 0.98
+  #       lr_decay_steps: 1000
+  #       lr_warmup_steps: 0

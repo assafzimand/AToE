@@ -1,0 +1,78 @@
+{
+  "bins": 5,
+  "num_classes": 5,
+  "num_samples": 4000,
+  "layers_analyzed": [
+    "layer_1",
+    "layer_2",
+    "layer_3",
+    "layer_4",
+    "layer_5"
+  ],
+  "layer_accuracies": {
+    "layer_1": 0.646,
+    "layer_2": 0.85725,
+    "layer_3": 0.86325,
+    "layer_4": 0.8695,
+    "layer_5": 0.871
+  },
+  "layer_compactness": {
+    "layer_1": {
+      "intra_class": 0.09201914817094803,
+      "intra_class_std": 0.04613957300348638,
+      "inter_class_mean": 0.2385854572057724,
+      "inter_class_std": 0.13707230985164642
+    },
+    "layer_2": {
+      "intra_class": 0.04120134599506855,
+      "intra_class_std": 0.036730667024829945,
+      "inter_class_mean": 0.3021221160888672,
+      "inter_class_std": 0.16300292313098907
+    },
+    "layer_3": {
+      "intra_class": 0.033265390619635585,
+      "intra_class_std": 0.02775676008744772,
+      "inter_class_mean": 0.25652170181274414,
+      "inter_class_std": 0.13902007043361664
+    },
+    "layer_4": {
+      "intra_class": 0.016654021106660366,
+      "intra_class_std": 0.010771429415234294,
+      "inter_class_mean": 0.1461474597454071,
+      "inter_class_std": 0.08257459104061127
+    },
+    "layer_5": {
+      "intra_class": 0.011278667673468589,
+      "intra_class_std": 0.007067850347110779,
+      "inter_class_mean": 0.10180559009313583,
+      "inter_class_std": 0.05913783609867096
+    }
+  },
+  "layer_margins": {
+    "layer_1": {
+      "mean_margin": 0.023131798952817917,
+      "std_margin": 0.05063609033823013,
+      "fraction_positive": 0.646
+    },
+    "layer_2": {
+      "mean_margin": 0.06838969886302948,
+      "std_margin": 0.08299329876899719,
+      "fraction_positive": 0.85725
+    },
+    "layer_3": {
+      "mean_margin": 0.06665434688329697,
+      "std_margin": 0.07364842295646667,
+      "fraction_positive": 0.86325
+    },
+    "layer_4": {
+      "mean_margin": 0.045381445437669754,
+      "std_margin": 0.04144512116909027,
+      "fraction_positive": 0.8695
+    },
+    "layer_5": {
+      "mean_margin": 0.032743655145168304,
+      "std_margin": 0.029831869527697563,
+      "fraction_positive": 0.871
+    }
+  }
+}

@@ -1,0 +1,111 @@
+activation: tanh
+adam_betas:
+- 0.9
+- 0.999
+adam_eps: 1.0e-08
+architecture:
+- 3
+- 100
+- 100
+- 100
+- 100
+- 100
+- 1
+batch_size: 512
+bins: 5
+burgers1d:
+  loss_weights:
+    bc: 1.0
+    ic: 1.0
+    residual: 1.0
+  nu: 0.01
+  output_dim: 1
+  spatial_dim: 1
+  spatial_domain:
+  - - -1.0
+    - 1.0
+  temporal_domain:
+  - 0.0
+  - 1.0
+burgers2d:
+  loss_weights:
+    bc: 1.0
+    ic: 1.0
+    residual: 1.0
+  nu: 0.1
+  output_dim: 1
+  spatial_dim: 2
+  spatial_domain:
+  - - 0.0
+    - 1.0
+  - - 0.0
+    - 1.0
+  temporal_domain:
+  - 0.0
+  - 2.0
+cuda: true
+epochs: 10000
+eval_every: 500
+eval_only: false
+inner_metrics_eval_every: 2501
+lbfgs_history_size: 20
+lbfgs_line_search: strong_wolfe
+lbfgs_lr: 1.0
+lbfgs_max_iter: 20
+lbfgs_tolerance_change: 0.0
+lbfgs_tolerance_grad: 0.0
+lr: 0.0001
+n_bin_visualize_ncc: 100
+n_boundary_eval: 25
+n_boundary_train: 100
+n_initial_eval: 25
+n_initial_train: 100
+n_residual_eval: 5000
+n_residual_train: 20000
+n_samples_ncc: 5000
+name: 5lyr_40k_Wn_flat
+optimizer_switch_at: 0.9
+print_every: 1000
+problem: burgers2d
+problem2:
+  loss_weights:
+    bc: 1.0
+    ic: 1.0
+    residual: 1.0
+  output_dim: 2
+  spatial_dim: 1
+  spatial_domain:
+  - - 0.0
+    - 1.0
+  temporal_domain:
+  - 0.0
+  - 1.0
+resume_from: null
+save_every: 5000
+schrodinger:
+  loss_weights:
+    bc: 1.0
+    ic: 1.0
+    residual: 1.0
+  output_dim: 2
+  spatial_dim: 1
+  spatial_domain:
+  - - -5.0
+    - 5.0
+  temporal_domain:
+  - 0.0
+  - 1.5707963267948966
+seed: 42
+wave1d:
+  loss_weights:
+    bc: 1.0
+    ic: 1.0
+    residual: 1.0
+  output_dim: 1
+  spatial_dim: 1
+  spatial_domain:
+  - - -5.0
+    - 5.0
+  temporal_domain:
+  - 0.0
+  - 6.283185307179586

@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//c/Users/assaf/Desktop/kdv_01_main_20260607_060715/**)",
+      "Bash(Sort-Object Name)"
+    ]
+  }
+}
