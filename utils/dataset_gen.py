@@ -183,8 +183,6 @@ def _analytic_ic(problem: str, x: torch.Tensor, pc: Dict) -> torch.Tensor:
         return x[:, 0:1] ** 2 * torch.cos(math.pi * x[:, 0:1])
     if problem == 'burgers1d':
         return -torch.sin(math.pi * x[:, 0:1])
-    if problem == 'burgers2d':
-        return 1.0 / (1.0 + torch.exp((x[:, 0:1] + x[:, 1:2]) / 0.2))
     if problem == 'kdv':
         return torch.cos(math.pi * x[:, 0:1])
     if problem == 'ks':
@@ -193,14 +191,6 @@ def _analytic_ic(problem: str, x: torch.Tensor, pc: Dict) -> torch.Tensor:
         real = 2.0 / torch.cosh(x[:, 0:1])
         imag = torch.zeros_like(real)
         return torch.cat([real, imag], dim=1)
-    if problem == 'wave1d':
-        return torch.sin(x[:, 0:1])
-    if problem == 'fisher_kpp':
-        kappa = pc['kappa']
-        width = math.sqrt(kappa / 6.0)
-        return 1.0 / (1.0 + torch.exp(width * (x[:, 0:1] - 0.25)))
-    if problem == 'conv_diff':
-        return -torch.sin(math.pi * x[:, 0:1])
     raise ValueError(f"No analytic IC for problem '{problem}'")
 
 
@@ -208,20 +198,9 @@ def _analytic_bc(problem: str, x: torch.Tensor, t: torch.Tensor,
                  pc: Dict) -> torch.Tensor:
     """Return analytical BC h_gt at boundary points.  Shape: (N, output_dim).
 
-    For problems whose loss hardcodes the target (allen_cahn, burgers1d,
-    conv_diff) or uses periodic matching (kdv, ks, schrodinger), the
-    returned values are never read by the loss — we fill zeros."""
-    if problem == 'burgers2d':
-        return 1.0 / (1.0 + torch.exp((x[:, 0:1] + x[:, 1:2] - t) / 0.2))
-    if problem == 'wave1d':
-        return torch.sin(x[:, 0:1]) * torch.cos(t)
-    if problem == 'fisher_kpp':
-        x_lo = pc['spatial_domain'][0][0]
-        x_hi = pc['spatial_domain'][0][1]
-        mid = (x_lo + x_hi) / 2.0
-        return torch.where(x[:, 0:1] < mid,
-                           torch.ones_like(x[:, 0:1]),
-                           torch.zeros_like(x[:, 0:1]))
+    For problems whose loss hardcodes the target (allen_cahn, burgers1d) or
+    uses periodic matching (kdv, ks, schrodinger), the returned values are
+    never read by the loss — we fill zeros."""
     if problem == 'schrodinger':
         return torch.zeros(x.shape[0], 2, device=x.device)
     return torch.zeros(x.shape[0], 1, device=x.device)
@@ -573,38 +552,20 @@ def regenerate_training_data(
     idx += n_ic
 
     # --- BC: boundary coordinates + analytical h_gt ---
-    if spatial_dim == 1:
-        x_lo, x_hi = spatial_domain[0]
-        n_left = n_bc // 2
-        n_right = n_bc - n_left
-        t_bc = torch.rand(max(n_left, n_right), device=device) * (t_max - t_min) + t_min
-        x[idx:idx + n_left, 0] = x_lo
-        t[idx:idx + n_left, 0] = t_bc[:n_left]
-        idx += n_left
-        x[idx:idx + n_right, 0] = x_hi
-        t[idx:idx + n_right, 0] = t_bc[:n_right]
-        idx += n_right
-    else:
-        x0_lo, x0_hi = spatial_domain[0]
-        x1_lo, x1_hi = spatial_domain[1]
-        n_per = n_bc // 4
-        rem = n_bc - 4 * n_per
-        for ei in range(4):
-            ne = n_per + (1 if ei < rem else 0)
-            if ei == 0:
-                x[idx:idx + ne, 0] = x0_lo
-                x[idx:idx + ne, 1] = torch.rand(ne, device=device) * (x1_hi - x1_lo) + x1_lo
-            elif ei == 1:
-                x[idx:idx + ne, 0] = x0_hi
-                x[idx:idx + ne, 1] = torch.rand(ne, device=device) * (x1_hi - x1_lo) + x1_lo
-            elif ei == 2:
-                x[idx:idx + ne, 0] = torch.rand(ne, device=device) * (x0_hi - x0_lo) + x0_lo
-                x[idx:idx + ne, 1] = x1_lo
-            else:
-                x[idx:idx + ne, 0] = torch.rand(ne, device=device) * (x0_hi - x0_lo) + x0_lo
-                x[idx:idx + ne, 1] = x1_hi
-            t[idx:idx + ne, 0] = torch.rand(ne, device=device) * (t_max - t_min) + t_min
-            idx += ne
+    if spatial_dim != 1:
+        raise ValueError(
+            f"regenerate_training_data supports 1D spatial problems only "
+            f"(got spatial_dim={spatial_dim}).")
+    x_lo, x_hi = spatial_domain[0]
+    n_left = n_bc // 2
+    n_right = n_bc - n_left
+    t_bc = torch.rand(max(n_left, n_right), device=device) * (t_max - t_min) + t_min
+    x[idx:idx + n_left, 0] = x_lo
+    t[idx:idx + n_left, 0] = t_bc[:n_left]
+    idx += n_left
+    x[idx:idx + n_right, 0] = x_hi
+    t[idx:idx + n_right, 0] = t_bc[:n_right]
+    idx += n_right
 
     bc_start = n_res + n_ic
     h_gt[bc_start:] = _analytic_bc(problem, x[bc_start:], t[bc_start:], pc)

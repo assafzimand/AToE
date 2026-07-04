@@ -21,9 +21,6 @@ _PROBLEM_META = {
     'burgers1d':   ('solvers.burgers1d_solver',    ['u']),
     'kdv':         ('solvers.kdv_solver',           ['u']),
     'ks':          ('solvers.ks_solver',            ['u']),
-    'wave1d':      ('solvers.wave1d_solver',        ['u']),
-    'conv_diff':   ('solvers.conv_diff_solver',     ['u']),
-    'fisher_kpp':  ('solvers.fisher_kpp_solver',    ['u']),
     'schrodinger': ('solvers.schrodinger_solver',   ['u (Real)', 'v (Imaginary)']),
 }
 
