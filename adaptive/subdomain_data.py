@@ -403,7 +403,8 @@ def _add_bc_faces_periodic(
             )
 
             if is_true:
-                # Fix 3+4: Use shared t per dimension, filter to expert's t-range
+                # Shared t per dimension, filtered to this expert's t-range,
+                # so periodic pairing lines up across experts
                 t_global = bc_t_global[d]
                 # Filter t-values that fall within this expert's temporal range
                 t_mask = (t_global[:, 0] >= t_lo) & (t_global[:, 0] <= t_hi)
@@ -416,7 +417,7 @@ def _add_bc_faces_periodic(
                 kind_val = KIND_BC_TRUE
                 face_id = d * 2 + side_idx
             else:
-                # Fix 6: x-face interface uses KIND_INTERFACE_BC (weighted by w_bc)
+                # Interior x-face interface (weighted by w_bc)
                 t_bc = (
                     torch.rand(n_pts, 1, device=device)
                     * (t_hi - t_lo) + t_lo

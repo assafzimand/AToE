@@ -11,14 +11,6 @@ where:
 
 Parameters: alpha = 100/16, beta = 100/16^2, gamma = 100/16^4
 (PirateNet benchmark; Wang et al., JMLR 2024)
-
-LEGACY PATHS (DISABLED):
-    - Decomposed derivative computation: DISABLED. The analytical 4th derivative
-      of sigmoid indicators (d⁴ψ/dx⁴) involves 1/σ⁴ terms causing catastrophic
-      cancellation. Standard autograd on composed output is numerically stable.
-    - Analytical indicator derivatives: DISABLED. The compute_analytical_indicator_derivatives
-      function was specific to the legacy sigmoid window. With the new compact smoothstep
-      windows, all derivatives are computed via autograd on the composed forward output.
 """
 
 import math

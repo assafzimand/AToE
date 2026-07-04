@@ -116,7 +116,7 @@ def run_single_experiment(exp_config, base_config, exp_name, parent_dir):
 
 
 def main():
-    """Main experiment runner."""
+    """Main experiment runner. Optional argv[1]: path to a plan YAML."""
     # Set up logging (console only initially)
     setup_logging(run_dir=None)
 
@@ -124,8 +124,10 @@ def main():
     logger.info("AToE: Automated Experiments")
     logger.info("="*70)
 
-    # Load experiment plan
-    plan = load_experiment_plan()
+    # Load experiment plan (default experiments_plan.yaml)
+    plan_path = sys.argv[1] if len(sys.argv) > 1 else "experiments_plan.yaml"
+    logger.info(f"Plan: {plan_path}")
+    plan = load_experiment_plan(plan_path)
     parent_dir = create_experiment_dir(plan)
 
     # Set up logging to write to the experiment directory

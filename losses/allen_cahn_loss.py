@@ -8,12 +8,6 @@ where:
 - MSE_f: PDE residual loss (h_t - D*h_xx - 5*(h - h^3) = 0)
 - MSE_0: Initial condition loss (h(x,0) = x^2*cos(pi*x))
 - MSE_b: Periodic boundary condition loss (h(-1,t) = h(1,t) and h_x(-1,t) = h_x(1,t))
-
-LEGACY PATHS (DISABLED):
-    - Decomposed derivative computation: DISABLED. With compact smoothstep windows,
-      all derivatives are computed via autograd on composed output.
-    - Analytical indicator derivatives: DISABLED. The compute_analytical_indicator_derivatives
-      function was specific to the legacy sigmoid window and is preserved for reference only.
 """
 
 import torch

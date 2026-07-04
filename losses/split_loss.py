@@ -65,7 +65,7 @@ def build_split_loss(
     def split_loss_fn(
         model, batch, return_components=False, **kw
     ):
-        # Fix 1: Fall back to original loss if batch lacks split keys (eval batches)
+        # Eval batches carry no split keys: fall back to the original loss
         if 'expert_id' not in batch or 'kind' not in batch:
             if orig_loss_fn is not None:
                 return orig_loss_fn(model, batch, return_components=return_components, **kw)
@@ -284,8 +284,7 @@ def _compute_expert_loss(
             (u_if_bc - h_gt[ifm_bc]) ** 2
         )
 
-    # ── BC true: Dirichlet (for non-periodic problems only) ──
-    # Fix 2: Allen-Cahn uses periodic BC pairing at batch level, skip here
+    # ── BC true: Dirichlet (Allen-Cahn instead uses batch-level periodic pairing) ──
     bc_mask = (kinds == KIND_BC_TRUE)
     if (not is_allen_cahn) and bc_mask.sum() > 0:
         xt_bc = torch.cat(
