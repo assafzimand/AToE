@@ -19,6 +19,7 @@
 #   burgers_ssbroyden    tiny net + SSBroyden second-stage (falls back to LBFGS loudly
 #                        if scimba is missing — check the log)
 #   kdv_resnet           resnet expert_type for base + experts
+#   burgers_piratenet    piratenet expert_type (3 hidden layers = 1 pirate block)
 # ══════════════════════════════════════════════════════════════════════════
 experiment_name: "smoke_test"
 
@@ -28,16 +29,16 @@ base_config:
   activation: tanh
   precision: float64
 
-  epochs: 60                          # Phase-3 leaf split budget
+  epochs: 6                          # Phase-3 leaf split budget
   batch_size: 99999
   min_epochs: 1
-  eval_every: 10
-  patience_evals: 50                  # effectively disabled at this scale
+  eval_every: 2
+  patience_evals: 5                  # effectively disabled at this scale
   patience_rel_delta: 0.01
 
   optimizer_1: adam
   optimizer_2: lbfgs                  # light second stage for CPU smoke runs
-  optimizer_switch_epoch: 30
+  optimizer_switch_epoch: 3
   lr: 0.001
   lr_schedule: none
   lr_decay_rate: 0.98
@@ -193,7 +194,7 @@ base_config:
     n_boundary_train: 64
     eval_train_ratio: 0.25
     resample_every_epochs: 1
-    plot_samples_every: 30
+    plot_samples_every: 2               # exercise the residual-heatmap diagnostics
 
   adaptive_pinn:
     enabled: true
@@ -212,10 +213,10 @@ base_config:
     split_icbc: { enabled: true }
 
     initial_train:
-      epochs: 60
+      epochs: 6
       optimizer_1: adam
       optimizer_2: lbfgs
-      optimizer_switch_epoch: 30
+      optimizer_switch_epoch: 3
       lr: 0.001
       lr_schedule: none
       lr_decay_rate: 0.98
@@ -223,10 +224,10 @@ base_config:
       lr_warmup_steps: 0
 
     fine_tune:
-      epochs: 60
+      epochs: 6
       optimizer_1: adam
       optimizer_2: lbfgs
-      optimizer_switch_epoch: 30
+      optimizer_switch_epoch: 3
       lr: 0.0001
       lr_schedule: none
       lr_decay_rate: 0.98
@@ -239,25 +240,25 @@ experiments:
   - name: burgers_pretrained
     problem: burgers1d
     model: AToELeaves
-    base_architecture: [2, 60, 60, 60, 60, 1]     # adopted from the checkpoint
-    experts_architecture: [2, 20, 20, 20, 1]
+    base_architecture: [2, 6, 6, 6, 6, 1]     # adopted from the checkpoint
+    experts_architecture: [2, 2, 2, 2, 1]
     burgers1d:
       pretrained_base_checkpoint: "roots_checkpoints/burgers_root.pt"
 
   - name: burgers_lra_glorot_ls
     problem: burgers1d
     model: AToELeaves
-    base_architecture: [2, 20, 20, 20, 1]
-    experts_architecture: [2, 20, 20, 20, 1]
+    base_architecture: [2, 2, 2, 2, 1]
+    experts_architecture: [2, 2, 2, 2, 1]
     burgers1d:
-      lra: {enabled: true}
+      lra: {enabled: true, update_every: 2}   # must fire within 6 epochs
       init: {hidden: glorot, output: ls}
 
   - name: allen_cahn_causal
     problem: allen_cahn
     model: AToELeaves
-    base_architecture: [2, 20, 20, 20, 1]
-    experts_architecture: [2, 20, 20, 20, 1]
+    base_architecture: [2, 2, 2, 2, 1]
+    experts_architecture: [2, 2, 2, 2, 1]
     allen_cahn:
       causal_training: {enabled: true}
       loss_weights: {continuity: 1.0}
@@ -265,22 +266,22 @@ experiments:
   - name: kdv_rwf
     problem: kdv
     model: AToELeaves
-    base_architecture: [2, 20, 20, 20, 1]
-    experts_architecture: [2, 20, 20, 20, 1]
+    base_architecture: [2, 2, 2, 2, 1]
+    experts_architecture: [2, 2, 2, 2, 1]
     kdv:
       rwf: {enabled: true}
 
   - name: ks_ff_timemarching
     problem: ks
     model: AToELeaves
-    base_architecture: [2, 20, 20, 20, 1]
-    experts_architecture: [2, 20, 20, 20, 1]
+    base_architecture: [2, 2, 2, 2, 1]
+    experts_architecture: [2, 2, 2, 2, 1]
 
   - name: schrodinger_soap
     problem: schrodinger
     model: AToELeaves
-    base_architecture: [2, 20, 20, 20, 2]
-    experts_architecture: [2, 20, 20, 20, 2]
+    base_architecture: [2, 2, 2, 2, 2]
+    experts_architecture: [2, 2, 2, 2, 2]
     optimizer_1: soap
     optimizer_2: null
 
@@ -294,7 +295,15 @@ experiments:
   - name: kdv_resnet
     problem: kdv
     model: AToELeaves
-    base_architecture: [2, 20, 20, 20, 1]
-    experts_architecture: [2, 20, 20, 20, 1]
+    base_architecture: [2, 2, 2, 2, 1]
+    experts_architecture: [2, 2, 2, 2, 1]
     adaptive_pinn:
       expert_type: resnet
+
+  - name: burgers_piratenet
+    problem: burgers1d
+    model: AToELeaves
+    base_architecture: [2, 4, 4, 4, 1]        # 3 uniform hidden layers = 1 pirate block
+    experts_architecture: [2, 4, 4, 4, 1]
+    adaptive_pinn:
+      expert_type: piratenet
