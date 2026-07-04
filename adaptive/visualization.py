@@ -799,3 +799,99 @@ def plot_expert_soft_weights(
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     plt.close()
     logger.info(f"  {mode_str} blending weights plot saved to {output_path}")
+
+def plot_capacity_map(
+    regions,
+    expert_params: List[int],
+    leaf_indices,
+    base_params: int,
+    domain_bounds: Dict,
+    output_path: Union[str, Path],
+    title_suffix: str = '',
+    n_grid: int = 300,
+) -> None:
+    """Heatmap of parameter DENSITY (params per unit domain volume) per leaf.
+
+    At each point the value is expert_params[k] / volume(region_k) for the
+    leaf region(s) covering it. Density (rather than raw parameter count)
+    makes small, heavily-parameterized regions stand out — the quantity the
+    adaptive decomposition is supposed to concentrate.
+
+    Only 1D-spatial (x, t) domains are drawn. Regions accept either
+    RegionDescriptor objects or dicts with bounds_lower/bounds_upper.
+
+    Args:
+        regions: All expert regions (leaves are selected via leaf_indices).
+        expert_params: Parameter count per expert (same indexing as regions).
+        leaf_indices: Indices of leaf experts (the active composition).
+        base_params: Root parameter count (reported in the title only; the
+            root is retired from the leaves-only composition).
+        domain_bounds: {'lower': [x_min, t_min], 'upper': [x_max, t_max]}.
+        output_path: Destination PNG path.
+        title_suffix: Extra text appended to the title (e.g. a spawn tag).
+        n_grid: Heatmap resolution per axis.
+    """
+    lower = domain_bounds['lower']
+    upper = domain_bounds['upper']
+    if len(lower) != 2:
+        logger.info("  [CapacityMap] Only 1D-spatial (x, t) domains supported — skipped.")
+        return
+
+    def _bounds(r):
+        if isinstance(r, dict):
+            return r['bounds_lower'], r['bounds_upper']
+        return r.bounds_lower, r.bounds_upper
+
+    x_grid = np.linspace(lower[0], upper[0], n_grid)
+    t_grid = np.linspace(lower[1], upper[1], n_grid)
+    X, T = np.meshgrid(x_grid, t_grid, indexing='ij')
+    pts = np.column_stack([X.ravel(), T.ravel()])
+
+    leaf_set = set(int(i) for i in leaf_indices)
+    density = np.zeros(pts.shape[0])
+    for i in sorted(leaf_set):
+        if i >= len(regions) or i >= len(expert_params):
+            continue
+        lo, hi = _bounds(regions[i])
+        vol = 1.0
+        for a, b in zip(lo, hi):
+            vol *= max(b - a, 1e-12)
+        mask = np.all((pts >= np.array(lo)) & (pts <= np.array(hi)), axis=1)
+        density[mask] += expert_params[i] / vol
+    density = density.reshape(n_grid, n_grid)
+
+    fig, ax = plt.subplots(figsize=(9, 7))
+    im = ax.imshow(
+        density.T,
+        extent=[x_grid[0], x_grid[-1], t_grid[0], t_grid[-1]],
+        origin='lower', aspect='auto', cmap='YlOrRd',
+    )
+    plt.colorbar(im, ax=ax, label='Parameters / unit volume')
+
+    for i, region in enumerate(regions):
+        lo, hi = _bounds(region)
+        is_leaf = i in leaf_set
+        color, lw, ls = ('red', 1.5, '-') if is_leaf else ('grey', 1.0, '--')
+        ax.add_patch(patches.Rectangle(
+            (lo[0], lo[1]), hi[0] - lo[0], hi[1] - lo[1],
+            linewidth=lw, edgecolor=color, facecolor='none', linestyle=ls))
+
+    n_leaves = len(leaf_set)
+    leaf_total = sum(expert_params[i] for i in leaf_set if i < len(expert_params))
+    ax.set_xlabel('x')
+    ax.set_ylabel('t')
+    ax.set_title(
+        f"Capacity density{title_suffix} — {n_leaves} leaves, "
+        f"{leaf_total:,} leaf params (root: {base_params:,})")
+    handles = [
+        patches.Patch(edgecolor='red', facecolor='none', linestyle='-',
+                      label='Leaf expert region'),
+        patches.Patch(edgecolor='grey', facecolor='none', linestyle='--',
+                      label='Non-leaf (retired)'),
+    ]
+    ax.legend(handles=handles, fontsize=8, loc='upper right')
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    logger.info(f"  Capacity-density map saved to {output_path}")

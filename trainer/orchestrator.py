@@ -533,13 +533,14 @@ def _spawn_nodes(ctx: TrainingContext, level_nodes, copy_output: bool,
 
 
 def _plot_after_spawn(ctx: TrainingContext, tag: str) -> None:
-    """Save expert-region (and soft-weight) plots after a spawn event."""
+    """Save expert-region, soft-weight, and capacity-density plots after a spawn."""
     model = ctx.model
     if (not ctx.is_adaptive or not hasattr(model, 'num_experts')
             or model.num_experts == 0):
         return
     from adaptive.visualization import (plot_expert_regions,
-                                        plot_expert_soft_weights)
+                                        plot_expert_soft_weights,
+                                        plot_capacity_map)
     domain_bounds = ctx.domain_bounds
     adaptive_plots_dir = ctx.adaptive_plots_dir
     gt_grid, gt_x, gt_t = ctx.gt_grid, ctx.gt_x, ctx.gt_t
@@ -568,6 +569,22 @@ def _plot_after_spawn(ctx: TrainingContext, tag: str) -> None:
             output_path=adaptive_plots_dir / f"soft_weights_{tag}.png",
             title_prefix=f"{tag}: ", leaf_indices=leaf_indices_set,
         )
+    if problem_type == '2d':
+        try:
+            expert_params = [sum(p.numel() for p in e.parameters())
+                             for e in model.experts]
+            base_params = sum(p.numel() for p in model.base_model.parameters())
+            plot_capacity_map(
+                regions=model.regions,
+                expert_params=expert_params,
+                leaf_indices=leaf_expert_indices,
+                base_params=base_params,
+                domain_bounds=domain_bounds,
+                output_path=adaptive_plots_dir / f"capacity_map_{tag}.png",
+                title_suffix=f" ({tag})",
+            )
+        except Exception as _cap_err:
+            logger.info(f"  [CapacityMap] Failed: {_cap_err}")
 
 
 def _check_output_continuity(ctx: TrainingContext, label: str = "spawn") -> Dict:
