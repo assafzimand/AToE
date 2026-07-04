@@ -99,7 +99,7 @@ def build_split_loss(
         # order) autograd calls run once instead of once per expert.
         residual_losses = _compute_all_residual_losses(
             model, x, t, expert_ids, kinds,
-            pde_res_fn, deriv_fn, pde_params,
+            pde_res_fn, deriv_fn, pde_params, problem,
             residual_cache=(
                 residual_cache
                 if split_loss_fn._cache_residuals else None
@@ -163,7 +163,7 @@ def build_split_loss(
 
 def _compute_all_residual_losses(
     model, x, t, expert_ids, kinds,
-    pde_res_fn, deriv_fn, pde_params,
+    pde_res_fn, deriv_fn, pde_params, problem,
     residual_cache=None,
 ):
     """Per-expert residual losses computed in a single autograd graph.
@@ -205,10 +205,20 @@ def _compute_all_residual_losses(
         start += n
     u_all = torch.cat(u_parts, dim=0)
 
-    hf = u_all[:, 0]
-    derivs = deriv_fn(hf, xf, tf)
-    res = pde_res_fn(hf, *derivs, **pde_params)
-    r2 = res ** 2
+    if problem == 'schrodinger':
+        # Complex field h = u + iv: deriv_fn(u, v, x, t) -> complex derivatives,
+        # residual is complex — r² is the squared complex magnitude.
+        u_c = u_all[:, 0]
+        v_c = u_all[:, 1]
+        h_t, h_x, h_xx = deriv_fn(u_c, v_c, xf, tf)
+        h = torch.complex(u_c, v_c)
+        res = pde_res_fn(h, h_t, h_xx)
+        r2 = res.abs() ** 2
+    else:
+        hf = u_all[:, 0]
+        derivs = deriv_fn(hf, xf, tf)
+        res = pde_res_fn(hf, *derivs, **pde_params)
+        r2 = res ** 2
 
     if residual_cache is not None:
         residual_cache.append((
@@ -464,119 +474,102 @@ def _compute_continuity_loss(
     cont_mask = (kinds == KIND_CONTINUITY)
     if cont_mask.sum() == 0:
         return torch.tensor(0.0, device=device), {}
-    
+
     x_cont = x[cont_mask]
     t_cont = t[cont_mask]
     eid_cont = expert_ids[cont_mask]
     neighbor_cont = cont_neighbors[cont_mask]
     dim_cont = cont_dims[cont_mask]
-    
-    # PDE order determines how many derivatives to match
-    # Allen-Cahn has second-order spatial derivatives
-    pde_order = 2 if problem in ('allen_cahn', 'burgers1d', 'kdv') else 1
-    if problem == 'ks':
-        pde_order = 4  # KS has 4th order
-    
+
+    pde_order = _pde_spatial_order(problem)
+
     total_loss = torch.tensor(0.0, device=device)
     cont_per_expert = {}
     n_pairs = 0
-    
+
     # Group by (expert_a, expert_b, face_dim) for batched evaluation
     # Create composite key: a * 1e8 + b * 1e4 + d
     pair_keys = eid_cont * 100000000 + neighbor_cont * 10000 + dim_cont
     unique_keys = pair_keys.unique().tolist()
-    
+
     for key in unique_keys:
         key_mask = (pair_keys == key)
         eidx_a = int(key // 100000000)
         eidx_b = int((key % 100000000) // 10000)
         face_dim = int(key % 10000)
-        
+
         # Get points for this pair
         x_pair = x_cont[key_mask].clone().detach().requires_grad_(True)
         t_pair = t_cont[key_mask].clone().detach().requires_grad_(True)
         xt_pair = torch.cat([x_pair, t_pair], dim=1)
-        
+
         n_pts = x_pair.shape[0]
         if n_pts == 0:
             continue
-        
-        # Evaluate both experts at same coordinates
-        u_a = model.forward_single_expert(eidx_a, xt_pair)[:, 0]
-        u_b = model.forward_single_expert(eidx_b, xt_pair)[:, 0]
-        
-        # Value mismatch
-        pair_loss = torch.sum((u_a - u_b) ** 2)
-        
-        # First derivative mismatch (along face-normal dimension)
-        if pde_order >= 1:
-            if face_dim < x_pair.shape[1]:  # spatial dimension
-                # Derivative w.r.t. x (spatial)
-                du_a_dx = torch.autograd.grad(
-                    u_a, x_pair,
-                    grad_outputs=torch.ones_like(u_a),
+
+        # Evaluate both experts at the same coordinates (all output components)
+        u_a_full = model.forward_single_expert(eidx_a, xt_pair)
+        u_b_full = model.forward_single_expert(eidx_b, xt_pair)
+
+        # Face-normal differentiation target: spatial dim or time
+        is_spatial = face_dim < x_pair.shape[1]
+        wrt = x_pair if is_spatial else t_pair
+        col = face_dim if is_spatial else 0
+
+        pair_loss = torch.tensor(0.0, device=device)
+        for c in range(u_a_full.shape[1]):
+            cur_a = u_a_full[:, c]
+            cur_b = u_b_full[:, c]
+            # Value mismatch
+            pair_loss = pair_loss + torch.sum((cur_a - cur_b) ** 2)
+            # Derivative mismatches up to the PDE's spatial order along the
+            # face-normal dimension
+            for _order in range(pde_order):
+                cur_a = torch.autograd.grad(
+                    cur_a, wrt,
+                    grad_outputs=torch.ones_like(cur_a),
                     create_graph=True, retain_graph=True,
-                )[0][:, face_dim]
-                du_b_dx = torch.autograd.grad(
-                    u_b, x_pair,
-                    grad_outputs=torch.ones_like(u_b),
+                )[0][:, col]
+                cur_b = torch.autograd.grad(
+                    cur_b, wrt,
+                    grad_outputs=torch.ones_like(cur_b),
                     create_graph=True, retain_graph=True,
-                )[0][:, face_dim]
-            else:
-                # Derivative w.r.t. t (temporal dimension)
-                du_a_dx = torch.autograd.grad(
-                    u_a, t_pair,
-                    grad_outputs=torch.ones_like(u_a),
-                    create_graph=True, retain_graph=True,
-                )[0][:, 0]
-                du_b_dx = torch.autograd.grad(
-                    u_b, t_pair,
-                    grad_outputs=torch.ones_like(u_b),
-                    create_graph=True, retain_graph=True,
-                )[0][:, 0]
-            pair_loss = pair_loss + torch.sum((du_a_dx - du_b_dx) ** 2)
-        
-        # Second derivative mismatch
-        if pde_order >= 2:
-            if face_dim < x_pair.shape[1]:
-                d2u_a_dx2 = torch.autograd.grad(
-                    du_a_dx, x_pair,
-                    grad_outputs=torch.ones_like(du_a_dx),
-                    create_graph=True, retain_graph=True,
-                )[0][:, face_dim]
-                d2u_b_dx2 = torch.autograd.grad(
-                    du_b_dx, x_pair,
-                    grad_outputs=torch.ones_like(du_b_dx),
-                    create_graph=True, retain_graph=True,
-                )[0][:, face_dim]
-            else:
-                d2u_a_dx2 = torch.autograd.grad(
-                    du_a_dx, t_pair,
-                    grad_outputs=torch.ones_like(du_a_dx),
-                    create_graph=True, retain_graph=True,
-                )[0][:, 0]
-                d2u_b_dx2 = torch.autograd.grad(
-                    du_b_dx, t_pair,
-                    grad_outputs=torch.ones_like(du_b_dx),
-                    create_graph=True, retain_graph=True,
-                )[0][:, 0]
-            pair_loss = pair_loss + torch.sum((d2u_a_dx2 - d2u_b_dx2) ** 2)
-        
+                )[0][:, col]
+                pair_loss = pair_loss + torch.sum((cur_a - cur_b) ** 2)
+
         total_loss = total_loss + pair_loss
         n_pairs += n_pts
-        
+
         # Track per-expert contribution (split equally between a and b)
         pair_loss_val = pair_loss.item() / 2 if n_pts > 0 else 0.0
         cont_per_expert[eidx_a] = cont_per_expert.get(eidx_a, 0.0) + pair_loss_val
         cont_per_expert[eidx_b] = cont_per_expert.get(eidx_b, 0.0) + pair_loss_val
-    
+
     if n_pairs > 0:
         total_loss = total_loss / n_pairs
         # Normalize per-expert values
         for eidx in cont_per_expert:
             cont_per_expert[eidx] /= n_pairs
-    
+
     return total_loss, cont_per_expert
+
+
+# Highest spatial derivative order per PDE (drives continuity matching depth).
+_PDE_SPATIAL_ORDER = {
+    'allen_cahn': 2,
+    'burgers1d': 2,
+    'kdv': 3,
+    'ks': 4,
+    'schrodinger': 2,
+}
+
+
+def _pde_spatial_order(problem: str) -> int:
+    if problem not in _PDE_SPATIAL_ORDER:
+        raise ValueError(
+            f"split loss has no PDE order mapping for '{problem}' "
+            f"(known: {sorted(_PDE_SPATIAL_ORDER)})")
+    return _PDE_SPATIAL_ORDER[problem]
 
 
 def _import_pde_helpers(problem: str):
@@ -595,8 +588,10 @@ def _get_pde_params(problem: str, pc: Dict) -> Dict:
         return {'mu': pc['mu']}
     if problem == 'ks':
         return {
-            'alpha': pc.get('alpha', 1.0),
-            'beta': pc.get('beta', 1.0),
-            'gamma': pc.get('gamma', 1.0),
+            'alpha': pc['alpha'],
+            'beta': pc['beta'],
+            'gamma': pc['gamma'],
         }
-    return {}
+    if problem == 'schrodinger':
+        return {}  # fixed coefficients (1/2 and 1)
+    raise ValueError(f"split loss has no PDE params mapping for '{problem}'")
