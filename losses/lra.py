@@ -57,12 +57,17 @@ class LRAWeights:
         model: torch.nn.Module,
         loss_fn: Callable,
         batch: Dict[str, torch.Tensor],
-    ) -> None:
+    ) -> bool:
+        """Recompute weights from per-term gradient norms.
+
+        Returns True if an update happened, False when skipped (split-loss
+        batches, which return per-expert nested dicts).
+        """
         components = loss_fn(model, batch, return_components=True)
         if any(isinstance(v, dict) for v in components.values()):
             # Split-loss batches return per-expert nested dicts; LRA balances
             # the global composed loss only, so skip the update here.
-            return
+            return False
         # 'total' is the weighted sum of the other terms, not a component
         components = {k: v for k, v in components.items() if k != 'total'}
         trainable_params = [p for p in model.parameters() if p.requires_grad]
@@ -125,6 +130,8 @@ class LRAWeights:
                     + self.alpha * target
                 )
             self.weights['residual'] = self.fixed_residual_weight
+
+        return True
 
     def get(self, key: str) -> float:
         return self.weights.get(key, 1.0)

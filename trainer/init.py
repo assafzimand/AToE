@@ -207,15 +207,32 @@ def apply_parent_copy_init(
     copy_output=True (AToE-Leaves): output layer is also copied; the parent is
         retired on spawn so children must start from the parent's full solution.
 
-    Hidden layers are aligned from the output end (reversed zip) so that layers
-    closer to output match even when architectures differ. Only layers with
-    matching shapes are copied.
+    The FULL module state is copied (not just weight/bias) so factorized
+    layers like RWFLinear transfer their scale parameter too — otherwise the
+    child's effective weights (scale * weight) would differ from the parent's.
+
+    Raises RuntimeError (stopping training with a clear log) if the expert's
+    architecture does not match the parent's — a parent_weights init that
+    cannot actually copy would otherwise silently train from a random/zero
+    start while claiming to be a copy.
     """
     try:
         from models.rwf_layer import RWFLinear
         linear_types = (nn.Linear, RWFLinear)
     except ImportError:
         linear_types = (nn.Linear,)
+
+    def _copy_module(dst: nn.Module, src: nn.Module) -> bool:
+        if dst.weight.shape != src.weight.shape:
+            return False
+        try:
+            dst.load_state_dict(src.state_dict())
+        except Exception:
+            # Param-set mismatch (e.g. bias presence): copy what matches.
+            dst.weight.data.copy_(src.weight.data)
+            if dst.bias is not None and src.bias is not None:
+                dst.bias.data.copy_(src.bias.data)
+        return True
 
     out_layer_new = _get_output_layer(expert)
     out_layer_par = _get_output_layer(parent_model)
@@ -226,24 +243,38 @@ def apply_parent_copy_init(
     parent_hidden = [m for m in parent_model.modules()
                      if isinstance(m, linear_types) and m is not out_layer_par]
 
-    # Align hidden layers from the output end (reversed) so output-adjacent layers
-    # match even when the expert has fewer layers than the parent.
+    def _shapes(mods):
+        return [tuple(m.weight.shape) for m in mods]
+
+    # Align hidden layers from the output end (reversed) so output-adjacent
+    # layers pair up; every expert layer must find a matching parent layer.
     n_hidden_copied = 0
     for mod_new, mod_par in zip(reversed(expert_hidden), reversed(parent_hidden)):
-        if mod_new.weight.shape == mod_par.weight.shape:
-            mod_new.weight.data.copy_(mod_par.weight.data)
-            if mod_new.bias is not None and mod_par.bias is not None:
-                mod_new.bias.data.copy_(mod_par.bias.data)
+        if _copy_module(mod_new, mod_par):
             n_hidden_copied += 1
 
-    # Handle output layer separately.
     output_copied = False
     if copy_output:
-        if out_layer_new.weight.shape == out_layer_par.weight.shape:
-            out_layer_new.weight.data.copy_(out_layer_par.weight.data)
-            if out_layer_new.bias is not None and out_layer_par.bias is not None:
-                out_layer_new.bias.data.copy_(out_layer_par.bias.data)
-            output_copied = True
+        output_copied = _copy_module(out_layer_new, out_layer_par)
+
+    hidden_ok = n_hidden_copied == len(expert_hidden)
+    output_ok = output_copied or not copy_output
+    if not (hidden_ok and output_ok):
+        msg = (
+            f"[Init] ARCHITECTURE MISMATCH — parent_weights copy failed: "
+            f"copied {n_hidden_copied}/{len(expert_hidden)} hidden layers, "
+            f"output copied={output_copied} (copy_output={copy_output}). "
+            f"Expert hidden shapes {_shapes(expert_hidden)} + output "
+            f"{tuple(out_layer_new.weight.shape)} vs parent hidden "
+            f"{_shapes(parent_hidden)} + output {tuple(out_layer_par.weight.shape)}. "
+            f"With init.hidden=parent_weights the expert architecture must match "
+            f"its parent's; set experts_architecture accordingly or use a "
+            f"different init.hidden."
+        )
+        logger.error("!" * 70)
+        logger.error(msg)
+        logger.error("!" * 70)
+        raise RuntimeError(msg)
 
     if not output_copied:
         with torch.no_grad():

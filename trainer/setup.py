@@ -644,19 +644,21 @@ def _load_pretrained_base(model: nn.Module, ckpt_path: str, cfg: Dict) -> None:
         logger.info(f"  [PretrainedBase] Checkpoint has no stored base_architecture; "
               f"inferred {saved_arch} from weights.")
 
-    # Adopt the checkpoint's base architecture if it differs from the run's.
+    # The configured base architecture must match the checkpoint exactly —
+    # silently adopting a different architecture would make the run's config
+    # lie about what actually trained.
     if list(saved_arch) != list(model.base_architecture):
-        from models.network_factory import create_network
-        _old = next(model.base_model.parameters())
-        device, dtype = _old.device, _old.dtype
-        activation = saved_activation or getattr(model, 'activation', cfg.get('activation'))
-        expert_type = saved_expert_type or cfg['adaptive_pinn'].get('expert_type', 'mlp')
-        logger.info(f"  [PretrainedBase] Adopting checkpoint base architecture: "
-              f"{model.base_architecture} -> {list(saved_arch)}")
-        model.base_model = create_network(
-            list(saved_arch), activation, cfg, is_base=True, expert_type=expert_type
-        ).to(device=device, dtype=dtype)
-        model.base_architecture = list(saved_arch)
+        msg = (
+            f"[PretrainedBase] ARCHITECTURE MISMATCH — checkpoint {ckpt_path} "
+            f"holds base architecture {list(saved_arch)} but the config requests "
+            f"{list(model.base_architecture)}. Set base_architecture to match "
+            f"the checkpoint (or point pretrained_base_checkpoint at the right "
+            f"file / set it to null to train a fresh root)."
+        )
+        logger.error("!" * 70)
+        logger.error(msg)
+        logger.error("!" * 70)
+        raise ValueError(msg)
 
     model.base_model.load_state_dict(base_sd)
     n_params = sum(q.numel() for q in model.base_model.parameters())

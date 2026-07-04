@@ -23,14 +23,15 @@ def _is_timestamp_dir(d: Path) -> bool:
 
 
 def _get_model_name(ts_dir: Path) -> str:
-    """Extract model name from config_used.yaml."""
+    """Run label from config_used.yaml: the plan's experiment name when
+    available (experiment_tag), else the model class, else the dir name."""
     config_file = ts_dir / "config_used.yaml"
     if config_file.exists():
         try:
             import yaml
             with open(config_file) as f:
                 cfg = yaml.safe_load(f)
-            return cfg.get('model', ts_dir.name)
+            return cfg.get('experiment_tag') or cfg.get('model', ts_dir.name)
         except Exception:
             pass
     return ts_dir.name

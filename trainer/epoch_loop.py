@@ -148,6 +148,8 @@ def _train_segment(
     _nan_detected = False
     _stopped_early = False
     _stop_reason = 'budget'
+    _lra_updated_epoch = -1
+    _resample_skip_logged = False  # log the LBFGS/SSBroyden skip once per segment
 
     _n_train_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     _switch_str = (f" -> {optimizer_2_name.upper()}@{switch_epoch}"
@@ -203,7 +205,7 @@ def _train_segment(
             # Log when adaptive sampling first activates
             if will_cache_for_resample and not hasattr(model, '_adaptive_sampling_activated'):
                 model._adaptive_sampling_activated = True
-                logger.info(f"  [Adaptive Sampling] Activated at epoch {epoch} (causal training reached final stage)")
+                logger.info(f"  [Adaptive Sampling] Residual caching active from epoch {epoch}")
 
         # Enable residual caching in split_loss_fn for diagnostic heatmap plots.
         # (The model-level cache is not populated in the split path; the loss fn
@@ -298,9 +300,9 @@ def _train_segment(
                     **_get_optimizer_snapshot(optimizer, lr_scheduler, step_count),
                 })
         elif resample_every > 0 and epoch > 1 and (epoch - 1) % resample_every == 0 and not allow_resample_optimizer:
-            # Log when resampling is skipped due to optimizer
-            if not hasattr(model, '_resample_skip_logged'):
-                model._resample_skip_logged = True
+            # Log when resampling is skipped due to optimizer (once per segment)
+            if not _resample_skip_logged:
+                _resample_skip_logged = True
                 logger.info(f"  [Resample] Skipping resampling during {current_optimizer_name} (loss landscape stability required)")
             # Save skip event to metrics
             metrics['resample_events'].append({
@@ -357,6 +359,7 @@ def _train_segment(
                     
                     # Store for this epoch (will be logged in should_evaluate block)
                     ctx._epoch_grad_norms = {
+                        'epoch': epoch,
                         'total': _total_gn,
                         'base': _base_gn,
                         'experts': _exp_gn
@@ -665,7 +668,8 @@ def _train_segment(
         if lra_weights is not None and epoch > 0 and epoch % lra_weights.update_every == 0:
             try:
                 batch_for_lra = next(iter(train_loader))
-                lra_weights.update(model, loss_fn, batch_for_lra)
+                if lra_weights.update(model, loss_fn, batch_for_lra):
+                    _lra_updated_epoch = epoch
                 if epoch % print_every == 0:
                     w_str = ', '.join(f'{k}={v:.4f}' for k, v in lra_weights.weights.items())
                     logger.info(f"  [LRA] weights: {w_str}")
@@ -799,23 +803,29 @@ def _train_segment(
                     'threshold': float(cs['threshold'])
                 })
 
-            # DIAGNOSTIC: LRA weights and gradient norms
+            # DIAGNOSTIC: LRA weights (+ gradient norms when updated this epoch)
             if lra_weights is not None:
                 w = lra_weights.weights
-                g = lra_weights.last_grad_norms
                 w_str = ', '.join(f'{k}={v:.4f}' for k, v in w.items())
-                g_str = ', '.join(f'{k}={g.get(k, 0):.6f}' for k in w)
-                logger.info(f"  [LRA] weights: {w_str} | grads: {g_str}")
+                if _lra_updated_epoch == epoch:
+                    g = lra_weights.last_grad_norms
+                    g_str = ', '.join(f'{k}={g.get(k, 0):.6f}' for k in w)
+                    logger.info(f"  [LRA] weights: {w_str} | grads: {g_str}")
+                else:
+                    logger.info(f"  [LRA] weights: {w_str}")
                 # Save to metrics
+                g = lra_weights.last_grad_norms
                 metrics['lra_history'].append({
                     'epoch': epoch,
                     'weights': {k: float(v) for k, v in w.items()},
                     'grad_norms': {k: float(g.get(k, 0)) for k in w},
+                    'updated_this_epoch': _lra_updated_epoch == epoch,
                 })
             
-            # ── Log gradient norms (computed during backward pass) ──
+            # ── Log gradient norms (only when computed THIS epoch; full-batch
+            # optimizers don't refresh them, so stale values are not repeated) ──
             _gn = getattr(ctx, '_epoch_grad_norms', None)
-            if _gn is not None:
+            if _gn is not None and _gn.get('epoch') == epoch:
                 logger.info(f"  [GradNorm] total={_gn['total']:.4e}, base={_gn['base']:.4e}, experts={_gn['experts']:.4e}")
                 metrics['gradient_norms']['epochs'].append(epoch)
                 metrics['gradient_norms']['total_grad_norm'].append(_gn['total'])

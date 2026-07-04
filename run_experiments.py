@@ -64,6 +64,9 @@ def run_single_experiment(exp_config, base_config, exp_name, parent_dir):
 
     # Deep-merge so nested dicts (adaptive_pinn, etc.) are merged, not replaced
     config = _deep_merge(base_config, exp_config)
+    # Carry the plan's experiment name into config_used.yaml so comparison
+    # reports can label runs by experiment instead of model class.
+    config['experiment_tag'] = exp_name
 
     # Architecture-based folder name (aligned with make_run_dir)
     layers_str = architecture_dir_layers_str(

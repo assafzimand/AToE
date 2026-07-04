@@ -240,7 +240,7 @@ experiments:
   - name: burgers_pretrained
     problem: burgers1d
     model: AToELeaves
-    base_architecture: [2, 6, 6, 6, 6, 1]     # adopted from the checkpoint
+    base_architecture: [2, 60, 60, 60, 60, 1]  # must match the checkpoint exactly
     experts_architecture: [2, 2, 2, 2, 1]
     burgers1d:
       pretrained_base_checkpoint: "roots_checkpoints/burgers_root.pt"
