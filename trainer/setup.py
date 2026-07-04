@@ -130,39 +130,63 @@ class _NumpySafeEncoder(json.JSONEncoder):
         return super().default(obj)
 
 
+def _set_default_torch_device(device: torch.device, full_batch: bool) -> None:
+    """Re-establish torch's global default device at a training boundary.
+
+    Works around a PyTorch device-context issue observed in time-marching
+    runs: full-batch optimizers (LBFGS/SSBroyden) allocate their internal
+    state via the default device, so it must point at the training device,
+    while DataLoader sampling (Adam/SOAP) requires the default back on CPU so
+    the sampler's generator matches torch.randperm. A previous window or
+    segment may have left either state behind, so every boundary (segment
+    start, optimizer switch, loader rebuild) calls this explicitly.
+    """
+    torch.set_default_device(device if full_batch else None)
+
+
+def _opt_cfg(cfg: Dict, opt_name: str, key: str, legacy_key: str, default=None):
+    """Read an optimizer hyperparameter from the per-optimizer sub-dict.
+
+    Preferred layout is ``cfg[opt_name][key]`` (e.g. ``adam: {betas: ...}``);
+    the flat legacy key (e.g. ``adam_betas``) is accepted as a fallback.
+    """
+    sub = cfg.get(opt_name)
+    if isinstance(sub, dict) and key in sub:
+        return sub[key]
+    return cfg.get(legacy_key, default)
+
+
 def _create_adam_optimizer(model: nn.Module, cfg: Dict) -> torch.optim.Optimizer:
     """Create Adam optimizer with config parameters.
-    
+
     Only includes trainable parameters (requires_grad=True) to avoid
     wasting memory/compute on frozen parameters (e.g., pretrained base model).
     """
-    betas = tuple(cfg['adam_betas'])
-    eps = cfg['adam_eps']
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     return torch.optim.Adam(
         trainable_params,
         lr=cfg['lr'],
-        betas=betas,
-        eps=eps
+        betas=tuple(_opt_cfg(cfg, 'adam', 'betas', 'adam_betas', (0.9, 0.999))),
+        eps=_opt_cfg(cfg, 'adam', 'eps', 'adam_eps', 1e-8),
     )
 
 
 def _create_lbfgs_optimizer(model: nn.Module, cfg: Dict) -> torch.optim.Optimizer:
     """Create LBFGS optimizer. Should be used with full-batch training.
-    
+
     Only includes trainable parameters (requires_grad=True) to avoid
     wasting memory/compute on frozen parameters (e.g., pretrained base model).
     """
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     return torch.optim.LBFGS(
         trainable_params,
-        lr=cfg['lbfgs_lr'],
-        max_iter=cfg['lbfgs_max_iter'],
+        lr=_opt_cfg(cfg, 'lbfgs', 'lr', 'lbfgs_lr', 1.0),
+        max_iter=_opt_cfg(cfg, 'lbfgs', 'max_iter', 'lbfgs_max_iter', 1),
         max_eval=None,  # Default: max_iter * 1.25
-        history_size=cfg['lbfgs_history_size'],
-        line_search_fn=cfg['lbfgs_line_search'],
-        tolerance_grad=cfg['lbfgs_tolerance_grad'],
-        tolerance_change=cfg['lbfgs_tolerance_change']
+        history_size=_opt_cfg(cfg, 'lbfgs', 'history_size', 'lbfgs_history_size', 100),
+        line_search_fn=_opt_cfg(cfg, 'lbfgs', 'line_search', 'lbfgs_line_search', 'strong_wolfe'),
+        tolerance_grad=_opt_cfg(cfg, 'lbfgs', 'tolerance_grad', 'lbfgs_tolerance_grad', 0.0),
+        tolerance_change=_opt_cfg(cfg, 'lbfgs', 'tolerance_change', 'lbfgs_tolerance_change', 0.0),
     )
 
 
@@ -176,17 +200,19 @@ def _create_soap_optimizer(model: nn.Module, cfg: Dict) -> torch.optim.Optimizer
     return SOAP(
         trainable_params,
         lr=cfg['lr'],
-        betas=tuple(cfg['soap_betas']),
-        eps=cfg['adam_eps'],
-        precondition_frequency=cfg['soap_precondition_frequency'],
-        weight_decay=cfg['soap_weight_decay'],
+        betas=tuple(_opt_cfg(cfg, 'soap', 'betas', 'soap_betas', (0.95, 0.95))),
+        eps=_opt_cfg(cfg, 'adam', 'eps', 'adam_eps', 1e-8),
+        precondition_frequency=_opt_cfg(cfg, 'soap', 'precondition_frequency',
+                                        'soap_precondition_frequency', 10),
+        weight_decay=_opt_cfg(cfg, 'soap', 'weight_decay', 'soap_weight_decay', 0.0),
     )
 
 
 def _create_ssbroyden_optimizer(model: nn.Module, cfg: Dict) -> torch.optim.Optimizer:
     """Create SSBroyden (Self-Scaled Broyden) quasi-Newton optimizer via scimba.
 
-    Falls back to LBFGS with a warning if scimba is not installed.
+    Falls back to LBFGS if scimba is not installed — loudly, since the two
+    optimizers reach very different accuracies on the benchmark problems.
     Only includes trainable parameters.
     """
     trainable_params = [p for p in model.parameters() if p.requires_grad]
@@ -194,18 +220,26 @@ def _create_ssbroyden_optimizer(model: nn.Module, cfg: Dict) -> torch.optim.Opti
         from scimba_torch.optimizers.ssbroyden import SSBroyden
         return SSBroyden(
             trainable_params,
-            lr=cfg.get('ssbroyden_lr', 1.0),
-            tolerance_grad=cfg.get('ssbroyden_tolerance_grad', 1e-10),
+            lr=_opt_cfg(cfg, 'ssbroyden', 'lr', 'ssbroyden_lr', 1.0),
+            tolerance_grad=_opt_cfg(cfg, 'ssbroyden', 'tolerance_grad',
+                                    'ssbroyden_tolerance_grad', 1e-10),
             method='ssbroyden',
         )
     except ImportError:
-        logger.info("  [Warning] scimba not installed — SSBroyden unavailable, falling back to LBFGS.")
-        logger.info("            Install with: pip install scimba")
+        logger.warning("!" * 70)
+        logger.warning("[Optimizer] scimba NOT installed — SSBroyden unavailable.")
+        logger.warning("[Optimizer] FALLING BACK TO LBFGS: results are NOT comparable")
+        logger.warning("[Optimizer] to SSBroyden runs. Install with: pip install scimba")
+        logger.warning("!" * 70)
         return _create_lbfgs_optimizer(model, cfg)
 
 
 def _create_optimizer_by_name(name: str, model: nn.Module, cfg: Dict) -> Tuple[torch.optim.Optimizer, str]:
-    """Create an optimizer by name string. Returns (optimizer, display_name)."""
+    """Create an optimizer by name string. Returns (optimizer, display_name).
+
+    The display name reflects what was ACTUALLY created (an SSBroyden request
+    that fell back to LBFGS is reported as LBFGS everywhere downstream).
+    """
     name = name.lower()
     if name == 'soap':
         return _create_soap_optimizer(model, cfg), 'SOAP'
@@ -213,7 +247,8 @@ def _create_optimizer_by_name(name: str, model: nn.Module, cfg: Dict) -> Tuple[t
         return _create_lbfgs_optimizer(model, cfg), 'LBFGS'
     elif name == 'ssbroyden':
         opt = _create_ssbroyden_optimizer(model, cfg)
-        return opt, 'SSBroyden' if opt.__class__.__name__ != 'LBFGS' else 'LBFGS'
+        actual = 'SSBroyden' if opt.__class__.__name__ != 'LBFGS' else 'LBFGS'
+        return opt, actual
     else:
         return _create_adam_optimizer(model, cfg), 'Adam'
 
@@ -780,13 +815,10 @@ def _setup_training(
     logger.info(f"  Train data device: {train_data['x'].device}")
     logger.info(f"  Eval data device: {eval_data['x'].device}")
 
-    # Reset default device context to CPU before creating DataLoaders.
-    # This fixes a PyTorch issue where CUDA inference (e.g., prev_model forward pass
-    # in time marching) can corrupt the global device context, causing RandomSampler
-    # to fail with "Expected 'cuda' device type for generator but found 'cpu'".
-    # This does NOT affect training device - model and data are already on CUDA
-    # via explicit .to(device) calls; this only affects internal generator creation.
-    torch.set_default_device(None)
+    # Reset the default device before creating DataLoaders (see
+    # _set_default_torch_device). Model and data stay on CUDA via explicit
+    # .to(device); this only affects the sampler's generator creation.
+    _set_default_torch_device(device, full_batch=False)
 
     # Create DataLoaders
     train_loader = _create_dataloader(train_data, cfg['batch_size'],
@@ -858,25 +890,16 @@ def _setup_training(
     # Patience tracking: only active after switch (or from epoch 1 if no switch)
     patience_start_epoch = switch_epoch if optimizer_2_name is not None else 1
 
-    # Setup initial optimizer + scheduler
-    full_batch_opt1 = optimizer_1_name in ('lbfgs', 'ssbroyden')
-    if full_batch_opt1:
-        optimizer, current_optimizer_name = _create_optimizer_by_name(optimizer_1_name, model, active_cfg)
-        lr_scheduler = None
-        logger.info(f"Using {current_optimizer_name} optimizer (full-batch) for all epochs")
+    # Optimizers and schedulers are built fresh per segment in _train_segment
+    # (over the segment's trainable params); ctx carries only placeholders here.
+    optimizer = None
+    current_optimizer_name = optimizer_1_name.capitalize()
+    lr_scheduler = None
+    if optimizer_2_name is not None:
+        logger.info(f"Optimizer plan: {optimizer_1_name} until epoch {switch_epoch}, "
+              f"then {optimizer_2_name.upper()} (full-batch)")
     else:
-        optimizer, current_optimizer_name = _create_primary_optimizer(model, active_cfg)
-        lr_scheduler = _create_lr_scheduler(optimizer, active_cfg, total_steps_estimate)
-        if optimizer_2_name is not None:
-            logger.info(f"Using {current_optimizer_name} until epoch {switch_epoch}, "
-                  f"then {optimizer_2_name.upper()} (full-batch)")
-            logger.info(f"  Patience early-stopping active from epoch {patience_start_epoch}")
-        else:
-            logger.info(f"Using {current_optimizer_name} optimizer (mini-batch) for all epochs")
-        if lr_scheduler is not None:
-            sched_name = active_cfg['lr_schedule']
-            warmup = active_cfg['lr_warmup_steps']
-            logger.info(f"  LR schedule: {sched_name} (warmup={warmup} steps, ~{total_steps_estimate} total steps)")
+        logger.info(f"Optimizer plan: {optimizer_1_name} for all epochs")
 
     step_count = 0  # global optimizer step counter for LR scheduler
 

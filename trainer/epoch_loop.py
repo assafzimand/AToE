@@ -43,6 +43,7 @@ from trainer.setup import (
     _NumpySafeEncoder, _create_optimizer_by_name, _create_primary_optimizer,
     _create_lr_scheduler, _get_optimizer_snapshot, _create_dataloader,
     _create_split_dataloader, _save_checkpoint, _debug_print_model_state,
+    _set_default_torch_device,
 )
 
 
@@ -128,19 +129,14 @@ def _train_segment(
     total_steps_estimate = max(1, epoch_budget) * batches_per_epoch
 
     full_batch_opt1 = optimizer_1_name in ('lbfgs', 'ssbroyden')
-    # Default-device context for this segment. Full-batch optimizers (LBFGS/
-    # SSBroyden) need it on CUDA so their state tensors are allocated on the GPU;
-    # mini-batch optimizers (Adam/SOAP) need it reset to None so the DataLoader's
-    # sampler generator (CPU) matches torch.randperm during iteration. A previous
-    # segment may have left the default on CUDA (e.g. after an optimizer switch),
-    # so we always re-establish it here at the segment boundary.
+    # Re-establish the default-device context at the segment boundary
+    # (see _set_default_torch_device for why this is needed).
+    _set_default_torch_device(device, full_batch=full_batch_opt1)
     if full_batch_opt1:
-        torch.set_default_device(device)
         optimizer, current_optimizer_name = _create_optimizer_by_name(
             optimizer_1_name, model, seg_cfg)
         lr_scheduler = None
     else:
-        torch.set_default_device(None)
         optimizer, current_optimizer_name = _create_primary_optimizer(model, seg_cfg)
         lr_scheduler = _create_lr_scheduler(optimizer, seg_cfg, total_steps_estimate)
 
@@ -241,7 +237,7 @@ def _train_segment(
                     static=_split_ctx.get('static'),
                 )
                 ctx.train_data = train_data
-                torch.set_default_device(None)
+                _set_default_torch_device(device, full_batch=False)
                 train_loader = _create_split_dataloader(
                     train_data, cfg['batch_size'], shuffle=True)
                 ctx.train_loader = train_loader
@@ -610,11 +606,9 @@ def _train_segment(
             logger.info(f"\n{'='*60}")
             logger.info(f"OPTIMIZER SWITCH: {current_optimizer_name} -> {optimizer_2_name.upper()} at epoch {epoch}")
             logger.info(f"{'='*60}\n")
-            # Restore default device to CUDA before creating SSBroyden/LBFGS optimizer.
-            # This ensures optimizer state tensors (e.g., Hessian approximation) are created
-            # on the correct device, not CPU (which can happen if default was reset earlier
-            # for DataLoader compatibility in time-marching windows 1+).
-            torch.set_default_device(device)
+            # Optimizer_2 is full-batch: its state tensors (e.g. Hessian
+            # approximation) must be allocated on the training device.
+            _set_default_torch_device(device, full_batch=True)
             _prev_opt = current_optimizer_name
             optimizer, current_optimizer_name = _create_optimizer_by_name(
                 optimizer_2_name, model, seg_cfg)

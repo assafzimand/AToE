@@ -360,7 +360,8 @@ def _finalize_training(ctx: TrainingContext) -> Path:
         from utils.problem_specific import get_visualization_module
         viz_module = get_visualization_module(cfg['problem'])
         visualize_evaluation = viz_module[1]  # Second element is visualize_evaluation
-        visualize_evaluation(model, eval_data_path, run_dir, cfg)
+        eval_data_path = Path("datasets") / cfg['problem'] / "eval_data.pt"
+        visualize_evaluation(model, str(eval_data_path), run_dir, cfg)
     except ValueError as e:
         logger.info(f"  (No custom evaluation visualization for {cfg['problem']})")
         logger.info(f"  ValueError details: {e}")
