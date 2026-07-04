@@ -581,17 +581,10 @@ def _setup_training(
     eval_loader = _create_dataloader(eval_data, cfg['batch_size'],
                                      shuffle=False)
 
-    # ── 3-phase logic for M_term_tree_by_norm (the only spawning method) ──
+    # ── 3-phase logic (root -> M-term tree spawn -> leaf training) ──
     adaptive_cfg_init = cfg['adaptive_pinn']
     is_adaptive_init = adaptive_cfg_init['enabled']
-    spawning_method_init = adaptive_cfg_init['spawning_method']
-    if is_adaptive_init and spawning_method_init != 'M_term_tree_by_norm':
-        raise ValueError(
-            f"spawning_method must be 'M_term_tree_by_norm' "
-            f"(got '{spawning_method_init}'). The other spawning methods were "
-            f"removed in the M_term cleanup.")
     initial_train_cfg = adaptive_cfg_init.get('initial_train', None)
-    reinit_base_after_spawn = adaptive_cfg_init['reinitialize_base_after_spawn']
     pretrained_base_checkpoint = problem_cfg.get('pretrained_base_checkpoint', None)
     _pretrained_force_spawn = False  # set True to force first-epoch spawn (checkpoint flow)
 
@@ -605,11 +598,6 @@ def _setup_training(
     elif pretrained_base_checkpoint is not None:
         # Phase 1 supplied as a checkpoint: load the base, skip Phase-1 training,
         # force the spawn on the first loop epoch, then transition to Phase 3.
-        if reinit_base_after_spawn:
-            raise ValueError(
-                "reinitialize_base_after_spawn must be false when "
-                "pretrained_base_checkpoint is set (loading then reinitializing "
-                "would discard the checkpoint).")
         _load_pretrained_base(model, pretrained_base_checkpoint, cfg)
         phase3_epochs = cfg['epochs']
         active_cfg = cfg
@@ -624,7 +612,7 @@ def _setup_training(
         # Phase 1 trains the base for initial_train.epochs.
         if initial_train_cfg is None:
             raise ValueError(
-                "adaptive_pinn.initial_train is required for M_term_tree_by_norm "
+                "adaptive_pinn.initial_train is required "
                 "when pretrained_base_checkpoint is null.")
         phase1_cfg = dict(cfg)
         for k, v in initial_train_cfg.items():
@@ -637,8 +625,6 @@ def _setup_training(
         use_three_phase = True
         logger.info(f"\n  [3-Phase] Phase 1: initial training for {phase1_epochs} epochs")
         logger.info(f"  [3-Phase] Phase 3 will run for {phase3_epochs} epochs after spawning")
-        if reinit_base_after_spawn:
-            logger.info(f"  [3-Phase] Base model will be reinitialized after spawning")
 
     # Determine optimizer strategy (new config: optimizer_1/optimizer_2/optimizer_switch_epoch)
     optimizer_1_name = active_cfg['optimizer_1'].lower()
@@ -775,20 +761,10 @@ def _setup_training(
     adaptive_cfg = cfg['adaptive_pinn']
     is_adaptive = adaptive_cfg['enabled']
     region_detector = None
-    spawn_every = adaptive_cfg['spawn_every_epochs']
     max_experts = adaptive_cfg['max_experts']
-    spawning_method = adaptive_cfg['spawning_method']
-    wavelet_threshold = problem_cfg['wavelet_threshold']
-    spawning_complete = False
-    _retries_before_stop = adaptive_cfg['spawn_retries_before_stop']
-    _stop_on_no_spawn = _retries_before_stop is not False  # False = feature disabled
-    _no_spawn_retries_max = int(_retries_before_stop) if _stop_on_no_spawn else 0
-    _no_spawn_retries_remaining = _no_spawn_retries_max
-    _spawn_retry_after = adaptive_cfg.get('spawn_retry_after', None)
-    _spawn_last_fail_epoch = -1  # epoch of last failed spawn; -1 = no pending retry
     _per_leaf_causal = problem_cfg.get('causal_training', {}).get('per_leaf_causal', False)  # Optional feature
     _per_leaf_sampling = problem_cfg['adaptive_sampling'].get('per_leaf_sampling', False)  # Optional feature
-    
+
     # Read configurable norm variables
     variable_for_node_accept = adaptive_cfg['variable_for_node_accept']
     variable_for_expert_size = adaptive_cfg['variable_for_expert_size']
@@ -797,13 +773,11 @@ def _setup_training(
         tree_max_depth = adaptive_cfg['tree_max_depth']
         tree_min_samples_leaf = adaptive_cfg['tree_min_samples_leaf']
 
-        logger.info(f"\nAdaptive PINN enabled (spawning_method={spawning_method}):")
+        logger.info(f"\nAdaptive PINN enabled (M-term tree by norm):")
         logger.info(f"  Max experts: {max_experts}")
-        logger.info(f"  Spawn every: {spawn_every} epochs")
         logger.info(f"  Tree max depth: {tree_max_depth}")
         logger.info(f"  Tree min samples leaf: {tree_min_samples_leaf}")
         logger.info(f"  M experts num: {adaptive_cfg['M_experts_num']}")
-        logger.info(f"  Wavelet threshold: {wavelet_threshold}")
         logger.info(f"  Blending mode: {adaptive_cfg['blending_mode']}")
         logger.info(f"  Model type: {type(model).__name__}")
         enable_timing_cfg = adaptive_cfg['enable_timing']
@@ -853,13 +827,6 @@ def _setup_training(
     # When no experts exist (base-only phase), grad_clip_norm applies to all params as usual.
     expert_grad_clip_norm = problem_cfg['expert_grad_clip_norm']
 
-    # Plateau-gated spawning state (Fix 3)
-    # spawn_every acts as minimum interval; once elapsed, plateau is checked every epoch until met.
-    _spawn_require_plateau = adaptive_cfg['spawn_require_plateau'] if is_adaptive else False
-    _spawn_plateau_epochs = adaptive_cfg['spawn_plateau_epochs']
-    _spawn_plateau_delta = adaptive_cfg['spawn_plateau_delta']
-    _last_spawn_epoch = 0           # epoch of last successful spawn
-    
     # Consolidated feature summary
     logger.info("\n" + "=" * 60)
     logger.info("FEATURE SUMMARY")
@@ -993,21 +960,10 @@ def _setup_training(
         adaptive_cfg=adaptive_cfg,
         is_adaptive=is_adaptive,
         initial_train_cfg=initial_train_cfg,
-        reinit_base_after_spawn=reinit_base_after_spawn,
         pretrained_base_checkpoint=pretrained_base_checkpoint,
         _pretrained_force_spawn=_pretrained_force_spawn,
         region_detector=region_detector,
-        spawn_every=spawn_every,
         max_experts=max_experts,
-        spawning_method=spawning_method,
-        wavelet_threshold=wavelet_threshold,
-        spawning_complete=spawning_complete,
-        _retries_before_stop=_retries_before_stop,
-        _stop_on_no_spawn=_stop_on_no_spawn,
-        _no_spawn_retries_max=_no_spawn_retries_max,
-        _no_spawn_retries_remaining=_no_spawn_retries_remaining,
-        _spawn_retry_after=_spawn_retry_after,
-        _spawn_last_fail_epoch=_spawn_last_fail_epoch,
         _per_leaf_causal=_per_leaf_causal,
         _per_leaf_sampling=_per_leaf_sampling,
         variable_for_node_accept=variable_for_node_accept,
@@ -1017,10 +973,6 @@ def _setup_training(
         gt_x=gt_x,
         gt_t=gt_t,
         adaptive_plots_dir=adaptive_plots_dir,
-        _spawn_require_plateau=_spawn_require_plateau,
-        _spawn_plateau_epochs=_spawn_plateau_epochs,
-        _spawn_plateau_delta=_spawn_plateau_delta,
-        _last_spawn_epoch=_last_spawn_epoch,
         rejected_regions=rejected_regions,
         leaf_loss_history=leaf_loss_history,
         total_epochs=total_epochs,
@@ -2388,7 +2340,6 @@ def _spawn_nodes(ctx: TrainingContext, level_nodes, copy_output: bool,
     problem_cfg = ctx.problem_cfg
     metrics = ctx.metrics
     epoch = ctx.epoch
-    reinit_base_after_spawn = ctx.reinit_base_after_spawn
 
     from trainer.init import (apply_expert_init, apply_parent_copy_init,
                               apply_spectral_norm)
@@ -3005,9 +2956,7 @@ def _finalize_training(ctx: TrainingContext) -> Path:
     gt_t = ctx.gt_t
     rejected_regions = ctx.rejected_regions
     leaf_loss_history = ctx.leaf_loss_history
-    spawning_method = ctx.spawning_method
     max_experts = ctx.max_experts
-    wavelet_threshold = ctx.wavelet_threshold
     start_time = ctx.start_time
 
     # Finalize-only imports (originally imported in setup under is_adaptive)
@@ -3139,7 +3088,7 @@ def _finalize_training(ctx: TrainingContext) -> Path:
             output_path=adaptive_plots_dir / "expert_regions.json",
             rejected_regions=rejected_regions,
             leaf_loss_history=leaf_loss_history,
-            spawning_method=spawning_method,
+            spawning_method='M_term_tree_by_norm',
             spawning_diagnostics=metrics.get('spawning_diagnostics', []),
         )
         
@@ -3166,8 +3115,7 @@ def _finalize_training(ctx: TrainingContext) -> Path:
         metrics['adaptive_pinn'] = {
             'num_experts': model.num_experts,
             'max_experts': max_experts,
-            'spawning_method': spawning_method,
-            'wavelet_threshold': wavelet_threshold,
+            'spawning_method': 'M_term_tree_by_norm',
             'regions': [r.to_dict() for r in model.regions],
             'base_params': base_params,
             'expert_params': expert_params,

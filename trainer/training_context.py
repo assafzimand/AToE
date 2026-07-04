@@ -92,21 +92,10 @@ class TrainingContext:
     adaptive_cfg: Optional[Dict] = None
     is_adaptive: bool = False
     initial_train_cfg: Any = None
-    reinit_base_after_spawn: bool = False
     pretrained_base_checkpoint: Any = None
     _pretrained_force_spawn: bool = False
     region_detector: Any = None
-    spawn_every: int = 0
     max_experts: int = 0
-    spawning_method: Optional[str] = None
-    wavelet_threshold: Any = None
-    spawning_complete: bool = False
-    _retries_before_stop: Any = False
-    _stop_on_no_spawn: bool = False
-    _no_spawn_retries_max: int = 0
-    _no_spawn_retries_remaining: int = 0
-    _spawn_retry_after: Any = None
-    _spawn_last_fail_epoch: int = -1
     _per_leaf_causal: bool = False
     _per_leaf_sampling: bool = False
     variable_for_node_accept: Any = None
@@ -116,10 +105,6 @@ class TrainingContext:
     gt_x: Any = None
     gt_t: Any = None
     adaptive_plots_dir: Any = None
-    _spawn_require_plateau: bool = False
-    _spawn_plateau_epochs: int = 0
-    _spawn_plateau_delta: float = 0.0
-    _last_spawn_epoch: int = 0
     rejected_regions: List = field(default_factory=list)
     leaf_loss_history: List = field(default_factory=list)
 

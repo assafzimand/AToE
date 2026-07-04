@@ -76,18 +76,15 @@ class RegionDetector:
         self,
         X: np.ndarray,
         y: np.ndarray,
-        **kwargs,
     ) -> 'RegionDetector':
         """
         Fit Random Forest to the data.
-        
+
         Args:
             X: (N, n_dims) array of coordinates [x, t] or [x, y, t]
             y: (N,) or (N, output_dim) array of solution values.
                Multi-output is supported (RF multi-output regression).
-            **kwargs: Accepted for backward compatibility (loss_components,
-                      residuals) but no longer used.
-            
+
         Returns:
             self for chaining
         """
@@ -682,145 +679,3 @@ class RegionDetector:
 
         return result, depth_stats
 
-    def _compute_outside_fraction(
-        self, 
-        node: TreeNodeInfo, 
-        sibling_regions: List[RegionDescriptor]
-    ) -> float:
-        """
-        Compute what fraction of a node's volume is OUTSIDE all sibling regions.
-        
-        Uses a simple approximation: compute total overlap with union of siblings.
-        For non-overlapping siblings, this is exact. For overlapping siblings,
-        this is a lower bound on the actual outside fraction.
-        
-        Args:
-            node: The candidate node
-            sibling_regions: List of same-depth regions (siblings)
-            
-        Returns:
-            Fraction of node volume outside all siblings (0.0 to 1.0)
-        """
-        if not sibling_regions:
-            return 1.0  # No siblings = 100% outside
-        
-        node_vol = 1.0
-        for lo, hi in zip(node.bounds_lower, node.bounds_upper):
-            node_vol *= (hi - lo)
-        
-        if node_vol <= 0:
-            return 0.0
-        
-        # Compute total overlap volume with all siblings
-        # Note: This may double-count if siblings overlap each other,
-        # giving a conservative (lower) estimate of outside_fraction
-        total_overlap = 0.0
-        
-        for region in sibling_regions:
-            # Check if boxes overlap (any dimension must be disjoint for no overlap)
-            overlaps = True
-            for i in range(len(node.bounds_lower)):
-                if (node.bounds_upper[i] <= region.bounds_lower[i] or
-                    node.bounds_lower[i] >= region.bounds_upper[i]):
-                    overlaps = False
-                    break
-            
-            if overlaps:
-                # Compute overlap volume
-                overlap_lower = [max(node.bounds_lower[i], region.bounds_lower[i]) 
-                                for i in range(len(node.bounds_lower))]
-                overlap_upper = [min(node.bounds_upper[i], region.bounds_upper[i])
-                                for i in range(len(node.bounds_upper))]
-                
-                overlap_vol = 1.0
-                for lo, hi in zip(overlap_lower, overlap_upper):
-                    overlap_vol *= max(0, hi - lo)
-                
-                total_overlap += overlap_vol
-        
-        # Cap overlap at node volume (in case of double-counting)
-        total_overlap = min(total_overlap, node_vol)
-        
-        # Return fraction outside
-        outside_fraction = (node_vol - total_overlap) / node_vol
-        return outside_fraction
-    
-    def _check_overlap(self, node: TreeNodeInfo, existing_regions: List[RegionDescriptor]) -> bool:
-        """Check if a node significantly overlaps with existing regions.
-        
-        DEPRECATED: Use _compute_outside_fraction for more precise control.
-        """
-        for region in existing_regions:
-            # Check if boxes overlap (any dimension must be disjoint for no overlap)
-            overlaps = True
-            for i in range(len(node.bounds_lower)):
-                if (node.bounds_upper[i] <= region.bounds_lower[i] or
-                    node.bounds_lower[i] >= region.bounds_upper[i]):
-                    overlaps = False
-                    break
-            
-            if overlaps:
-                # Compute overlap volume
-                overlap_lower = [max(node.bounds_lower[i], region.bounds_lower[i]) 
-                                for i in range(len(node.bounds_lower))]
-                overlap_upper = [min(node.bounds_upper[i], region.bounds_upper[i])
-                                for i in range(len(node.bounds_upper))]
-                
-                overlap_vol = 1.0
-                for lo, hi in zip(overlap_lower, overlap_upper):
-                    overlap_vol *= max(0, hi - lo)
-                
-                node_vol = 1.0
-                for lo, hi in zip(node.bounds_lower, node.bounds_upper):
-                    node_vol *= (hi - lo)
-                
-                # If overlap is more than 50% of node volume, consider it overlapping
-                if node_vol > 0 and overlap_vol / node_vol > 0.5:
-                    return True
-        
-        return False
-    
-    def detect(
-        self,
-        X: np.ndarray,
-        y: np.ndarray,
-        loss_components: Optional[Dict[str, np.ndarray]] = None,
-        residuals: Optional[np.ndarray] = None,
-        sibling_regions: Optional[List[RegionDescriptor]] = None,
-        overlap_threshold: float = 0.5,
-        wavelet_threshold: Optional[float] = None,
-        spawn_epoch: int = 0,
-        depth: int = 1,
-        parent_idx: int = -1,
-        verbose: bool = True
-    ) -> Optional[RegionDescriptor]:
-        """
-        Convenience method to fit RF and detect refinement region in one call.
-        
-        Args:
-            X: (N, n_dims) array of coordinates
-            y: (N,) or (N, output_dim) array of solution values
-            loss_components: Dict with 'residual', 'ic', 'bc' arrays and 'weights'
-                (new approach using total loss)
-            residuals: DEPRECATED - (N,) array of PDE residuals (for backward compatibility)
-            sibling_regions: List of same-parent regions to check overlap against
-            overlap_threshold: Accept region if more than this fraction is outside siblings
-            wavelet_threshold: Minimum wavelet norm to spawn
-            spawn_epoch: Current epoch for tracking
-            depth: Depth level for the new expert (1 = child of base)
-            parent_idx: Index of the parent expert (-1 for depth-1 experts)
-            verbose: Print diagnostic information about why regions were rejected
-            
-        Returns:
-            RegionDescriptor for the selected region, or None
-        """
-        self.fit(X, y, loss_components=loss_components, residuals=residuals)
-        return self.select_refinement_region(
-            sibling_regions=sibling_regions,
-            overlap_threshold=overlap_threshold,
-            wavelet_threshold=wavelet_threshold,
-            spawn_epoch=spawn_epoch,
-            depth=depth,
-            parent_idx=parent_idx,
-            verbose=verbose
-        )
