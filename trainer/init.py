@@ -1,8 +1,10 @@
 """Smart initialization for PINN models.
 
-Three strategies (all configurable, architecture-agnostic):
+Strategies (all configurable, architecture-agnostic):
   hidden: glorot  — Glorot uniform + zero bias for all hidden linear layers.
                     Also zero-inits fc2 in ResNet blocks for identity-like start.
+  hidden: parent_weights — copy weights from the parent model at expert spawn
+                    (handled by apply_parent_copy_init).
   output: zero    — Zero-initialize the output linear layer.
   output: ls      — Least-squares fit of output layer to IC data (base model only).
 
@@ -97,11 +99,7 @@ def apply_output_init(
 
     if output_mode == 'zero':
         with torch.no_grad():
-            if init_cfg.get('spectral_norm', False):
-                std = init_cfg['spectral_norm_init_std']
-                nn.init.normal_(out_layer.weight, mean=0.0, std=std)
-            else:
-                nn.init.zeros_(out_layer.weight)
+            nn.init.zeros_(out_layer.weight)
             if out_layer.bias is not None:
                 nn.init.zeros_(out_layer.bias)
         logger.info("  [Init] Output layer: zero-initialized")
@@ -164,38 +162,29 @@ def apply_expert_init(expert: nn.Module, cfg: dict, zero_output: bool = True) ->
     Applies:
     - Glorot hidden init (if init.hidden == 'glorot'), else PyTorch default
     - Output layer based on zero_output:
-      - zero_output=True (additive mode): Zero output so expert starts at u=0
-      - zero_output=False (non-additive mode): Same init as hidden layers
-      When spectral_norm is enabled, uses tiny random (std=1e-6) instead of
-      strict zero to avoid sigma=0 → NaN in the spectral norm wrapper.
+      - zero_output=True: zero output so the expert starts at u=0
+      - zero_output=False: same init as hidden layers
 
     LS-init is NEVER applied to experts (only the base model gets it).
-    
+
     Args:
         expert: The expert network to initialize
         cfg: Config dict containing 'init' and 'activation' settings
-        zero_output: If True, zero the output layer (additive/residual mode).
-                     If False, use same init as hidden (non-additive mode).
+        zero_output: If True, zero the output layer; if False, use the
+                     hidden-layer init for the output layer as well.
     """
     apply_hidden_init(expert, cfg)
 
     out_layer = _get_output_layer(expert)
     init_cfg = cfg.get('init', {})
-    use_spectral = init_cfg.get('spectral_norm', False)
     hidden_mode = init_cfg.get('hidden', 'default')
-    
+
     with torch.no_grad():
         if zero_output:
-            # Additive mode: zero output for residual learning
-            if use_spectral:
-                std = init_cfg['spectral_norm_init_std']
-                nn.init.normal_(out_layer.weight, mean=0.0, std=std)
-            else:
-                nn.init.zeros_(out_layer.weight)
+            nn.init.zeros_(out_layer.weight)
             if out_layer.bias is not None:
                 nn.init.zeros_(out_layer.bias)
         else:
-            # Non-additive mode: same init as hidden layers
             if hidden_mode == 'glorot':
                 activation = cfg.get('activation', 'tanh')
                 gain = nn.init.calculate_gain(activation)
@@ -213,14 +202,14 @@ def apply_parent_copy_init(
 ) -> None:
     """Copy weights from parent_model into a newly spawned expert.
 
-    copy_output=False (AToE): output layer is zeroed after copy so the expert
-        contributes u_k=0 at spawn time (parent stays active; children add residuals).
-    copy_output=True (AToELeaves, ANT): output layer is also copied; parent is
+    copy_output=False: output layer is zeroed after copy so the expert
+        contributes u_k=0 at spawn time.
+    copy_output=True (AToE-Leaves): output layer is also copied; the parent is
         retired on spawn so children must start from the parent's full solution.
 
     Hidden layers are aligned from the output end (reversed zip) so that layers
-    closer to output match even when architectures differ (e.g., ANT expert [16,16,1]
-    spawned from base [2,16,16,1]). Only layers with matching shapes are copied.
+    closer to output match even when architectures differ. Only layers with
+    matching shapes are copied.
     """
     try:
         from models.rwf_layer import RWFLinear
@@ -238,7 +227,7 @@ def apply_parent_copy_init(
                      if isinstance(m, linear_types) and m is not out_layer_par]
 
     # Align hidden layers from the output end (reversed) so output-adjacent layers
-    # match even when expert has fewer layers than parent (e.g., ANT depth-1).
+    # match even when the expert has fewer layers than the parent.
     n_hidden_copied = 0
     for mod_new, mod_par in zip(reversed(expert_hidden), reversed(parent_hidden)):
         if mod_new.weight.shape == mod_par.weight.shape:
@@ -249,56 +238,20 @@ def apply_parent_copy_init(
 
     # Handle output layer separately.
     output_copied = False
-    use_spectral = (cfg or {}).get('init', {}).get('spectral_norm', False)
     if copy_output:
         if out_layer_new.weight.shape == out_layer_par.weight.shape:
             out_layer_new.weight.data.copy_(out_layer_par.weight.data)
             if out_layer_new.bias is not None and out_layer_par.bias is not None:
                 out_layer_new.bias.data.copy_(out_layer_par.bias.data)
             output_copied = True
-    
+
     if not output_copied:
         with torch.no_grad():
-            if use_spectral:
-                std = cfg.get('init', {})['spectral_norm_init_std']
-                nn.init.normal_(out_layer_new.weight, mean=0.0, std=std)
-            else:
-                nn.init.zeros_(out_layer_new.weight)
+            nn.init.zeros_(out_layer_new.weight)
             if out_layer_new.bias is not None:
                 nn.init.zeros_(out_layer_new.bias)
 
-    # Log what actually happened.
     if output_copied:
         logger.info(f"  [Init] Copied {n_hidden_copied} hidden layers from parent; output copied")
     else:
-        out_status = 'tiny-random' if use_spectral else 'zeroed'
-        logger.info(f"  [Init] Copied {n_hidden_copied} hidden layers from parent; output {out_status}")
-
-
-def apply_spectral_norm(model: nn.Module, cfg: dict) -> None:
-    """Apply spectral normalization to ALL linear layers (hidden + output).
-
-    Bounds each layer's Lipschitz constant via per-forward-call weight
-    normalization by the spectral radius (power iteration, 1 step per forward).
-    Prevents h_xxxx overflow in KS 4th-order autograd chain.
-
-    Called for base model at init AND for every new expert at spawn.
-    Must be called AFTER weight init so weight_orig receives the correct values.
-    Output layer must NOT be strict-zero before this call (use tiny random init).
-    """
-    if not cfg.get('init', {}).get('spectral_norm', False):
-        return
-
-    try:
-        from models.rwf_layer import RWFLinear
-        linear_types = (nn.Linear, RWFLinear)
-    except ImportError:
-        linear_types = (nn.Linear,)
-
-    n_wrapped = 0
-    for module in model.modules():
-        if isinstance(module, linear_types):
-            nn.utils.parametrizations.spectral_norm(module)
-            n_wrapped += 1
-
-    logger.info(f"  [Init] Spectral norm applied to {n_wrapped} layers (hidden + output)")
+        logger.info(f"  [Init] Copied {n_hidden_copied} hidden layers from parent; output zeroed")

@@ -48,8 +48,6 @@ class AToELeaves(nn.Module):
 
         self.max_experts = adaptive_config['max_experts']
         self.sigma_fraction = adaptive_config['sigma_fraction']
-        self.base_weight = adaptive_config['base_weight']
-        self.base_everywhere = adaptive_config['base_everywhere']
         self.expert_type = adaptive_config['expert_type']
         
         # Blending mode: 'soft' (PoU) or 'hard' (step functions, mean on shared faces)
@@ -93,7 +91,7 @@ class AToELeaves(nn.Module):
         self.experts = nn.ModuleList()
         self.regions: List[RegionDescriptor] = []
 
-        self.batched_indicators = BatchedIndicators(base_weight=self.base_weight)
+        self.batched_indicators = BatchedIndicators()
 
         self._timer = None
 

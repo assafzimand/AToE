@@ -310,41 +310,6 @@ class SoftIndicator:
         return (self.region.bounds_lower, self.region.bounds_upper)
 
 
-class UniformIndicator:
-    """Uniform weight indicator for the base model in soft blending.
-    
-    Returns a constant weight for all points in the domain.
-    Used for partition-of-unity normalization where the base model
-    contributes everywhere with uniform weight.
-    """
-    
-    def __init__(self, base_weight: float = 1.0):
-        """
-        Args:
-            base_weight: Constant weight to return for all points.
-                        This is the unnormalized weight; actual contribution
-                        depends on normalization with expert weights.
-        """
-        self.base_weight = base_weight
-    
-    def __call__(self, inputs: torch.Tensor) -> torch.Tensor:
-        """
-        Compute uniform weight for batch of points.
-        
-        Args:
-            inputs: (N, n_dims) tensor of coordinates
-            
-        Returns:
-            weights: (N, 1) float tensor - constant value for all points
-        """
-        return torch.full(
-            (inputs.shape[0], 1), 
-            self.base_weight,
-            device=inputs.device, 
-            dtype=inputs.dtype
-        )
-
-
 def create_indicator(
     region: RegionDescriptor, 
     mode: str = 'hard', 
@@ -389,12 +354,7 @@ class BatchedIndicators:
     - soft + smoothstep: compact flat-top windows (C^N, exact 0 outside collar)
     """
     
-    def __init__(self, base_weight: float = 1.0):
-        """
-        Args:
-            base_weight: Constant weight for the base model (used in soft blending).
-        """
-        self.base_weight = base_weight
+    def __init__(self):
         self.all_lower: Optional[torch.Tensor] = None  # (K, D)
         self.all_upper: Optional[torch.Tensor] = None  # (K, D)
         self.all_delta: Optional[torch.Tensor] = None  # (K, D) collar/sigma for soft mode
@@ -486,9 +446,9 @@ class BatchedIndicators:
         N_pts = inputs.shape[0]
         device = inputs.device
         dtype = inputs.dtype
-        
-        # Base weight is uniform across all points
-        psi_base = torch.full((N_pts, 1), self.base_weight, device=device, dtype=dtype)
+
+        # Base weight is uniform across all points (leaves-only PoU discards it)
+        psi_base = torch.ones(N_pts, 1, device=device, dtype=dtype)
         
         # Handle case with no experts
         if self.all_lower is None or self._num_experts == 0:

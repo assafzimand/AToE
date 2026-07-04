@@ -267,9 +267,6 @@ def _debug_print_model_state(model: nn.Module, segment_name: str,
     if hasattr(model, 'leaf_indices'):
         logger.info(f"  Leaf indices: {sorted(model.leaf_indices)}")
 
-    if hasattr(model, 'base_weight'):
-        logger.info(f"  Base weight: {model.base_weight}")
-    
     # Call model-specific debug_composition if available and has experts
     if hasattr(model, 'debug_composition') and len(experts) > 0 and eval_data is not None:
         try:
@@ -896,22 +893,21 @@ def _setup_training(
 
     # Smart initialization (Glorot hidden + zero/LS output) — base model only
     # Skip when a pretrained base was loaded (init would destroy the trained weights).
-    from trainer.init import apply_hidden_init, apply_output_init, apply_spectral_norm
+    from trainer.init import apply_hidden_init, apply_output_init
     _init_target = model.base_model if is_adaptive else model
     _init_cfg = cfg.get('init', {})
     if pretrained_base_checkpoint is not None:
         logger.info("[Init] Skipped — base loaded from pretrained checkpoint.")
-    elif _init_cfg.get('hidden', 'default') != 'default' or _init_cfg.get('output', 'default') != 'default' or _init_cfg.get('spectral_norm', False):
+    elif _init_cfg.get('hidden', 'default') != 'default' or _init_cfg.get('output', 'default') != 'default':
         logger.info("[Init] Applying smart initialization to base model...")
-        # parent_weights is expert-only; use glorot for base model unless architecture is
-        # resnet (glorot zeros fc2 in ResBlocks → spectral_norm wraps it → sigma=0 → NaN)
+        # parent_weights is expert-only; the base model uses glorot instead
+        # (except for resnet, whose glorot zeros fc2 for the identity start).
         _base_init_cfg = cfg
         _expert_type = cfg['adaptive_pinn']['expert_type']
         if cfg['init']['hidden'] == 'parent_weights' and _expert_type != 'resnet':
             _base_init_cfg = {**cfg, 'init': {**cfg['init'], 'hidden': 'glorot'}}
         apply_hidden_init(_init_target, _base_init_cfg)
         apply_output_init(_init_target, train_data, cfg, device)
-        apply_spectral_norm(_init_target, cfg)
         logger.info("")
 
     # ── Build the context that carries all state into the loop + finalize ──
@@ -2292,8 +2288,7 @@ def _spawn_nodes(ctx: TrainingContext, level_nodes, copy_output: bool,
     metrics = ctx.metrics
     epoch = ctx.epoch
 
-    from trainer.init import (apply_expert_init, apply_parent_copy_init,
-                              apply_spectral_norm)
+    from trainer.init import apply_expert_init, apply_parent_copy_init
     from adaptive.indicators import RegionDescriptor
 
     init_mode = problem_cfg['init']['hidden']
@@ -2356,8 +2351,7 @@ def _spawn_nodes(ctx: TrainingContext, level_nodes, copy_output: bool,
             apply_expert_init(new_exp, cfg, zero_output=zero_output)
             output_init = 'zeroed' if zero_output else f'{init_mode}'
             logger.info(f"    [Init] Expert {expert_idx}: hidden='{init_mode}', output='{output_init}'")
-        apply_spectral_norm(new_exp, cfg)
-        
+
         # Print output layer state after init
         from trainer.init import _get_output_layer
         out_layer = _get_output_layer(new_exp)
@@ -3221,14 +3215,11 @@ def _save_checkpoint(
     metrics: Dict
 ) -> None:
     """Save model checkpoint with full information."""
-    # With spectral norm (nn.utils.parametrizations), live model objects cannot be
-    # pickled by torch.save. In time-marching mode, cfg['_time_marching_window']
-    # carries a 'prev_model' reference that would fail serialization.
-    # Strip it only when spectral norm is active — the reference is transient and
-    # is never read back from a checkpoint (time_marching.py manages it in memory).
+    # In time-marching mode, cfg['_time_marching_window'] carries a transient
+    # 'prev_model' reference that must not be serialized into the checkpoint
+    # (time_marching.py manages it in memory).
     cfg_to_save = cfg
-    if (cfg.get('init', {}).get('spectral_norm', False)
-            and '_time_marching_window' in cfg
+    if ('_time_marching_window' in cfg
             and cfg['_time_marching_window'].get('prev_model') is not None):
         cfg_to_save = dict(cfg)
         tm = dict(cfg['_time_marching_window'])

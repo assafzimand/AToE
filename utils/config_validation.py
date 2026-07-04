@@ -23,7 +23,7 @@ REQUIRED_PROBLEM_FEATURES = [
 REQUIRED_NESTED_KEYS = {
     'rwf': ['enabled'],
     'fourier_features': ['enabled', 'dim', 'scale', 'periodic'],
-    'init': ['hidden', 'output', 'ls_use_bias', 'spectral_norm'],
+    'init': ['hidden', 'output', 'ls_use_bias'],
     'lra': ['enabled', 'update_every', 'alpha'],
     'adaptive_sampling': ['enabled', 'adaptive_ratio'],
 }
