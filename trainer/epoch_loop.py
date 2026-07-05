@@ -635,14 +635,18 @@ def _train_segment(
             logger.info(f"\n{'!'*60}")
             logger.info(f"  [NaN] Training diverged at epoch {epoch} — saving diagnostics and stopping.")
 
-            # Diagnose which loss component went NaN
+            # Diagnose which loss component went NaN. No torch.no_grad() here:
+            # physics losses need input autograd for the residual — the graph
+            # is simply discarded without a backward pass.
             try:
-                with torch.no_grad():
-                    _diag_batch = next(iter(train_loader))
-                    _comps = loss_fn(model, _diag_batch, return_components=True)
-                    logger.info(f"  [NaN] Loss components: " +
-                          ", ".join(f"{k}={v.item():.6g}" for k, v in _comps.items()))
-                    metrics['nan_components'] = {k: float(v.item()) for k, v in _comps.items()}
+                _diag_batch = next(iter(train_loader))
+                _comps = loss_fn(model, _diag_batch, return_components=True,
+                                 update_causal_state=False)
+                _flat = {k: float(v.item()) for k, v in _comps.items()
+                         if isinstance(v, torch.Tensor)}
+                logger.info(f"  [NaN] Loss components: " +
+                      ", ".join(f"{k}={v:.6g}" for k, v in _flat.items()))
+                metrics['nan_components'] = _flat
             except Exception as _e:
                 logger.info(f"  [NaN] Could not compute loss components: {_e}")
 

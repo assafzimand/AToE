@@ -125,6 +125,13 @@ def apply_output_init(
                 f"(hidden_dim={hidden_dim}, use_bias={use_bias}), got {n_ic}. "
                 f"Increase sampling.n_initial_train (or initial_train_ratio) or disable ls_init."
             )
+        if n_ic < 2 * required:
+            logger.warning(
+                f"[Init] LS-init is near-square ({n_ic} IC points for {required} "
+                f"unknowns): the fit interpolates the IC points and can produce "
+                f"huge output weights that explode the initial loss. Recommend "
+                f"sampling.n_initial_train >= {2 * required}."
+            )
 
         x_ic = train_data['x'][mask_ic].to(device)
         t_ic = train_data['t'][mask_ic].to(device)
@@ -138,13 +145,25 @@ def apply_output_init(
         if use_bias:
             H = torch.cat(
                 [features, torch.ones(n_ic, 1, device=device)], dim=1
-            ).float()  # (N, hidden_dim+1)
+            )  # (N, hidden_dim+1)
         else:
-            H = features.float()  # (N, hidden_dim)
+            H = features  # (N, hidden_dim)
 
-        solution = torch.linalg.lstsq(H, h_gt_ic.float()).solution
+        # Solve on CPU in float64 with the SVD driver: CUDA's only lstsq
+        # driver ('gels') ASSUMES full rank and returns garbage for the
+        # near-collinear tanh feature matrices that arise here; 'gelsd'
+        # returns the bounded minimum-norm solution instead.
+        H_cpu = H.detach().double().cpu()
+        y_cpu = h_gt_ic.detach().double().cpu()
+        solution = torch.linalg.lstsq(H_cpu, y_cpu, driver='gelsd').solution
         # solution shape: (hidden_dim[+1], output_dim)
 
+        fit_rel_err = ((H_cpu @ solution - y_cpu).norm()
+                       / (y_cpu.norm() + 1e-12)).item()
+        w_norm = solution.norm().item()
+
+        solution = solution.to(device=out_layer.weight.device,
+                               dtype=out_layer.weight.dtype)
         with torch.no_grad():
             if use_bias:
                 out_layer.weight.copy_(solution[:-1].T)   # (output_dim, hidden_dim)
@@ -157,8 +176,16 @@ def apply_output_init(
         output_dim = out_layer.weight.shape[0]
         logger.info(
             f"  [Init] Output layer: LS-init from {n_ic} IC points "
-            f"(hidden_dim={hidden_dim}, output_dim={output_dim}, use_bias={use_bias})"
+            f"(hidden_dim={hidden_dim}, output_dim={output_dim}, use_bias={use_bias}, "
+            f"fit_rel_err={fit_rel_err:.3e}, ||W_out||={w_norm:.3e})"
         )
+        if w_norm > 1e3:
+            logger.warning(
+                f"[Init] LS-init produced large output weights (||W_out||="
+                f"{w_norm:.3e}) — the feature matrix is ill-conditioned; the "
+                f"initial loss may be large. Consider more IC points or "
+                f"init.output: default."
+            )
 
     # output_mode == 'default' → no-op
 

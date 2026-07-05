@@ -148,8 +148,11 @@ def _finalize_training(ctx: TrainingContext) -> Path:
         logger.info("[NaN] Generating partial training curves before exit...")
         try:
             training_plots_dir = run_dir / "training_plots"
-            switch_epoch_to_plot = switch_epoch if (optimizer_2_name is not None and switch_epoch <= epochs) else None
-            plot_training_curves(metrics, training_plots_dir, optimizer_switch_epoch=switch_epoch_to_plot)
+            _switch_epochs = [e['epoch'] for e in metrics.get('optimizer_events', [])]
+            _segment_starts = [s['start_epoch'] for s in metrics.get('segment_events', [])]
+            plot_training_curves(metrics, training_plots_dir,
+                                 optimizer_switch_epochs=_switch_epochs,
+                                 segment_start_epochs=_segment_starts)
         except Exception as _plot_err:
             logger.info(f"  [NaN] Could not generate training curves: {_plot_err}")
         logger.info("[NaN] Skipping remaining post-training cleanup — moving to next experiment.")

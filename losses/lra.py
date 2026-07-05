@@ -16,8 +16,13 @@ Two schemes:
                 all three contributions equal.
 """
 
+import math
 import torch
 from typing import Dict, Callable
+
+from utils.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 
 class LRAWeights:
@@ -104,6 +109,16 @@ class LRAWeights:
 
         self.last_grad_norms = grad_norms.copy()
         model.zero_grad()
+
+        # Non-finite grad norms (inf/nan, e.g. from an exploded init) would
+        # poison the weights with nan and kill training on the next step —
+        # skip the update and keep the previous weights instead.
+        if any(not math.isfinite(v) for v in grad_norms.values()):
+            logger.warning(
+                f"[LRA] Skipping weight update: non-finite gradient norms "
+                f"{grad_norms} — keeping previous weights {self.weights}."
+            )
+            return False
 
         if self.scheme == 'grad_norm':
             # jaxpi formula: w_i = (Σ_j ‖∇L_j‖) / ‖∇L_i‖; epsilon prevents
