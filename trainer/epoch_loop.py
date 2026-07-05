@@ -16,10 +16,10 @@ from utils.logging_config import get_logger
 logger = get_logger(__name__)
 
 from trainer.plotting import (
-    plot_training_curves, plot_final_comparison,
+    plot_training_curves,
     plot_per_expert_curves,
 )
-from trainer.utils import compute_infinity_norm_error
+from trainer.utils import compute_infinity_norm_error, compute_native_grid_metrics
 from trainer.timing import EpochTimer
 from trainer.training_context import TrainingContext, SegmentResult
 from models.atoe_leaves import AToELeaves
@@ -150,6 +150,7 @@ def _train_segment(
     _stop_reason = 'budget'
     _lra_updated_epoch = -1
     _resample_skip_logged = False  # log the LBFGS/SSBroyden skip once per segment
+    _native_fallback_logged = False  # log the native-grid fallback once per segment
 
     _n_train_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     _switch_str = (f" -> {optimizer_2_name.upper()}@{switch_epoch}"
@@ -703,17 +704,27 @@ def _train_segment(
                            or epoch == total_epochs)
         
         if should_evaluate:
-            # Eval phase: one physics pass per batch (loss + components) plus a
-            # cheap no-grad prediction pass for rel-L2 / inf-norm.
+            # Eval phase: one physics pass per batch (loss + components; drives
+            # patience and best-checkpoint selection, stays GT-free) plus
+            # rel-L2 / inf-norm on the solver's NATIVE grid (paper-comparable,
+            # same metric as finalize and the comparison reports).
             model.eval()
             eval_loss = 0.0
-            # Accumulate squared sums for correct global rel-L2 computation
-            # (averaging per-batch rel-L2 is mathematically incorrect)
-            total_diff_sq = 0.0
-            total_gt_sq = 0.0
-            eval_inf_norm = 0.0  # Track max across all batches
             n_eval_batches = 0
             comp_sums = {}
+
+            timer.start('eval.native_grid')
+            _native = compute_native_grid_metrics(model, cfg, device)
+            timer.stop('eval.native_grid')
+            if _native is None and not _native_fallback_logged:
+                logger.warning("  [Eval] Solver native grid unavailable — "
+                               "rel-L2/inf-norm fall back to the random eval subsample.")
+                _native_fallback_logged = True
+
+            # Subsample accumulators (fallback only)
+            total_diff_sq = 0.0
+            total_gt_sq = 0.0
+            eval_inf_norm = 0.0
 
             # Eval metric uses the configured blending_mode (composed forward),
             # so the rel-L2 curve reflects the actual inference-time composition.
@@ -729,25 +740,26 @@ def _train_segment(
                     val = float(v.item()) if isinstance(v, torch.Tensor) else float(v)
                     comp_sums[k] = comp_sums.get(k, 0.0) + val
 
-                with torch.no_grad():
-                    inputs = torch.cat([batch['x'], batch['t']], dim=1)
-                    timer.start('eval.h_pred')
-                    h_pred = model(inputs)
-                    timer.stop('eval.h_pred')
-                    # Accumulate squared differences and GT norms for global rel-L2
-                    diff = h_pred - batch['h_gt']
-                    total_diff_sq += (diff ** 2).sum().item()
-                    total_gt_sq += (batch['h_gt'] ** 2).sum().item()
-                    # Track max inf_norm across all batches
-                    inf_norm = compute_infinity_norm_error(h_pred, batch['h_gt'])
-                    eval_inf_norm = max(eval_inf_norm, inf_norm.item())
+                if _native is None:
+                    with torch.no_grad():
+                        inputs = torch.cat([batch['x'], batch['t']], dim=1)
+                        h_pred = model(inputs)
+                        diff = h_pred - batch['h_gt']
+                        total_diff_sq += (diff ** 2).sum().item()
+                        total_gt_sq += (batch['h_gt'] ** 2).sum().item()
+                        inf_norm = compute_infinity_norm_error(h_pred, batch['h_gt'])
+                        eval_inf_norm = max(eval_inf_norm, inf_norm.item())
 
                 n_eval_batches += 1
 
             comp_means = {k: v / n_eval_batches for k, v in comp_sums.items()}
             eval_loss = comp_means.pop('total')
-            # Compute global rel-L2: ||pred - gt||_2 / ||gt||_2
-            eval_rel_l2 = math.sqrt(total_diff_sq) / (math.sqrt(total_gt_sq) + 1e-10)
+            if _native is not None:
+                eval_rel_l2 = _native['rel_l2']
+                eval_inf_norm = _native['inf_norm']
+            else:
+                # Global subsample rel-L2: ||pred - gt||_2 / ||gt||_2
+                eval_rel_l2 = math.sqrt(total_diff_sq) / (math.sqrt(total_gt_sq) + 1e-10)
 
             # Store evaluation metrics (train_loss already stored above for all epochs)
             metrics['epochs'].append(epoch)

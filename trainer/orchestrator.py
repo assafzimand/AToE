@@ -16,7 +16,7 @@ from utils.logging_config import get_logger
 logger = get_logger(__name__)
 
 from trainer.plotting import (
-    plot_training_curves, plot_final_comparison,
+    plot_training_curves,
     plot_per_expert_curves,
 )
 from trainer.utils import compute_infinity_norm_error

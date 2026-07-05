@@ -1,7 +1,9 @@
 """Training utility functions."""
 
+import math
 import torch
-from typing import Dict
+import numpy as np
+from typing import Dict, Optional
 
 
 def compute_relative_l2_error(
@@ -41,3 +43,71 @@ def compute_infinity_norm_error(
     """
     diff = h_pred - h_gt
     return torch.max(torch.abs(diff))
+
+
+def compute_native_grid_metrics(
+    model: torch.nn.Module,
+    cfg: Dict,
+    device: torch.device,
+    chunk_size: int = 65536,
+) -> Optional[Dict]:
+    """Rel-L2 and inf-norm of the model on the solver's NATIVE solution grid.
+
+    This is the paper-comparable metric: the literature reports rel-L2 on the
+    reference solution's own grid, with no interpolation (off-node GT queries
+    pick up large artificial errors across steep fronts). The grid is
+    restricted to the config's temporal domain so time-marching windows are
+    scored on their own window. The solver memoizes the solution in-process,
+    so calling this every eval is cheap (one chunked no-grad forward).
+
+    Returns:
+        {'rel_l2', 'inf_norm', 'n_points', 'grid_shape'} or None if the
+        solver grid is unavailable.
+    """
+    import importlib
+
+    problem = cfg['problem']
+    try:
+        solver = importlib.import_module(f'solvers.{problem}_solver')
+        x_grid, t_grid, h_sol = solver._get_solution_cached(cfg)
+    except Exception:
+        return None
+
+    t0, t1 = cfg[problem]['temporal_domain']
+    t_mask = (t_grid >= t0 - 1e-12) & (t_grid <= t1 + 1e-12)
+    t_grid = np.asarray(t_grid)[t_mask]
+    h_sol = np.asarray(h_sol)[t_mask]  # (nt, nx), complex for schrodinger
+
+    # Flatten grid to (N, 2) inputs and (N, output_dim) ground truth
+    T, X = np.meshgrid(t_grid, np.asarray(x_grid), indexing='ij')
+    xt = np.column_stack([X.ravel(), T.ravel()])
+    if np.iscomplexobj(h_sol):
+        gt = np.column_stack([h_sol.real.ravel(), h_sol.imag.ravel()])
+    else:
+        gt = h_sol.reshape(-1, 1)
+
+    dtype = next(model.parameters()).dtype
+    was_training = model.training
+    model.eval()
+    total_diff_sq = 0.0
+    total_gt_sq = 0.0
+    inf_norm = 0.0
+    with torch.no_grad():
+        for start in range(0, xt.shape[0], chunk_size):
+            xb = torch.tensor(xt[start:start + chunk_size], dtype=dtype, device=device)
+            gb = torch.tensor(gt[start:start + chunk_size], dtype=dtype, device=device)
+            pred = model(xb)
+            diff = pred - gb
+            total_diff_sq += (diff ** 2).sum().item()
+            total_gt_sq += (gb ** 2).sum().item()
+            inf_norm = max(inf_norm, diff.abs().max().item())
+    if was_training:
+        model.train()
+
+    rel_l2 = math.sqrt(total_diff_sq) / (math.sqrt(total_gt_sq) + 1e-10)
+    return {
+        'rel_l2': rel_l2,
+        'inf_norm': inf_norm,
+        'n_points': xt.shape[0],
+        'grid_shape': (len(t_grid), len(x_grid)),
+    }
