@@ -90,6 +90,18 @@ def _build_model(cfg):
     from models.network_factory import create_network
     from models.atoe_leaves import AToELeaves
 
+    # Match the run's precision (like the trainer does at setup): evaluating
+    # a float64 model as a float32 cast adds ~1e-7 relative rounding noise,
+    # which pollutes error maps and rel-L2 for well-converged models. Set the
+    # DEFAULT dtype (not .double()) so non-parameter tensors created at build
+    # and checkpoint-load time (indicator windows, FF matrices) match too.
+    # Intentionally not restored — checkpoint loading right after this call
+    # must run under the same default.
+    if cfg.get('precision', 'float32') == 'float64':
+        torch.set_default_dtype(torch.float64)
+    else:
+        torch.set_default_dtype(torch.float32)
+
     architecture = cfg['base_architecture']
     activation = cfg.get('activation', 'tanh')
     adaptive_cfg = cfg.get('adaptive_pinn', {})

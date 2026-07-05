@@ -18,6 +18,54 @@ sys.path.insert(0, str(Path(__file__).parent))
 _TIMESTAMP_RE = re.compile(r'\d{8}_\d{6}$')
 
 
+def _load_ckpt_helpers():
+    """Import model-build/checkpoint-load helpers from the plot script
+    (scripts/ is not a package, so load it by file path)."""
+    import importlib.util
+    helper_path = Path(__file__).parent / 'scripts' / 'plot_experts_predictions.py'
+    spec = importlib.util.spec_from_file_location(
+        'plot_experts_predictions', helper_path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _regen_segment_plots(result_path: Path, helpers) -> None:
+    """Re-render pred_after_<segment>.png in adaptive_plots/ from the
+    checkpoint_after_<segment>.pt checkpoints (root, phase3, fine_tune, ...),
+    replacing the in-training plots with the unified native-grid renderer."""
+    import yaml
+
+    cfg_path = result_path / 'config_used.yaml'
+    ckpt_dir = result_path / 'checkpoints'
+    if not cfg_path.exists() or not ckpt_dir.exists():
+        return
+    with open(cfg_path) as f:
+        cfg = yaml.safe_load(f)
+    problem = cfg.get('problem', '')
+    is_adaptive = cfg.get('adaptive_pinn', {}).get('enabled', False)
+    out_dir = result_path / 'adaptive_plots'
+
+    from utils.problem_specific.generic_viz import plot_predictions_and_error_maps
+
+    for ckpt_path in sorted(ckpt_dir.glob('checkpoint_after_*.pt')):
+        segment = ckpt_path.stem.replace('checkpoint_after_', '')
+        try:
+            model = helpers._build_model(cfg)
+            epoch = helpers._load_checkpoint(model, ckpt_path, is_adaptive)
+            model.eval()
+            out_dir.mkdir(parents=True, exist_ok=True)
+            plot_predictions_and_error_maps(
+                model, out_dir, cfg,
+                filename=f'pred_after_{segment}.png',
+                title=f'{problem} — after {segment} '
+                      f'({ckpt_path.name} @ epoch {epoch})')
+            print(f"  [SegmentPlots] regenerated pred_after_{segment}.png "
+                  f"(epoch {epoch})")
+        except Exception as _seg_err:
+            print(f"  [SegmentPlots] {segment}: failed — {_seg_err}")
+
+
 def _is_timestamp_dir(d: Path) -> bool:
     return d.is_dir() and bool(_TIMESTAMP_RE.match(d.name))
 
@@ -365,11 +413,24 @@ def generate_comparison_for_batch(batch_dir: Path, label: str = None):
                     exp_name = f"{exp_name}_{ts_dir.name[-6:]}"
                 results[exp_name] = ts_dir
 
+    # Helpers for loading checkpoints (model build); optional — comparison
+    # still works without them.
+    try:
+        _ckpt_helpers = _load_ckpt_helpers()
+    except Exception as _h_err:
+        print(f"  [SegmentPlots] helpers unavailable ({_h_err}); "
+              f"skipping segment-plot regeneration")
+        _ckpt_helpers = None
+
     # Collect training metrics
     metrics_data = []
     for exp_name, result_path in results.items():
         if result_path is None:
             continue
+
+        # Re-render the per-segment prediction plots from their checkpoints
+        if _ckpt_helpers is not None:
+            _regen_segment_plots(result_path, _ckpt_helpers)
 
         # Load training metrics
         metrics_file = result_path / "metrics.json"
