@@ -125,7 +125,7 @@ def apply_output_init(
                 f"(hidden_dim={hidden_dim}, use_bias={use_bias}), got {n_ic}. "
                 f"Increase sampling.n_initial_train (or initial_train_ratio) or disable ls_init."
             )
-        if n_ic < 2 * required:
+        if n_ic < 1.5 * required:
             logger.warning(
                 f"[Init] LS-init is near-square ({n_ic} IC points for {required} "
                 f"unknowns): the fit interpolates the IC points and can produce "
