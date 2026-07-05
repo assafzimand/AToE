@@ -204,7 +204,7 @@ def _generate_training_results_plot(parent_dir, df,
         'LR / Sched', 'Spawning']
     result_cols = [
         'Train\nLoss', 'Eval\nLoss',
-        'Eval\nRel-L2', 'Eval\nInf']
+        'Eval\nRel-L2', 'Eval\nInf', 'Dense\nRel-L2']
     col_labels = ['Experiment'] + info_cols + result_cols
     n_info = len(info_cols)
     first_result_col = 1 + n_info
@@ -213,7 +213,7 @@ def _generate_training_results_plot(parent_dir, df,
         import math
         if v is None or (isinstance(v, float) and math.isnan(v)):
             return 'N/A'
-        return f'{v:.6f}'
+        return f'{v:.4e}'
 
     table_data = []
     for _, row in df.iterrows():
@@ -237,6 +237,7 @@ def _generate_training_results_plot(parent_dir, df,
             _fmt(row['final_eval_loss']),
             _fmt(row['final_eval_rel_l2']),
             _fmt(row['final_eval_inf_norm']),
+            _fmt(row.get('final_dense_rel_l2')),
         ]
         table_data.append(row_data)
 
@@ -266,7 +267,8 @@ def _generate_training_results_plot(parent_dir, df,
 
     result_keys = [
         'final_train_loss', 'final_eval_loss',
-        'final_eval_rel_l2', 'final_eval_inf_norm']
+        'final_eval_rel_l2', 'final_eval_inf_norm',
+        'final_dense_rel_l2']
     for ri, key in enumerate(result_keys):
         ci = first_result_col + ri
         if key not in df.columns:
@@ -381,12 +383,16 @@ def generate_comparison_for_batch(batch_dir: Path, label: str = None):
         def _last(lst):
             return lst[-1] if lst else float('nan')
 
+        dense_rel_l2 = train_metrics.get('final_dense_rel_l2', float('nan'))
+        if dense_rel_l2 == dense_rel_l2:  # not nan
+            print(f"  {exp_name}: dense-grid rel-L2 = {dense_rel_l2:.6e}")
         metrics_data.append({
             'experiment': exp_name,
             'final_train_loss': _last(train_metrics.get('train_loss', [])),
             'final_eval_loss': _last(train_metrics.get('eval_loss', [])),
             'final_eval_rel_l2': _last(train_metrics.get('eval_rel_l2', [])),
             'final_eval_inf_norm': _last(train_metrics.get('eval_inf_norm', [])),
+            'final_dense_rel_l2': dense_rel_l2,
         })
 
     if not metrics_data:

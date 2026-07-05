@@ -152,7 +152,7 @@ class LRAWeights:
         return self.weights.get(key, 1.0)
 
     def __repr__(self) -> str:
-        w_str = ', '.join(f'{k}={v:.4f}' for k, v in self.weights.items())
+        w_str = ', '.join(f'{k}={v:.4e}' for k, v in self.weights.items())
         return (
             f"LRAWeights(scheme={self.scheme}, {w_str}, "
             f"alpha={self.alpha}, update_every={self.update_every})"
