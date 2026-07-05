@@ -152,24 +152,27 @@ def plot_predictions_and_error_maps(
         vmax = max(np.abs(gt).max(), np.abs(pr).max())
         vmin = -vmax
 
+        # pcolormesh (not contourf): continuous paper-style rendering with
+        # the exact grid values — contour levels band smooth fields and
+        # make near-noise-floor error maps look artificially grainy.
         # Ground Truth
-        im0 = axes[d, 0].contourf(X, T, gt, levels=50, cmap='RdBu_r',
-                                   vmin=vmin, vmax=vmax)
+        im0 = axes[d, 0].pcolormesh(X, T, gt, shading='auto', cmap='RdBu_r',
+                                    vmin=vmin, vmax=vmax)
         axes[d, 0].set_title(f'{label} — Ground Truth', fontsize=12, fontweight='bold')
         axes[d, 0].set_xlabel('x')
         axes[d, 0].set_ylabel('t')
         plt.colorbar(im0, ax=axes[d, 0])
 
         # Prediction
-        im1 = axes[d, 1].contourf(X, T, pr, levels=50, cmap='RdBu_r',
-                                   vmin=vmin, vmax=vmax)
+        im1 = axes[d, 1].pcolormesh(X, T, pr, shading='auto', cmap='RdBu_r',
+                                    vmin=vmin, vmax=vmax)
         axes[d, 1].set_title(f'{label} — Prediction', fontsize=12, fontweight='bold')
         axes[d, 1].set_xlabel('x')
         axes[d, 1].set_ylabel('t')
         plt.colorbar(im1, ax=axes[d, 1])
 
         # Error
-        im2 = axes[d, 2].contourf(X, T, err, levels=50, cmap='Reds')
+        im2 = axes[d, 2].pcolormesh(X, T, err, shading='auto', cmap='Reds')
         axes[d, 2].set_title(f'{label} — Absolute Error', fontsize=12, fontweight='bold')
         axes[d, 2].set_xlabel('x')
         axes[d, 2].set_ylabel('t')
