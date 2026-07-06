@@ -81,8 +81,10 @@ def cole_hopf_exact(x, t, nu, n_terms=None):
     
     kernel = (X - Xi) / t_val  # (nx, n_quad)
     
-    numerator   = np.trapz(kernel * w, xi, axis=1)  # (nx,)
-    denominator = np.trapz(w, xi, axis=1)            # (nx,)
+    # np.trapz was removed in NumPy 2.0 (renamed trapezoid)
+    _trapz = getattr(np, 'trapezoid', getattr(np, 'trapz', None))
+    numerator   = _trapz(kernel * w, xi, axis=1)  # (nx,)
+    denominator = _trapz(w, xi, axis=1)            # (nx,)
     
     h = numerator / denominator
     
