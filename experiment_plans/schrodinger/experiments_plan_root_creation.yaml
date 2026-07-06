@@ -7,7 +7,7 @@ base_config:
   precision: float64
   debug_prints: true                  # gates PirateNet alpha/causal-chunk/LR diagnostic prints
 
-  epochs: 30000
+  epochs: 40000
   batch_size: 99999
   patience_epochs: 5000
   min_epochs: 1
@@ -15,7 +15,7 @@ base_config:
 
   optimizer_1: adam
   optimizer_2: ssbroyden                   # pure Adam — no second-order phase (JAX-PI recipe)
-  optimizer_switch_epoch: 10000
+  optimizer_switch_epoch: 5000
   lr: 0.001
   soap_betas: [0.95, 0.95]
   soap_precondition_frequency: 10
@@ -23,7 +23,7 @@ base_config:
   lr_schedule: none
   lr_decay_rate: 0.9                  # JAX-PI: decay 0.9 every 2000 steps
   lr_decay_steps: 2000
-  lr_warmup_steps: 5000               # JAX-PI: linear warmup 0 -> 1e-3 over 5000 steps
+  lr_warmup_steps: 0               # JAX-PI: linear warmup 0 -> 1e-3 over 5000 steps
   lr_warmup_start_factor: 0.01        # ~0 start (repo's LinearLR wants a nonzero factor)
 
   adam_betas: [0.9, 0.999]
@@ -240,7 +240,7 @@ base_config:
     n_boundary_train: 256               # explicit count (overrides boundary_train_ratio); unused: periodic BC has no BC loss term
     eval_train_ratio: 0.25
     ncc_train_ratio: 0.25
-    resample_every_epochs: 500            # fresh random collocation points every step (JAX-PI)
+    resample_every_epochs: 100            # fresh random collocation points every step (JAX-PI)
     plot_samples_every: 5000            # reduced plot frequency given the 200k-epoch run
     min_points_per_leaf: 50
 
@@ -279,15 +279,15 @@ base_config:
 
     # ── Phase 1: the only phase that runs (M=0 -> never reaches Phase 3) ────
     initial_train:
-      epochs: 30000                    # JAX-PI: 2e5 Adam steps
+      epochs: 40000                   
       optimizer_1: adam
       optimizer_2: ssbroyden
-      optimizer_switch_epoch: 10000
+      optimizer_switch_epoch: 5000
       lr: 0.001
       lr_schedule: none
       lr_decay_rate: 0.9
       lr_decay_steps: 2000
-      lr_warmup_steps: 5000
+      lr_warmup_steps: 0
       lr_warmup_start_factor: 0.01
 
     # ── Staged per-level (AToE / ANT) — unused (M=0) ──
@@ -310,26 +310,14 @@ base_config:
 
 
 experiments:
-  - name: Root_100
-    problem: schrodinger
-    model: AToELeaves
-    base_architecture: [2, 100, 100, 100, 100, 100, 1]
-    experts_architecture: [2, 100, 100, 100, 100, 100, 1]
-
   - name: Root_70
     problem: schrodinger
     model: AToELeaves
-    base_architecture: [2, 70, 70, 70, 70, 70, 1]
-    experts_architecture: [2, 70, 70, 70, 70, 70, 1]
+    base_architecture: [2, 70, 70, 70, 70, 2]
+    experts_architecture: [2, 70, 70, 70, 70, 2]
 
-  - name: Root_50
+  - name: Root_60
     problem: schrodinger
     model: AToELeaves
-    base_architecture: [2, 50, 50, 50, 50, 50, 1]
-    experts_architecture: [2, 50, 50, 50, 50, 50, 1]
-
-  - name: Root_70_small
-    problem: schrodinger
-    model: AToELeaves
-    base_architecture: [2, 70, 70, 70, 1]
-    experts_architecture: [2, 70, 70, 70, 1]
+    base_architecture: [2, 60, 60, 60, 60, 2]
+    experts_architecture: [2, 60, 60, 60, 60, 2]

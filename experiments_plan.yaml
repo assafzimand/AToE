@@ -1,65 +1,115 @@
-experiment_name: "burgers_M10"
+experiment_name: "schrodinger_root_creation"
 
 base_config:
-  problem: burgers1d
-  model: AToELeaves                   # AToE-Leaves is the only training flow
+  problem: schrodinger
+  model: AToELeaves                          # overridden per experiment
   activation: tanh
   precision: float64
+  debug_prints: true                  # gates PirateNet alpha/causal-chunk/LR diagnostic prints
 
-  # ── Phase-3 (leaf split training) budget; initial_train/fine_tune have their own ──
   epochs: 40000
-  batch_size: 99999                   # >= dataset size = full batch
+  batch_size: 99999
+  patience_epochs: 5000
   min_epochs: 1
-  eval_every: 100                     # eval cadence (single physics pass per eval)
-  patience_evals: 50                  # early stop after N evals without eval-loss improvement
-  patience_rel_delta: 0.01            # min relative eval-loss improvement to reset patience
+  patience_rel_delta: 0.01            # min relative train-loss improvement to reset patience
 
-  # ── Optimizers ──
-  # optimizer_1 runs until optimizer_switch_epoch, then optimizer_2 (full-batch).
   optimizer_1: adam
-  optimizer_2: ssbroyden
-  optimizer_switch_epoch: 1000
+  optimizer_2: ssbroyden                   # pure Adam — no second-order phase (JAX-PI recipe)
+  optimizer_switch_epoch: 5000
   lr: 0.001
+  soap_betas: [0.95, 0.95]
+  soap_precondition_frequency: 10
+  soap_weight_decay: 0.0
   lr_schedule: none
-  lr_decay_rate: 0.98
-  lr_decay_steps: 1000
-  lr_warmup_steps: 0
-  lr_warmup_start_factor: 0.01
+  lr_decay_rate: 0.9                  # JAX-PI: decay 0.9 every 2000 steps
+  lr_decay_steps: 2000
+  lr_warmup_steps: 0               # JAX-PI: linear warmup 0 -> 1e-3 over 5000 steps
+  lr_warmup_start_factor: 0.01        # ~0 start (repo's LinearLR wants a nonzero factor)
 
-  adam:
-    betas: [0.9, 0.999]
-    eps: 1.0e-8
-  lbfgs:
-    lr: 1.0
-    max_iter: 1
-    history_size: 100
-    line_search: 'strong_wolfe'
-    tolerance_grad: 0.0
-    tolerance_change: 0.0
-  ssbroyden:
-    lr: 1.0
-    tolerance_grad: 1.0e-10
-  soap:
-    betas: [0.95, 0.95]
-    precondition_frequency: 10
-    weight_decay: 0.0
+  adam_betas: [0.9, 0.999]
+  adam_eps: 1.0e-8
+  lbfgs_lr: 1.0
+  lbfgs_max_iter: 1
+  lbfgs_history_size: 100
+  lbfgs_line_search: 'strong_wolfe'
+  lbfgs_tolerance_grad: 0.0
+  lbfgs_tolerance_change: 0.0
+  ssbroyden_lr: 1.0
+  ssbroyden_tolerance_grad: 1.0e-10
 
-  # ── Run control ──
   cuda: true
   eval_only: false
   resume_from: null
+  bins: 5
+  n_bin_visualize_ncc: 100
+  n_freq_grid: 128
+  eval_every: 1000
   print_every: 1000
-  save_every: 999999                  # periodic checkpoints (best/final always saved)
+  save_every: 999999
+  inner_metrics_eval_every: 9999999
   seed: 42
 
   # ══════════════════════════════════════════════════════════════════════════
-  # Per-problem sections. Every kept problem defines the full feature surface.
-  # window_smoothness_order must be >= the PDE's spatial derivative order.
-  # wavelet/new_norm/smoothness thresholds are capacity-map sizing inputs
-  # (used only when AToE_threshold_capacity is set).
+  # KDV — PirateNet/JAX-PI feature set (see header notes above)
   # ══════════════════════════════════════════════════════════════════════════
+  kdv:
+    pretrained_base_checkpoint: null
+    spatial_dim: 1
+    output_dim: 1
+    spatial_domain: [[-1.0, 1.0]]
+    temporal_domain: [0.0, 1.0]
+    mu: 0.022
+    wavelet_threshold: 0.0025
+    new_norm_threshold: 0.2
+    tree_smoothness_threshold: 0.4
+    loss_weights:
+      residual: 1.0
+      ic: 1.0
+      bc: 1.0                         # auto-skipped: use_bc = not fourier_features.periodic
+    causal_training:
+      enabled: true
+      num_chunks: 16                  # JAX-PI: 16 temporal chunks
+      tol_schedule: [1.0]             # fixed epsilon=1.0 (single-element = no annealing)
+      min_weight_threshold: 0.99
+      per_leaf_causal: false
+    rwf:
+      enabled: true                   # JAX-PI: mu=1.0, sigma=0.1 on all weight matrices
+      mean: 1.0
+      std: 0.1
+    fourier_features:
+      enabled: true
+      dim: 128                        # assumption — see header note
+      scale: 1.0                      # JAX-PI: scale s=1.0
+      periodic: true                  # hard periodic BC -> disables BC loss term
+    init:
+      hidden: glorot                  # Glorot hidden init (+ identity-like start for ResNet)
+      output: ls                      # least-squares PI init of output layer (IC points only — see note)
+      ls_use_bias: false
+      spectral_norm: false
+      spectral_norm_init_std: 1.0e-6
+    lra:
+      enabled: true                   # grad-norm LRA (Wang et al. 2021)
+      update_every: 1000              # JAX-PI: updated every 1000 steps
+      alpha: 0.1
+      scheme: grad_norm
+      epsilon: 1.0e-5
+    adaptive_sampling:
+      enabled: false                  # JAX-PI: plain uniform random resampling, no RAD
+      adaptive_ratio: 0.3
+      per_leaf_sampling: false
+      phi: quadratic
+      phi_epsilon: 1.0
+      phi_power: 2.0
+    grad_clip_norm: null
+    expert_grad_clip_norm: null
+    time_marching:
+      enabled: false                  # no time windows for KdV in JAX-PI/PirateNet
+      num_windows: 5
+      freeze_previous_windows: true
+      m_distribution: quadratic
+
+  # ── Other problems (required by schema; not used) ──────────────────────────
   allen_cahn:
-    pretrained_base_checkpoint: "roots_checkpoints/allen_cahn_root.pt"  # null = train Phase 1
     spatial_dim: 1
     output_dim: 1
     spatial_domain: [[-1.0, 1.0]]
@@ -68,13 +118,11 @@ base_config:
     wavelet_threshold: 0.002
     new_norm_threshold: 0.04
     tree_smoothness_threshold: 0.5
-    window_type: smoothstep
-    window_smoothness_order: 2
     loss_weights:
       residual: 1.0
       ic: 1.0
       bc: 1.0
-      continuity: 0.0                 # neighbor-continuity term in split_icbc
+      continuity: 0.0
     causal_training:
       enabled: false
       num_chunks: 32
@@ -90,9 +138,11 @@ base_config:
       scale: 3.0
       periodic: false
     init:
-      hidden: default                 # default | glorot | parent_weights (experts only)
-      output: default                 # default | zero | ls
+      hidden: default
+      output: default
       ls_use_bias: false
+      spectral_norm: false
+      spectral_norm_init_std: 1.0e-6
     lra:
       enabled: false
       update_every: 100
@@ -102,6 +152,7 @@ base_config:
     adaptive_sampling:
       enabled: false
       adaptive_ratio: 0.3
+      per_leaf_sampling: false
       phi: quadratic
       phi_epsilon: 1.0
       phi_power: 2.0
@@ -114,7 +165,6 @@ base_config:
       m_distribution: quadratic
 
   schrodinger:
-    pretrained_base_checkpoint: null
     spatial_dim: 1
     output_dim: 2
     spatial_domain: [[-5.0, 5.0]]
@@ -122,21 +172,20 @@ base_config:
     wavelet_threshold: 0.1
     new_norm_threshold: 2.0
     tree_smoothness_threshold: 0.7
-    window_type: smoothstep
-    window_smoothness_order: 2
-    loss_weights: {residual: 1.0, ic: 1.0, bc: 1.0, continuity: 0.0}
-    causal_training: {enabled: false, num_chunks: 32, tol_schedule: [0.01, 0.1, 1.0], min_weight_threshold: 0.99}
-    rwf: {enabled: false, mean: 1.0, std: 0.1}
+    loss_weights: {residual: 1.0, ic: 1.0, bc: 1.0}
+    rwf:
+      enabled: false
+      mean: 1.0
+      std: 0.1
     fourier_features: {enabled: false, dim: 128, scale: 1.0, periodic: false}
-    init: {hidden: parent_weights, output: default, ls_use_bias: false}
+    init: {hidden: default, output: default, ls_use_bias: false, spectral_norm: false, spectral_norm_init_std: 1.0e-6}
     lra: {enabled: false, update_every: 100, alpha: 0.1, scheme: grad_norm, epsilon: 1.0e-5}
-    adaptive_sampling: {enabled: false, adaptive_ratio: 0.3, phi: quadratic, phi_epsilon: 1.0, phi_power: 2.0}
+    adaptive_sampling: {enabled: false, adaptive_ratio: 0.3, per_leaf_sampling: false, phi: quadratic, phi_epsilon: 1.0, phi_power: 2.0}
     grad_clip_norm: null
     expert_grad_clip_norm: null
     time_marching: {enabled: false, num_windows: 5, freeze_previous_windows: true, m_distribution: quadratic}
 
   burgers1d:
-    pretrained_base_checkpoint: "roots_checkpoints/burgers_root.pt"
     spatial_dim: 1
     output_dim: 1
     spatial_domain: [[-1.0, 1.0]]
@@ -145,44 +194,20 @@ base_config:
     wavelet_threshold: 0.001
     new_norm_threshold: 0.015
     tree_smoothness_threshold: 0.5
-    window_type: smoothstep
-    window_smoothness_order: 2
-    loss_weights: {residual: 1.0, ic: 1.0, bc: 1.0, continuity: 0.0}
-    causal_training: {enabled: false, num_chunks: 32, tol_schedule: [0.01, 0.1, 1.0], min_weight_threshold: 0.99}
-    rwf: {enabled: false, mean: 1.0, std: 0.1}
+    loss_weights: {residual: 1.0, ic: 1.0, bc: 1.0}
+    rwf:
+      enabled: false
+      mean: 1.0
+      std: 0.1
     fourier_features: {enabled: false, dim: 128, scale: 1.0, periodic: false}
-    init: {hidden: default, output: default, ls_use_bias: false}
+    init: {hidden: default, output: default, ls_use_bias: false, spectral_norm: false}
     lra: {enabled: false, update_every: 100, alpha: 0.1, scheme: grad_norm, epsilon: 1.0e-5}
-    adaptive_sampling: {enabled: true, adaptive_ratio: 0.5, phi: quadratic, phi_epsilon: 1.0, phi_power: 2.0}
-    grad_clip_norm: null
-    expert_grad_clip_norm: null
-    time_marching: {enabled: false, num_windows: 5, freeze_previous_windows: true, m_distribution: quadratic}
-
-  kdv:
-    pretrained_base_checkpoint: null
-    spatial_dim: 1
-    output_dim: 1
-    spatial_domain: [[-1.0, 1.0]]
-    temporal_domain: [0.0, 1.0]
-    mu: 0.022
-    wavelet_threshold: 0.0025
-    new_norm_threshold: 0.2
-    tree_smoothness_threshold: 0.4
-    window_type: smoothstep
-    window_smoothness_order: 3        # KdV is 3rd order (h_xxx)
-    loss_weights: {residual: 1.0, ic: 1.0, bc: 1.0, continuity: 0.0}
-    causal_training: {enabled: false, num_chunks: 16, tol_schedule: [0.01], min_weight_threshold: 0.99}
-    rwf: {enabled: false, mean: 1.0, std: 0.1}
-    fourier_features: {enabled: false, dim: 10, scale: 2.0, periodic: false}
-    init: {hidden: parent_weights, output: default, ls_use_bias: false}
-    lra: {enabled: false, update_every: 1000, alpha: 0.1, scheme: grad_norm, epsilon: 1.0e-5}
-    adaptive_sampling: {enabled: false, adaptive_ratio: 0.3, phi: quadratic, phi_epsilon: 1.0, phi_power: 2.0}
+    adaptive_sampling: {enabled: true, adaptive_ratio: 0.5, per_leaf_sampling: false, phi: quadratic, phi_epsilon: 1.0, phi_power: 2.0}
     grad_clip_norm: null
     expert_grad_clip_norm: null
     time_marching: {enabled: false, num_windows: 5, freeze_previous_windows: true, m_distribution: quadratic}
 
   ks:
-    pretrained_base_checkpoint: null
     spatial_dim: 1
     output_dim: 1
     spatial_domain: [[0.0, 6.283185307179586]]
@@ -193,87 +218,106 @@ base_config:
     wavelet_threshold: 0.04
     new_norm_threshold: 10.0
     tree_smoothness_threshold: 0.3
-    window_type: smoothstep
-    window_smoothness_order: 4        # KS is 4th order (h_xxxx)
-    loss_weights: {residual: 1.0, ic: 1.0, bc: 1.0, continuity: 0.0}
-    causal_training: {enabled: false, num_chunks: 32, tol_schedule: [0.01, 0.1, 1], min_weight_threshold: 0.99}
-    rwf: {enabled: false, mean: 1.0, std: 0.1}
+    loss_weights: {residual: 1.0, ic: 1.0, bc: 1.0}
+    causal_training: {enabled: false, num_chunks: 32, tol_schedule: [0.01, 0.1, 1], min_weight_threshold: 0.99, per_leaf_causal: false}
+    rwf:
+      enabled: false
+      mean: 1.0
+      std: 0.1
     fourier_features: {enabled: true, dim: 10, scale: 1.0, periodic: false}
-    init: {hidden: parent_weights, output: default, ls_use_bias: false}
+    init: {hidden: parent_weights, output: default, ls_use_bias: false, spectral_norm: false, spectral_norm_init_std: 1.0e-6}
     lra: {enabled: false, update_every: 100, alpha: 0.1, scheme: grad_norm, epsilon: 1.0e-5}
-    adaptive_sampling: {enabled: true, adaptive_ratio: 0.5, phi: quadratic, phi_epsilon: 1.0, phi_power: 2.0}
+    adaptive_sampling: {enabled: true, adaptive_ratio: 0.5, per_leaf_sampling: false, phi: quadratic, phi_epsilon: 1.0, phi_power: 2.0}
     grad_clip_norm: null
     expert_grad_clip_norm: null
     time_marching: {enabled: true, num_windows: 20, freeze_previous_windows: true, m_distribution: equal}
 
   # ── Dataset sampling ───────────────────────────────────────────────────────
   sampling:
-    n_residual_train: 4096
-    sample_volume_ratio: 35
-    n_initial_train: 256
-    n_boundary_train: 256
+    n_residual_train: 10000              # JAX-PI batch size
+    sample_volume_ratio: 35             # unused when n_residual_train is set explicitly
+    n_initial_train: 256                # explicit count (overrides initial_train_ratio)
+    n_boundary_train: 256               # explicit count (overrides boundary_train_ratio); unused: periodic BC has no BC loss term
     eval_train_ratio: 0.25
-    resample_every_epochs: 1          # split resample only redraws residual interiors
-    plot_samples_every: 1000
+    ncc_train_ratio: 0.25
+    resample_every_epochs: 100            # fresh random collocation points every step (JAX-PI)
+    plot_samples_every: 5000            # reduced plot frequency given the 200k-epoch run
+    min_points_per_leaf: 50
 
-  # ── Adaptive PINN (AToE-Leaves) ────────────────────────────────────────────
+  # ── Adaptive PINN ──────────────────────────────────────────────────────────
   adaptive_pinn:
     enabled: true
     max_experts: 150
-    variable_for_node_accept: norm    # M-term selection metric: norm | new_norm | smoothness
-    variable_for_expert_size: norm    # capacity-map sizing metric (when threshold set)
-    AToE_threshold_capacity: null     # null = fixed experts_architecture
-    expert_type: mlp                  # mlp | resnet | piratenet
-    blending_mode: soft               # soft (PoU) | hard
-    sigma_fraction: 0.2               # collar fraction of region size
+    spawn_every_epochs: 999999          # never spawn within initial_train.epochs
+    variable_for_node_accept: norm
+    variable_for_expert_size: norm
+    AToE_threshold_capacity: null
+    ANT_threshold_architecture: null
+    ANT_default_hidden_layers: 256
+    expert_type: mlp                    # overridden per experiment: mlp / resnet / piratenet
+    blending_mode: soft
+    sigma_fraction: 0.2
+    base_weight: 1.0
+    base_everywhere: true
     tree_max_depth: 15
     tree_min_samples_leaf: 50
     enable_timing: false
-    enable_gradient_diagnostics: false
-    M_experts_num: 10
-    split_icbc: { enabled: true }
+    inner_metrics_calculation: false
+    enable_gradient_diagnostics: true
+    expert_activation_threshold: 0
+    relevant_samples_to_activate_expert: 0
+    spawning_method: M_term_tree_by_norm
+    M_experts_num: 0                    # vanilla PINN — no tree, no experts
+    spawn_require_plateau: false
+    spawn_plateau_epochs: 50
+    spawn_plateau_delta: 0.05
+    spawn_retries_before_stop: false
+    spawn_retry_after: 10
+    reinitialize_base_after_spawn: false
+    split_icbc: { enabled: false }
+    additive: false
 
-    # ── Phase 1: vanilla-PINN root (skipped when pretrained_base_checkpoint set) ──
+    # ── Phase 1: the only phase that runs (M=0 -> never reaches Phase 3) ────
     initial_train:
-      epochs: 40000
+      epochs: 40000                   
       optimizer_1: adam
       optimizer_2: ssbroyden
-      optimizer_switch_epoch: 1000
+      optimizer_switch_epoch: 5000
       lr: 0.001
       lr_schedule: none
-      lr_decay_rate: 0.98
-      lr_decay_steps: 1000
+      lr_decay_rate: 0.9
+      lr_decay_steps: 2000
       lr_warmup_steps: 0
+      lr_warmup_start_factor: 0.01
 
-    # ── Final joint fine-tune with the PoU-composed loss ──
+    # ── Staged per-level (AToE / ANT) — unused (M=0) ──
+    new_expert_lr_decay: 1.0
+    min_epochs_per_level: 0
+    max_epochs_per_level: 0
+
+    # ── Final joint fine-tune (AToE / ANT) — unused (M=0) ──
     fine_tune:
-      epochs: 40000
+      epochs: 0
       optimizer_1: adam
       optimizer_2: ssbroyden
-      optimizer_switch_epoch: 1000
+      optimizer_switch_epoch: 10000
       lr: 0.0001
       lr_schedule: none
-      lr_decay_rate: 0.98
-      lr_decay_steps: 1000
-      lr_warmup_steps: 500            # ramp LR from near-zero
-      l2sp_lambda: 0.00               # anchor weights to pre-fine-tune values
+      lr_decay_rate: 0.9
+      lr_decay_steps: 2000
+      lr_warmup_steps: 0
+      l2sp_lambda: 0.00
 
 
 experiments:
-  - name: M_10
-    problem: burgers1d
+  - name: Root_70
+    problem: schrodinger
     model: AToELeaves
-    base_architecture: [2, 60, 60, 60, 60, 1]
-    experts_architecture: [2, 20, 20, 20, 1]
+    base_architecture: [2, 70, 70, 70, 70, 2]
+    experts_architecture: [2, 70, 70, 70, 70, 2]
 
-  # - name: Root_50
-  #   problem: burgers1d
-  #   model: AToELeaves
-  #   base_architecture: [2, 50, 50, 50, 50, 1]
-  #   experts_architecture: [2, 50, 50, 50, 50, 1]
-
-  # - name: Root_40
-  #   problem: burgers1d
-  #   model: AToELeaves
-  #   base_architecture: [2, 40, 40, 40, 40, 1]
-  #   experts_architecture: [2, 40, 40, 40, 40, 1]
+  - name: Root_60
+    problem: schrodinger
+    model: AToELeaves
+    base_architecture: [2, 60, 60, 60, 60, 2]
+    experts_architecture: [2, 60, 60, 60, 60, 2]
