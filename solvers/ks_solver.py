@@ -20,6 +20,12 @@ import torch
 from typing import Tuple, Dict
 
 
+def initial_condition(x: torch.Tensor) -> torch.Tensor:
+    """Exact IC h(x, 0) = cos(x)*(1 + sin(x)). Also the whole-domain target of
+    the PirateNets physics-informed output init (u(x,t) ≈ u0(x) for all t)."""
+    return (torch.cos(x[:, :1]) * (1.0 + torch.sin(x[:, :1]))).float()
+
+
 def solve_ks(
     x_min: float = 0.0,
     x_max: float = 2.0 * np.pi,

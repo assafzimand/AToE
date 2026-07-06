@@ -18,6 +18,12 @@ import matplotlib.pyplot as plt
 import os
 
 
+def initial_condition(x: torch.Tensor) -> torch.Tensor:
+    """Exact IC h(x, 0) = -sin(pi*x). Also the whole-domain target of the
+    PirateNets physics-informed output init (u(x,t) ≈ u0(x) for all t)."""
+    return (-torch.sin(np.pi * x[:, :1])).float()
+
+
 def cole_hopf_exact(x, t, nu, n_terms=None):
     """
     Compute exact solution using Cole-Hopf / Hopf integral formula.

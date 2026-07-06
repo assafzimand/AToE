@@ -18,6 +18,12 @@ import torch
 from typing import Tuple, Dict
 
 
+def initial_condition(x: torch.Tensor) -> torch.Tensor:
+    """Exact IC h(x, 0) = x^2 * cos(pi*x). Also the whole-domain target of the
+    PirateNets physics-informed output init (u(x,t) ≈ u0(x) for all t)."""
+    return (x[:, :1] ** 2 * torch.cos(np.pi * x[:, :1])).float()
+
+
 def solve_allen_cahn(
     x_min: float = -1.0,
     x_max: float = 1.0,

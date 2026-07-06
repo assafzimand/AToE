@@ -19,6 +19,12 @@ import torch
 from typing import Tuple, Dict
 
 
+def initial_condition(x: torch.Tensor) -> torch.Tensor:
+    """Exact IC h(x, 0) = cos(pi*x). Also the whole-domain target of the
+    PirateNets physics-informed output init (u(x,t) ≈ u0(x) for all t)."""
+    return torch.cos(np.pi * x[:, :1]).float()
+
+
 def solve_kdv(
     x_min: float = -1.0,
     x_max: float = 1.0,
@@ -27,6 +33,7 @@ def solve_kdv(
     nx: int = 256,
     nt: int = 201,
     mu: float = 0.022,
+    n_sub_factor: int = 1,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Solve the KdV equation using Fourier pseudo-spectral + ETDRK4.
@@ -34,7 +41,10 @@ def solve_kdv(
     Equation: h_t + h * h_x + mu^2 * h_xxx = 0
     Rewritten in Fourier space: dv/dt = Lk*v + N_hat(v)
       where Lk = i*mu^2*k^3 (stiff dispersive part, handled exactly)
-      and N_hat = FFT(-u*u_x) (nonlinear part, stepped explicitly)
+      and N_hat = FFT(-u*u_x) (nonlinear part, stepped explicitly, 2/3-dealiased)
+
+    n_sub_factor multiplies the number of substeps per saved frame — used by
+    the self-convergence check in _get_solution_cached (compare factor 1 vs 2).
     """
     domain_len = x_max - x_min
     dx = domain_len / nx
@@ -58,10 +68,14 @@ def solve_kdv(
     # Timestep: only limited by nonlinear CFL (ETDRK4 handles linear part exactly)
     k_max = np.max(np.abs(k))
     dt_nonlinear = 0.4 / (k_max + 1e-10)
-    n_sub = max(int(np.ceil(dt_save / dt_nonlinear)), 1)
+    n_sub = max(int(np.ceil(dt_save / dt_nonlinear)), 1) * max(int(n_sub_factor), 1)
     dt = dt_save / n_sub
 
-    # ETDRK4 coefficients via contour integrals (Kassam & Trefethen 2005)
+    # ETDRK4 coefficients via contour integrals (Kassam & Trefethen 2005).
+    # KdV's Lk is purely IMAGINARY, so the coefficients are genuinely complex
+    # (Trefethen p27.m keeps complex means). Taking real() here — correct only
+    # for real operators like KS/kursiv.m — degrades the scheme to 1st order
+    # and produced a reference with ~16% rel-L2 error at these settings.
     E = np.exp(Lk * dt)
     E2 = np.exp(Lk * dt / 2.0)
 
@@ -69,19 +83,23 @@ def solve_kdv(
     r = np.exp(2j * np.pi * (np.arange(1, M + 1) - 0.5) / M)
     LR = dt * Lk[:, np.newaxis] + r[np.newaxis, :]
 
-    Q = dt * np.real(np.mean((np.exp(LR / 2.0) - 1.0) / LR, axis=1))
-    f1 = dt * np.real(np.mean(
-        (-4.0 - LR + np.exp(LR) * (4.0 - 3.0 * LR + LR ** 2)) / LR ** 3, axis=1))
-    f2 = dt * np.real(np.mean(
-        (2.0 + LR + np.exp(LR) * (-2.0 + LR)) / LR ** 3, axis=1))
-    f3 = dt * np.real(np.mean(
-        (-4.0 - 3.0 * LR - LR ** 2 + np.exp(LR) * (4.0 - LR)) / LR ** 3, axis=1))
+    Q = dt * np.mean((np.exp(LR / 2.0) - 1.0) / LR, axis=1)
+    f1 = dt * np.mean(
+        (-4.0 - LR + np.exp(LR) * (4.0 - 3.0 * LR + LR ** 2)) / LR ** 3, axis=1)
+    f2 = dt * np.mean(
+        (2.0 + LR + np.exp(LR) * (-2.0 + LR)) / LR ** 3, axis=1)
+    f3 = dt * np.mean(
+        (-4.0 - 3.0 * LR - LR ** 2 + np.exp(LR) * (4.0 - LR)) / LR ** 3, axis=1)
+
+    # 2/3-rule dealiasing mask for the quadratic nonlinearity (cheap insurance;
+    # at nx=512 the spectrum is well inside the mask so it changes ~nothing)
+    dealias_mask = (np.abs(k) <= (2.0 / 3.0) * k_max).astype(np.float64)
 
     def N_hat(v_hat):
-        """Nonlinear term in Fourier space: FFT(-u * u_x)."""
+        """Nonlinear term in Fourier space: FFT(-u * u_x), 2/3-dealiased."""
         u_phys = np.real(np.fft.ifft(v_hat))
         u_x = np.real(np.fft.ifft(1j * k * v_hat))
-        return np.fft.fft(-u_phys * u_x)
+        return dealias_mask * np.fft.fft(-u_phys * u_x)
 
     for save_idx in range(1, nt):
         for _ in range(n_sub):
@@ -104,8 +122,12 @@ _cached_config_hash = None
 
 
 def _get_solution_cached(config: Dict) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Get cached KdV solution grid.
-    
+    """Get cached KdV solution grid (in-memory memo + on-disk .npz cache).
+
+    On first generation, runs a self-convergence check (same solve with 2x
+    substeps) so a silently inaccurate reference can never ship again; the
+    estimated error is stored in the cache file and logged.
+
     Returns:
         (x_grid, t_grid, h_solution): Native grid arrays from the solver
     """
@@ -118,18 +140,49 @@ def _get_solution_cached(config: Dict) -> Tuple[np.ndarray, np.ndarray, np.ndarr
         pc['mu'],
     )
     if _cached_solution is None or _cached_config_hash != config_tuple:
-        print("  Generating KdV solution (512x500 grid, ETDRK4)...")
         x_min, x_max = pc['spatial_domain'][0]
         t_min, t_max = pc['temporal_domain']
         mu = pc['mu']
-        
+        nx, nt = 512, 500
+
+        from pathlib import Path
+        cache_dir = Path(__file__).resolve().parent.parent / 'datasets' / 'gt_cache'
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        # v2: complex ETDRK4 coefficients + 2/3 dealiasing (v1 had the
+        # real()-coefficient bug and ~16% error — never load such caches)
+        cache_file = cache_dir / (
+            f"kdv_gt_v2_{x_min}_{x_max}_{t_min}_{t_max}_mu{mu}_{nx}x{nt}.npz")
+
+        if cache_file.exists():
+            data = np.load(cache_file)
+            _cached_solution = (data['x_grid'], data['t_grid'], data['h_sol'])
+            _cached_config_hash = config_tuple
+            print(f"  Loaded KdV solution from cache ({cache_file.name}, "
+                  f"self-convergence rel-L2 = {float(data['conv_rel_l2']):.3e})")
+            return _cached_solution
+
+        print(f"  Generating KdV solution ({nx}x{nt} grid, ETDRK4)...")
         x_grid, t_grid, h_sol = solve_kdv(
             x_min=x_min, x_max=x_max, t_min=t_min, t_max=t_max,
-            nx=512, nt=500, mu=mu,
+            nx=nx, nt=nt, mu=mu,
         )
+        # Self-convergence check: re-solve with 2x substeps; ETDRK4 is 4th
+        # order, so this diff is a tight upper bound on the solution's error.
+        _, _, h_fine = solve_kdv(
+            x_min=x_min, x_max=x_max, t_min=t_min, t_max=t_max,
+            nx=nx, nt=nt, mu=mu, n_sub_factor=2,
+        )
+        conv_rel_l2 = float(np.linalg.norm(h_sol - h_fine)
+                            / (np.linalg.norm(h_fine) + 1e-300))
+        print(f"  Solution computed (self-convergence rel-L2 = {conv_rel_l2:.3e})")
+        if conv_rel_l2 > 1e-6:
+            print(f"  WARNING: KdV reference self-convergence {conv_rel_l2:.3e} "
+                  f"> 1e-6 — rel-L2 metrics below this level are unreliable.")
+
+        np.savez_compressed(cache_file, x_grid=x_grid, t_grid=t_grid,
+                            h_sol=h_sol, conv_rel_l2=conv_rel_l2)
         _cached_solution = (x_grid, t_grid, h_sol)
         _cached_config_hash = config_tuple
-        print("  Solution computed.")
     return _cached_solution
 
 

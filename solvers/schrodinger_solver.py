@@ -26,6 +26,14 @@ def initial_condition_analytical(x: np.ndarray) -> np.ndarray:
     return h0.astype(np.complex128)
 
 
+def initial_condition(x: torch.Tensor) -> torch.Tensor:
+    """Exact IC h(x, 0) = 2*sech(x) (real part; imaginary part 0). Also the
+    whole-domain target of the PirateNets physics-informed output init
+    (u(x,t) ≈ u0(x) for all t). Returns (N, 2) = [Re, Im]."""
+    real = (2.0 / torch.cosh(x[:, :1])).float()
+    return torch.cat([real, torch.zeros_like(real)], dim=1)
+
+
 def solve_nlse_splitstep(
     x_min: float = -5.0,
     x_max: float = 5.0,

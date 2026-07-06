@@ -34,7 +34,9 @@ def apply_hidden_init(model: nn.Module, cfg: dict) -> None:
 
     When init.hidden == 'glorot':
     - All nn.Linear / RWFLinear except the output layer get xavier_uniform_ with
-      the gain appropriate for the configured activation function.
+      gain 1.0, matching JAX-PI's glorot init (flax glorot_normal/uniform has no
+      activation-dependent gain; PyTorch's calculate_gain('tanh')=1.667 would
+      inflate every layer's weight scale by ~1.67x vs the published recipe).
     - Biases are set to zero.
     - For ResNet: fc2 in every ResBlock is additionally zero-initialized so each
       block starts as an identity map (x + F(x) ≈ x), matching PirateNet's alpha=0.
@@ -49,8 +51,7 @@ def apply_hidden_init(model: nn.Module, cfg: dict) -> None:
     except ImportError:
         linear_types = (nn.Linear,)
 
-    activation = cfg['activation']
-    gain = nn.init.calculate_gain(activation)
+    gain = 1.0  # JAX-PI glorot: no activation gain
     out_layer = _get_output_layer(model)
 
     n_hidden = 0
@@ -94,10 +95,14 @@ def apply_output_init(
 
     Modes (init.output):
       'zero'    — zero weight and bias
-      'ls'      — least-squares fit to IC data
+      'ls'      — physics-informed LS init (PirateNets): fit the output layer
+                  so u(x,t) ≈ u0(x) over the WHOLE spacetime domain (all train
+                  points, target = the problem's analytic IC). Falls back to
+                  fitting only the t=0 IC points when the problem's solver
+                  module does not expose initial_condition().
       'default' — no-op (keep PyTorch default)
 
-    Raises ValueError if there are too few IC points for a well-determined LS system.
+    Raises ValueError if there are too few fit points for a well-determined LS system.
     The ValueError is caught by the atexit emergency handler and saved to metrics.
     """
     init_cfg = cfg.get('init', {})
@@ -113,30 +118,57 @@ def apply_output_init(
 
     elif output_mode == 'ls':
         use_bias = init_cfg['ls_use_bias']
-
-        mask_ic = train_data['mask']['IC']
-        n_ic = int(mask_ic.sum().item())
         hidden_dim = out_layer.weight.shape[1]
         required = hidden_dim + (1 if use_bias else 0)
 
-        if n_ic < required:
-            raise ValueError(
-                f"[Init] LS-init requires ≥{required} IC points "
-                f"(hidden_dim={hidden_dim}, use_bias={use_bias}), got {n_ic}. "
-                f"Increase sampling.n_initial_train (or initial_train_ratio) or disable ls_init."
-            )
-        if n_ic < 1.5 * required:
+        # PirateNets PI-init: fit u(x,t) ≈ u0(x) on the FULL spacetime point
+        # set, so the network starts as the IC everywhere — the state causal
+        # training expects. The problem's analytic IC comes from its solver
+        # module; without it, fall back to the t=0 IC points only.
+        ic_fn = None
+        problem = cfg.get('problem')
+        if problem is not None:
+            try:
+                import importlib
+                solver_mod = importlib.import_module(f'solvers.{problem}_solver')
+                ic_fn = getattr(solver_mod, 'initial_condition', None)
+            except ImportError:
+                ic_fn = None
+
+        if ic_fn is not None:
+            x_fit = train_data['x'].to(device)
+            t_fit = train_data['t'].to(device)
+            with torch.no_grad():
+                y_fit = ic_fn(x_fit).to(device)
+            fit_desc = 'full-domain points (target u0(x))'
+        else:
+            mask_ic = train_data['mask']['IC']
+            x_fit = train_data['x'][mask_ic].to(device)
+            t_fit = train_data['t'][mask_ic].to(device)
+            y_fit = train_data['h_gt'][mask_ic].to(device)
+            fit_desc = 't=0 IC points (no initial_condition() in solver module)'
             logger.warning(
-                f"[Init] LS-init is near-square ({n_ic} IC points for {required} "
-                f"unknowns): the fit interpolates the IC points and can produce "
-                f"huge output weights that explode the initial loss. Recommend "
-                f"sampling.n_initial_train >= {2 * required}."
+                f"[Init] LS-init falling back to t=0 IC points for problem "
+                f"'{problem}' — add initial_condition() to its solver module "
+                f"for the full PirateNets PI-init."
             )
 
-        x_ic = train_data['x'][mask_ic].to(device)
-        t_ic = train_data['t'][mask_ic].to(device)
-        h_gt_ic = train_data['h_gt'][mask_ic].to(device)
-        inputs = torch.cat([x_ic, t_ic], dim=1)
+        n_fit = x_fit.shape[0]
+        if n_fit < required:
+            raise ValueError(
+                f"[Init] LS-init requires ≥{required} fit points "
+                f"(hidden_dim={hidden_dim}, use_bias={use_bias}), got {n_fit}. "
+                f"Increase sampling counts or disable ls_init."
+            )
+        if n_fit < 1.5 * required:
+            logger.warning(
+                f"[Init] LS-init is near-square ({n_fit} fit points for {required} "
+                f"unknowns): the fit interpolates the points and can produce "
+                f"huge output weights that explode the initial loss. Recommend "
+                f">= {2 * required} fit points."
+            )
+
+        inputs = torch.cat([x_fit, t_fit], dim=1)
 
         model.eval()
         with torch.no_grad():
@@ -144,7 +176,7 @@ def apply_output_init(
 
         if use_bias:
             H = torch.cat(
-                [features, torch.ones(n_ic, 1, device=device)], dim=1
+                [features, torch.ones(n_fit, 1, device=device)], dim=1
             )  # (N, hidden_dim+1)
         else:
             H = features  # (N, hidden_dim)
@@ -154,7 +186,7 @@ def apply_output_init(
         # near-collinear tanh feature matrices that arise here; 'gelsd'
         # returns the bounded minimum-norm solution instead.
         H_cpu = H.detach().double().cpu()
-        y_cpu = h_gt_ic.detach().double().cpu()
+        y_cpu = y_fit.detach().double().cpu()
         solution = torch.linalg.lstsq(H_cpu, y_cpu, driver='gelsd').solution
         # solution shape: (hidden_dim[+1], output_dim)
 
@@ -171,11 +203,15 @@ def apply_output_init(
                     out_layer.bias.copy_(solution[-1])     # (output_dim,)
             else:
                 out_layer.weight.copy_(solution.T)
+                # The LS system assumed no bias — zero the layer's default
+                # random bias or it corrupts the fit (model = Hw + b ≠ Hw).
+                if out_layer.bias is not None:
+                    nn.init.zeros_(out_layer.bias)
 
         model.train()
         output_dim = out_layer.weight.shape[0]
         logger.info(
-            f"  [Init] Output layer: LS-init from {n_ic} IC points "
+            f"  [Init] Output layer: LS-init from {n_fit} {fit_desc} "
             f"(hidden_dim={hidden_dim}, output_dim={output_dim}, use_bias={use_bias}, "
             f"fit_rel_err={fit_rel_err:.3e}, ||W_out||={w_norm:.3e})"
         )
@@ -220,9 +256,8 @@ def apply_expert_init(expert: nn.Module, cfg: dict, zero_output: bool = True) ->
                 nn.init.zeros_(out_layer.bias)
         else:
             if hidden_mode == 'glorot':
-                activation = cfg.get('activation', 'tanh')
-                gain = nn.init.calculate_gain(activation)
-                nn.init.xavier_uniform_(out_layer.weight, gain=gain)
+                # gain 1.0 matches JAX-PI glorot (see apply_hidden_init)
+                nn.init.xavier_uniform_(out_layer.weight, gain=1.0)
                 if out_layer.bias is not None:
                     nn.init.zeros_(out_layer.bias)
             # else: keep PyTorch default (Kaiming uniform)

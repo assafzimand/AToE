@@ -713,6 +713,15 @@ def _setup_training(
         logger.info(f"Initial GPU Memory Allocated: {torch.cuda.memory_allocated()/1e9:.3f} GB")
         torch.backends.cudnn.benchmark = True
         logger.info("CUDNN benchmark enabled for GPU optimization")
+        # Force true float32 matmuls. On Ampere+ GPUs TF32 (~10-bit mantissa)
+        # can otherwise silently distort forward passes and logged metrics:
+        # the KdV root run on an A10G reported rel-L2 0.1205 while the same
+        # checkpoint evaluated in real float32 scores 0.157 — metrics must be
+        # reproducible when checkpoints are re-evaluated on other devices.
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+        torch.set_float32_matmul_precision('highest')
+        logger.info("TF32 disabled (float32 matmul precision = highest)")
 
     # Set seed for reproducibility
     torch.manual_seed(cfg['seed'])

@@ -30,6 +30,62 @@ def _load_ckpt_helpers():
     return mod
 
 
+def _pin_float32_precision() -> None:
+    """Force true float32 matmuls for checkpoint re-evaluation.
+
+    On Ampere+ GPUs TF32 (~10-bit mantissa) silently distorts forward
+    passes: the same checkpoint can score differently here than during
+    training. Pinning makes recomputed metrics device-reproducible.
+    """
+    import torch
+    torch.set_float32_matmul_precision('highest')
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+
+
+def _eval_checkpoint_rel_l2(result_path: Path, helpers) -> Dict:
+    """Reload the run's checkpoint and recompute rel-L2 on the solver's
+    native grid.
+
+    This is the number to trust when reproducing results: metrics.json
+    stores training-time values, which carry the training environment's
+    numerics (e.g. TF32 on Ampere GPUs). Returns
+    {'rel_l2', 'inf_norm', 'ckpt', 'epoch'} or None on failure.
+    """
+    import torch
+    import yaml
+
+    cfg_path = result_path / 'config_used.yaml'
+    if not cfg_path.exists():
+        return None
+    with open(cfg_path) as f:
+        cfg = yaml.safe_load(f)
+    if cfg.get(cfg.get('problem', ''), {}).get('spatial_dim', 1) != 1:
+        return None  # native-grid metric only exists for 1D problems
+
+    ckpt_path = helpers._find_checkpoint(result_path, cfg)
+    if ckpt_path is None:
+        print(f"  [CkptEval] no checkpoint found in {result_path.name}")
+        return None
+
+    try:
+        from trainer.utils import compute_native_grid_metrics
+        is_adaptive = cfg.get('adaptive_pinn', {}).get('enabled', False)
+        model = helpers._build_model(cfg)
+        epoch = helpers._load_checkpoint(model, ckpt_path, is_adaptive)
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        model = model.to(device).eval()
+        metrics = compute_native_grid_metrics(model, cfg, device)
+        if metrics is None:
+            return None
+        return {'rel_l2': metrics['rel_l2'], 'inf_norm': metrics['inf_norm'],
+                'ckpt': ckpt_path.name, 'epoch': epoch}
+    except Exception as _eval_err:
+        print(f"  [CkptEval] {result_path.name}: failed — {_eval_err}")
+        return None
+
+
 def _regen_segment_plots(result_path: Path, helpers) -> None:
     """Re-render pred_after_<segment>.png in adaptive_plots/ from the
     checkpoint_after_<segment>.pt checkpoints (root, phase3, fine_tune, ...),
@@ -252,7 +308,8 @@ def _generate_training_results_plot(parent_dir, df,
         'LR / Sched', 'Spawning']
     result_cols = [
         'Train\nLoss', 'Eval\nLoss',
-        'Eval\nRel-L2', 'Eval\nInf', 'Dense\nRel-L2']
+        'Eval\nRel-L2', 'Eval\nInf', 'Dense\nRel-L2',
+        'Ckpt\nRel-L2']
     col_labels = ['Experiment'] + info_cols + result_cols
     n_info = len(info_cols)
     first_result_col = 1 + n_info
@@ -286,6 +343,7 @@ def _generate_training_results_plot(parent_dir, df,
             _fmt(row['final_eval_rel_l2']),
             _fmt(row['final_eval_inf_norm']),
             _fmt(row.get('final_dense_rel_l2')),
+            _fmt(row.get('final_ckpt_rel_l2')),
         ]
         table_data.append(row_data)
 
@@ -316,7 +374,7 @@ def _generate_training_results_plot(parent_dir, df,
     result_keys = [
         'final_train_loss', 'final_eval_loss',
         'final_eval_rel_l2', 'final_eval_inf_norm',
-        'final_dense_rel_l2']
+        'final_dense_rel_l2', 'final_ckpt_rel_l2']
     for ri, key in enumerate(result_keys):
         ci = first_result_col + ri
         if key not in df.columns:
@@ -447,6 +505,19 @@ def generate_comparison_for_batch(batch_dir: Path, label: str = None):
         dense_rel_l2 = train_metrics.get('final_dense_rel_l2', float('nan'))
         if dense_rel_l2 == dense_rel_l2:  # not nan
             print(f"  {exp_name}: dense-grid rel-L2 = {dense_rel_l2:.6e}")
+
+        # Recompute rel-L2 from the checkpoint (authoritative for
+        # reproduction — training-time metrics carry the training
+        # environment's numerics, e.g. TF32 on Ampere GPUs).
+        ckpt_rel_l2 = float('nan')
+        if _ckpt_helpers is not None:
+            _ckpt_eval = _eval_checkpoint_rel_l2(result_path, _ckpt_helpers)
+            if _ckpt_eval is not None:
+                ckpt_rel_l2 = _ckpt_eval['rel_l2']
+                print(f"  {exp_name}: recomputed ckpt rel-L2 = "
+                      f"{ckpt_rel_l2:.6e} ({_ckpt_eval['ckpt']} "
+                      f"@ epoch {_ckpt_eval['epoch']})")
+
         metrics_data.append({
             'experiment': exp_name,
             'final_train_loss': _last(train_metrics.get('train_loss', [])),
@@ -454,6 +525,7 @@ def generate_comparison_for_batch(batch_dir: Path, label: str = None):
             'final_eval_rel_l2': _last(train_metrics.get('eval_rel_l2', [])),
             'final_eval_inf_norm': _last(train_metrics.get('eval_inf_norm', [])),
             'final_dense_rel_l2': dense_rel_l2,
+            'final_ckpt_rel_l2': ckpt_rel_l2,
         })
 
     if not metrics_data:
@@ -513,6 +585,7 @@ def _detect_structure(target_path: Path):
 
 def main():
     """Main entry point."""
+    _pin_float32_precision()
     if len(sys.argv) > 1:
         target_path = Path(sys.argv[1])
     else:

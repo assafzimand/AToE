@@ -83,7 +83,7 @@ base_config:
       periodic: true                  # hard periodic BC -> disables BC loss term
     init:
       hidden: glorot                  # Glorot hidden init (+ identity-like start for ResNet)
-      output: ls                      # least-squares PI init of output layer (IC points only — see note)
+      output: ls                      # PirateNets PI init: LS fit of u(x,t)≈u0(x) over the WHOLE domain
       ls_use_bias: false
       spectral_norm: false
       spectral_norm_init_std: 1.0e-6
