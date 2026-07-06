@@ -99,10 +99,11 @@ def _finalize_training(ctx: TrainingContext) -> Path:
         try:
             training_plots_dir = run_dir / "training_plots"
             _switch_epochs = [e['epoch'] for e in metrics.get('optimizer_events', [])]
-            _segment_starts = [s['start_epoch'] for s in metrics.get('segment_events', [])]
+            _segment_markers = [(s['start_epoch'], s.get('segment', ''))
+                                for s in metrics.get('segment_events', [])]
             plot_training_curves(metrics, training_plots_dir,
                                  optimizer_switch_epochs=_switch_epochs,
-                                 segment_start_epochs=_segment_starts)
+                                 segment_markers=_segment_markers)
         except Exception as _plot_err:
             logger.info(f"  [NaN] Could not generate training curves: {_plot_err}")
         logger.info("[NaN] Skipping remaining post-training cleanup — moving to next experiment.")
@@ -164,12 +165,13 @@ def _finalize_training(ctx: TrainingContext) -> Path:
     # Plot training curves
     logger.info(f"\nGenerating training plots...")
     training_plots_dir = run_dir / "training_plots"
-    # Extract all optimizer switch epochs and segment start epochs from metrics
+    # Extract all optimizer switch epochs and segment markers from metrics
     optimizer_switch_epochs = [e['epoch'] for e in metrics.get('optimizer_events', [])]
-    segment_start_epochs = [s['start_epoch'] for s in metrics.get('segment_events', [])]
+    segment_markers = [(s['start_epoch'], s.get('segment', ''))
+                       for s in metrics.get('segment_events', [])]
     plot_training_curves(metrics, training_plots_dir,
                          optimizer_switch_epochs=optimizer_switch_epochs,
-                         segment_start_epochs=segment_start_epochs)
+                         segment_markers=segment_markers)
 
     # Final adaptive PINN outputs
     if is_adaptive and hasattr(model, 'num_experts') and model.num_experts > 0:

@@ -726,8 +726,10 @@ def _train_segment(
             total_gt_sq = 0.0
             eval_inf_norm = 0.0
 
-            # Eval metric uses the configured blending_mode (composed forward),
-            # so the rel-L2 curve reflects the actual inference-time composition.
+            # Eval metric uses the model's CURRENT blending_mode (composed
+            # forward): the configured mode normally, but hard indicators
+            # during split segments (set by _run_split_segment) so the rel-L2
+            # curve reflects what is actually being trained.
             for batch in eval_loader:
                 # Physics losses need gradients w.r.t. inputs even during
                 # evaluation (for PDE residual derivatives); model.eval() still

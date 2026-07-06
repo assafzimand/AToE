@@ -144,6 +144,10 @@ def train_orchestrator(ctx: TrainingContext) -> None:
 
     # ── Root rel-L2 baseline for the training-curve reference line ──
     # base_model holds the root (loaded or Phase-1 trained), no experts yet.
+    # The plot only draws the baseline when the root was LOADED (an in-session
+    # root phase is already visible in the curve itself).
+    ctx.metrics['root_loaded_from_checkpoint'] = (
+        ctx.pretrained_base_checkpoint is not None)
     try:
         _root_net = getattr(model, 'base_model', model)
         if ctx.eval_data is not None:

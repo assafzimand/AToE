@@ -1,11 +1,11 @@
 param(
     [string]$Ec2Ip = "13.61.24.69",
     [string]$PemPath = "$PSScriptRoot\..\..\NCC-PINN-ASSAF.pem",
-    [string]$RemoteRoot = "/home/ubuntu/NCC-PINN/datasets",
+    [string]$RemoteRoot = "/home/ubuntu/AToE/datasets",
     [string]$LocalTarget = "$PSScriptRoot\..\datasets"
 )
 
-Write-Host "=== Download NCC-PINN datasets from AWS EC2 ===" -ForegroundColor Cyan
+Write-Host "=== Download AToE datasets from AWS EC2 ===" -ForegroundColor Cyan
 Write-Host ""
 
 Write-Host "Current EC2 Public IP: $Ec2Ip"

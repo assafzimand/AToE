@@ -2,18 +2,20 @@ param(
     # Default EC2 public IP - you can override on each run
     [string]$Ec2Ip = "13.60.229.209",
     # Path to your SSH key (relative to repo root by default)
-    # Repo structure: Master\NCC-PINN-ASSAF.pem and Master\NCC-PINN\AWS_scripts\this_file
-    # So from $PSScriptRoot (NCC-PINN\AWS_scripts) we need to go up two levels.
+    # Repo structure: Master\NCC-PINN-ASSAF.pem and Master\AToE\AWS_scripts\this_file
+    # So from $PSScriptRoot (AToE\AWS_scripts) we need to go up two levels.
     [string]$PemPath = "$PSScriptRoot\..\..\NCC-PINN-ASSAF.pem",
-    # Remote outputs root on EC2
-    [string]$RemoteRoot = "/home/ubuntu/NCC-PINN/outputs",
+    # Remote outputs root on EC2 (the AToE repo clone)
+    [string]$RemoteRoot = "/home/ubuntu/AToE/outputs",
     # Experiments root (where run_experiments.py writes)
-    [string]$ExperimentsRoot = "/home/ubuntu/NCC-PINN/outputs/experiments",
+    [string]$ExperimentsRoot = "/home/ubuntu/AToE/outputs/experiments",
     # Local folder where results will be downloaded
-    [string]$LocalTarget = "$PSScriptRoot\aws_outputs"
+    [string]$LocalTarget = "$PSScriptRoot\aws_outputs",
+    # Default number of model folders for the failed-experiment fallback prompt
+    [int]$defaultModels = 1
 )
 
-Write-Host "=== Download NCC-PINN outputs from AWS EC2 ===" -ForegroundColor Cyan
+Write-Host "=== Download AToE outputs from AWS EC2 ===" -ForegroundColor Cyan
 Write-Host ""
 
 Write-Host "Current EC2 Public IP: $Ec2Ip"
@@ -30,9 +32,9 @@ if (-not (Test-Path $PemPath)) {
 Write-Host "Checking for active screen sessions on EC2..." -ForegroundColor Cyan
 try {
     $screenSessions = (& ssh -i $PemPath ubuntu@$Ec2Ip "screen -ls 2>&1").Trim()
-    if ($screenSessions -match "ncc_experiment") {
+    if ($screenSessions -match "atoe_experiment|ncc_experiment") {
         Write-Host "  ⚠ Active screen session detected: experiments may still be running!" -ForegroundColor Yellow
-        Write-Host "  Tip: SSH in and run 'screen -r ncc_experiment' to check progress" -ForegroundColor Yellow
+        Write-Host "  Tip: SSH in and run 'screen -r atoe_experiment' to check progress" -ForegroundColor Yellow
     } else {
         Write-Host "  No active screen sessions found" -ForegroundColor Gray
     }

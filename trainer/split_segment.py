@@ -140,9 +140,24 @@ def _run_split_segment(
         'static': split_static,  # cached faces + targets; resample redraws residuals only
     }
 
-    res = _train_segment(ctx, segment_name, epoch_budget, segment_cfg,
-                         lr_override=lr_override,
-                         min_epochs_override=min_epochs_override)
+    # During split training each expert learns its OWN region (hard ownership
+    # + interface losses), so the composed forward used by eval rel-L2 and by
+    # pred_after_<segment>.png must use HARD indicators to reflect what is
+    # actually being trained. Restored to the configured blending after the
+    # segment (fine-tune / inference use the configured mode).
+    orig_blending = getattr(model, 'blending_mode', None)
+    if orig_blending is not None and orig_blending != 'hard':
+        model.blending_mode = 'hard'
+        logger.info("[SplitLoss] Eval/plots use HARD indicators for this "
+                    f"segment (configured '{orig_blending}' restored after).")
+
+    try:
+        res = _train_segment(ctx, segment_name, epoch_budget, segment_cfg,
+                             lr_override=lr_override,
+                             min_epochs_override=min_epochs_override)
+    finally:
+        if orig_blending is not None:
+            model.blending_mode = orig_blending
 
     # Save per-expert loss history into metrics
     peh = getattr(split_loss, '_per_expert_history', {})

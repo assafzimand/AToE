@@ -135,7 +135,9 @@ def build_split_loss(
             total_loss = total_loss + w_bc * bc_loss_contrib
 
         # ── Continuity loss: neighbor-to-neighbor on shared interior faces ──
-        if cont_neighbors is not None and cont_dims is not None:
+        # Skipped entirely (not computed, not recorded/plotted) when its
+        # weight is 0 — the derivative matching is the expensive part.
+        if cont_neighbors is not None and cont_dims is not None and w_cont != 0:
             cont_loss, cont_per_expert = _compute_continuity_loss(
                 model, x, t, expert_ids, kinds,
                 cont_neighbors, cont_dims, deriv_fn,

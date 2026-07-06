@@ -27,11 +27,40 @@ def _safe_log_scale(ax, values_list):
     return False
 
 
+# Per-segment marker style for the training-curve vertical lines:
+# name -> (color, legend label). Colors avoid green (optimizer switch)
+# and red/blue solid (loss curves).
+_SEGMENT_STYLES = {
+    'root':      ('#1f77b4', 'Root start'),
+    'phase3':    ('#9467bd', 'Local Experts start'),
+    'fine_tune': ('#17becf', 'Fine-Tune start'),
+}
+
+
+def _draw_segment_markers(ax, segment_markers):
+    """Vertical dotted lines at segment starts, one color+label per segment.
+
+    ``segment_markers`` is a list of (start_epoch, segment_name) tuples.
+    Epoch <= 1 (start of the first segment) is skipped. Each segment name is
+    labeled once per axis.
+    """
+    labeled = set()
+    for epoch, name in segment_markers:
+        if epoch <= 1:
+            continue
+        color, label = _SEGMENT_STYLES.get(
+            name, ('#7f7f7f', f'{name} start'))
+        ax.axvline(x=epoch, color=color, linestyle=':',
+                   linewidth=1.5, alpha=0.7,
+                   label=label if name not in labeled else None)
+        labeled.add(name)
+
+
 def plot_training_curves(
-    metrics: Dict[str, List[float]], 
+    metrics: Dict[str, List[float]],
     save_dir: Path,
     optimizer_switch_epochs: List[int] = None,
-    segment_start_epochs: List[int] = None
+    segment_markers: List = None
 ) -> None:
     """
     Plot training and evaluation curves.
@@ -44,8 +73,9 @@ def plot_training_curves(
         save_dir: Directory to save plots
         optimizer_switch_epochs: List of epochs where optimizer switched.
                                 Green dashed vertical lines drawn at each.
-        segment_start_epochs: List of epochs where new training segments started.
-                             Blue dotted vertical lines drawn at each.
+        segment_markers: List of (start_epoch, segment_name) tuples for
+                        training-segment boundaries. Dotted vertical lines,
+                        one color + legend label per segment name.
     """
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -54,7 +84,7 @@ def plot_training_curves(
     eval_epochs = metrics['epochs']
 
     optimizer_switch_epochs = optimizer_switch_epochs or []
-    segment_start_epochs = segment_start_epochs or []
+    segment_markers = segment_markers or []
     
     # Check if we have loss components for term-wise plot
     loss_comps = metrics.get('loss_components', {})
@@ -79,16 +109,9 @@ def plot_training_curves(
         ax.axvline(x=epoch, color='green', linestyle='--', 
                    linewidth=1.5, alpha=0.7, label=label)
     
-    # Add segment boundary markers (blue dotted), skip epoch 1 (start of first segment)
-    _seg_labeled = False
-    for epoch in segment_start_epochs:
-        if epoch <= 1:
-            continue
-        ax.axvline(x=epoch, color='blue', linestyle=':',
-                   linewidth=1.5, alpha=0.6,
-                   label='New Level Start' if not _seg_labeled else None)
-        _seg_labeled = True
-    
+    # Add segment boundary markers (dotted, one color per segment)
+    _draw_segment_markers(ax, segment_markers)
+
     ax.set_xlabel('Epoch', fontsize=12)
     ax.set_ylabel('Loss', fontsize=12)
     ax.legend(fontsize=11)
@@ -102,9 +125,13 @@ def plot_training_curves(
     ax.plot(eval_epochs, metrics['eval_rel_l2'], 'r-', label='Eval Rel. L2',
             linewidth=2, alpha=0.8)
 
-    # Root rel-L2 baseline (horizontal black line), if available
+    # Root rel-L2 baseline (horizontal black line). Only shown when the root
+    # was LOADED from a checkpoint: if it was trained in this session, the
+    # curve itself already contains the root phase and the line is redundant.
     root_rel_l2 = metrics.get('root_rel_l2')
-    if root_rel_l2 is not None and root_rel_l2 > 0:
+    _show_root_line = (root_rel_l2 is not None and root_rel_l2 > 0
+                       and metrics.get('root_loaded_from_checkpoint', False))
+    if _show_root_line:
         ax.axhline(y=root_rel_l2, color='black', linestyle='-',
                    linewidth=1.5, alpha=0.8,
                    label=f'Root rel-L2 ({root_rel_l2:.2e})')
@@ -115,22 +142,15 @@ def plot_training_curves(
         ax.axvline(x=epoch, color='green', linestyle='--', 
                    linewidth=1.5, alpha=0.7, label=label)
     
-    # Add segment boundary markers (blue dotted), skip epoch 1
-    _seg_labeled = False
-    for epoch in segment_start_epochs:
-        if epoch <= 1:
-            continue
-        ax.axvline(x=epoch, color='blue', linestyle=':',
-                   linewidth=1.5, alpha=0.6,
-                   label='New Level Start' if not _seg_labeled else None)
-        _seg_labeled = True
-    
+    # Add segment boundary markers (dotted, one color per segment)
+    _draw_segment_markers(ax, segment_markers)
+
     ax.set_xlabel('Epoch', fontsize=12)
     ax.set_ylabel('Relative L2 Error', fontsize=12)
     ax.legend(fontsize=11)
     ax.grid(True, alpha=0.3)
     _l2_series = [metrics['eval_rel_l2']]
-    if root_rel_l2 is not None and root_rel_l2 > 0:
+    if _show_root_line:
         _l2_series.append([root_rel_l2])
     is_log_l2 = _safe_log_scale(ax, _l2_series)
     scale_str_l2 = "[log]" if is_log_l2 else "[linear]"
@@ -171,16 +191,9 @@ def plot_training_curves(
             ax.axvline(x=epoch, color='green', linestyle='--', 
                        linewidth=1.5, alpha=0.7, label=label)
         
-        # Add segment boundary markers
-        _seg_labeled = False
-        for epoch in segment_start_epochs:
-            if epoch <= 1:
-                continue
-            ax.axvline(x=epoch, color='blue', linestyle=':',
-                       linewidth=1.5, alpha=0.6,
-                       label='New Level Start' if not _seg_labeled else None)
-            _seg_labeled = True
-        
+        # Add segment boundary markers (dotted, one color per segment)
+        _draw_segment_markers(ax, segment_markers)
+
         ax.set_xlabel('Epoch', fontsize=12)
         ax.set_ylabel('Loss Component', fontsize=12)
         ax.legend(fontsize=10)

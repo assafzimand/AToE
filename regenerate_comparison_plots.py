@@ -110,6 +110,11 @@ def _regen_segment_plots(result_path: Path, helpers) -> None:
             model = helpers._build_model(cfg)
             epoch = helpers._load_checkpoint(model, ckpt_path, is_adaptive)
             model.eval()
+            # Split-segment (phase3) checkpoints are trained with hard region
+            # ownership — render them with hard indicators so the regenerated
+            # plot matches the in-training pred_after_phase3.png.
+            if segment.startswith('phase3') and hasattr(model, 'blending_mode'):
+                model.blending_mode = 'hard'
             out_dir.mkdir(parents=True, exist_ok=True)
             plot_predictions_and_error_maps(
                 model, out_dir, cfg,
