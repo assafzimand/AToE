@@ -36,6 +36,7 @@ def solve_ks(
     alpha: float = 100.0 / 16.0,
     beta: float = 100.0 / 16.0 ** 2,
     gamma: float = 100.0 / 16.0 ** 4,
+    n_sub_factor: int = 1,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Solve the KS equation using Fourier pseudo-spectral + ETDRK4.
@@ -65,13 +66,15 @@ def solve_ks(
     # F[u_xxxx] = (ik)^4 * v = k^4 * v  =>  -gamma * F[u_xxxx] = -gamma*k^4 * v
     Lk = beta * k ** 2 - gamma * k ** 4
 
-    # Adaptive sub-stepping based on the stiffest linear mode
-    Lk_max = np.max(np.abs(Lk))
-    dt_linear = 1.0 / (Lk_max + 1e-10)
+    # Sub-stepping: ONLY the nonlinear CFL matters — ETDRK4 integrates the
+    # linear part exactly, so a 1/|Lk|max "linear stability" bound is wrong
+    # here (with the quartic operator it forced ~13,000 substeps per save,
+    # i.e. millions of steps, for no accuracy gain). The 4x safety factor
+    # puts the measured self-convergence at ~3e-8 at 512x500.
     k_max = np.max(np.abs(k))
     dt_nonlinear = 0.5 / (alpha * k_max + 1e-10)
-    dt_safe = min(dt_linear, dt_nonlinear)
-    n_sub = max(int(np.ceil(dt_save / dt_safe)), 1)
+    n_sub = (max(int(np.ceil(dt_save / dt_nonlinear)), 1) * 4
+             * max(int(n_sub_factor), 1))
     dt = dt_save / n_sub
 
     # ETDRK4 coefficients via contour integrals (Kassam & Trefethen 2005)
@@ -149,19 +152,53 @@ def _get_solution_cached(config: Dict) -> Tuple[np.ndarray, np.ndarray, np.ndarr
         pc['gamma'],
     )
     if _cached_solution is None or _cached_config_hash != config_tuple:
-        print("  Generating KS solution (512x500 grid, ETDRK4)...")
         x_min, x_max = pc['spatial_domain'][0]
         alpha = pc['alpha']
         beta = pc['beta']
         gamma_val = pc['gamma']
+        nx, nt = 512, 500
 
+        from pathlib import Path
+        cache_dir = Path(__file__).resolve().parent.parent / 'datasets' / 'gt_cache'
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        # v2: nonlinear-CFL-only substepping (the old linear-stability bound
+        # forced ~13,000 substeps/save for no accuracy gain)
+        cache_file = cache_dir / (
+            f"ks_gt_v2_{x_min}_{x_max}_{t_min}_{t_max}_a{alpha}_b{beta}"
+            f"_g{gamma_val}_{nx}x{nt}.npz")
+
+        if cache_file.exists():
+            data = np.load(cache_file)
+            _cached_solution = (data['x_grid'], data['t_grid'], data['h_sol'])
+            _cached_config_hash = config_tuple
+            print(f"  Loaded KS solution from cache ({cache_file.name}, "
+                  f"self-convergence rel-L2 = {float(data['conv_rel_l2']):.3e})")
+            return _cached_solution
+
+        print(f"  Generating KS solution ({nx}x{nt} grid, ETDRK4)...")
         x_grid, t_grid, h_sol = solve_ks(
             x_min=x_min, x_max=x_max, t_min=t_min, t_max=t_max,
-            nx=512, nt=500, alpha=alpha, beta=beta, gamma=gamma_val,
+            nx=nx, nt=nt, alpha=alpha, beta=beta, gamma=gamma_val,
         )
+        # Self-convergence check: 2x substeps (ETDRK4 is 4th order, so this
+        # diff tightly bounds the solution's temporal error; spatial error at
+        # nx=512 was measured at ~4e-12 vs nx=1024).
+        _, _, h_fine = solve_ks(
+            x_min=x_min, x_max=x_max, t_min=t_min, t_max=t_max,
+            nx=nx, nt=nt, alpha=alpha, beta=beta, gamma=gamma_val,
+            n_sub_factor=2,
+        )
+        conv_rel_l2 = float(np.linalg.norm(h_sol - h_fine)
+                            / (np.linalg.norm(h_fine) + 1e-300))
+        print(f"  Solution computed (self-convergence rel-L2 = {conv_rel_l2:.3e})")
+        if conv_rel_l2 > 1e-6:
+            print(f"  WARNING: KS reference self-convergence {conv_rel_l2:.3e} "
+                  f"> 1e-6 — rel-L2 metrics below this level are unreliable.")
+
+        np.savez_compressed(cache_file, x_grid=x_grid, t_grid=t_grid,
+                            h_sol=h_sol, conv_rel_l2=conv_rel_l2)
         _cached_solution = (x_grid, t_grid, h_sol)
         _cached_config_hash = config_tuple
-        print("  Solution computed.")
     return _cached_solution
 
 

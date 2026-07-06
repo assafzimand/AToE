@@ -32,6 +32,7 @@ def solve_allen_cahn(
     nx: int = 512,
     nt: int = 500,
     D: float = 0.0001,
+    n_sub_factor: int = 1,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Solve the Allen-Cahn equation using Fourier pseudo-spectral + ETDRK4.
@@ -41,6 +42,9 @@ def solve_allen_cahn(
     In Fourier space: dv/dt = Lk*v + N_hat(v)
       where Lk = -D*k^2 (linear diffusion, treated exactly)
       and N_hat = FFT(5*h - 5*h^3) (nonlinear reaction, stepped explicitly)
+
+    n_sub_factor multiplies the substeps per saved frame — used by the
+    self-convergence check in _get_solution_cached.
     """
     domain_len = x_max - x_min
     dx = domain_len / nx
@@ -73,7 +77,7 @@ def solve_allen_cahn(
     dt_reaction = 1.0 / max_reaction_rate
     
     dt_safe = min(dt_diffusion, dt_reaction)
-    n_sub = max(int(np.ceil(dt_save / dt_safe)), 1)
+    n_sub = max(int(np.ceil(dt_save / dt_safe)), 1) * max(int(n_sub_factor), 1)
     dt = dt_save / n_sub
 
     # ETDRK4 coefficients via contour integrals (Kassam & Trefethen 2005)
@@ -120,8 +124,18 @@ _cached_config_hash = None
 
 
 def _get_solution_cached(config: Dict) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Get cached Allen-Cahn solution grid.
-    
+    """Get cached Allen-Cahn solution grid (in-memory memo + on-disk .npz cache).
+
+    nx=1024: at nx=512 the (purely spatial) error is ~8e-6 — too close to the
+    PirateNets AC benchmark of 2.24e-5 for paper-grade comparisons. Temporal
+    error at these settings is ~1e-11 (verified vs DOP853 rtol=1e-11).
+    NOTE: do not add dealiasing at nx=512 — the sharp interfaces carry genuine
+    high-k content and a 1/2-rule mask measurably worsens the solution.
+
+    On first generation runs self-convergence checks (2x substeps for the
+    temporal error; nx/2 comparison as a conservative spatial-error bound),
+    logs them, and stores the estimate in the cache file.
+
     Returns:
         (x_grid, t_grid, h_solution): Native grid arrays from the solver
     """
@@ -134,18 +148,55 @@ def _get_solution_cached(config: Dict) -> Tuple[np.ndarray, np.ndarray, np.ndarr
         pc['D'],
     )
     if _cached_solution is None or _cached_config_hash != config_tuple:
-        print("  Generating Allen-Cahn solution (512x500 grid, ETDRK4)...")
         x_min, x_max = pc['spatial_domain'][0]
         t_min, t_max = pc['temporal_domain']
         D = pc['D']
-        
+        nx, nt = 1024, 500
+
+        from pathlib import Path
+        cache_dir = Path(__file__).resolve().parent.parent / 'datasets' / 'gt_cache'
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_file = cache_dir / (
+            f"allen_cahn_gt_v2_{x_min}_{x_max}_{t_min}_{t_max}_D{D}_{nx}x{nt}.npz")
+
+        if cache_file.exists():
+            data = np.load(cache_file)
+            _cached_solution = (data['x_grid'], data['t_grid'], data['h_sol'])
+            _cached_config_hash = config_tuple
+            print(f"  Loaded Allen-Cahn solution from cache ({cache_file.name}, "
+                  f"est. error rel-L2 = {float(data['conv_rel_l2']):.3e})")
+            return _cached_solution
+
+        print(f"  Generating Allen-Cahn solution ({nx}x{nt} grid, ETDRK4)...")
         x_grid, t_grid, h_sol = solve_allen_cahn(
             x_min=x_min, x_max=x_max, t_min=t_min, t_max=t_max,
-            nx=512, nt=500, D=D,
+            nx=nx, nt=nt, D=D,
         )
+        # Temporal self-check (2x substeps) + spatial bound (nx/2 comparison;
+        # the coarse grid's error, i.e. a conservative bound for this grid).
+        _, _, h_dt = solve_allen_cahn(
+            x_min=x_min, x_max=x_max, t_min=t_min, t_max=t_max,
+            nx=nx, nt=nt, D=D, n_sub_factor=2,
+        )
+        _, _, h_half = solve_allen_cahn(
+            x_min=x_min, x_max=x_max, t_min=t_min, t_max=t_max,
+            nx=nx // 2, nt=nt, D=D,
+        )
+        gt_norm = np.linalg.norm(h_sol) + 1e-300
+        err_t = float(np.linalg.norm(h_sol - h_dt) / gt_norm)
+        err_x = float(np.linalg.norm(h_sol[:, ::2] - h_half)
+                      / (np.linalg.norm(h_half) + 1e-300))
+        conv_rel_l2 = max(err_t, err_x)
+        print(f"  Solution computed (temporal check = {err_t:.3e}, "
+              f"spatial bound = {err_x:.3e})")
+        if conv_rel_l2 > 1e-6:
+            print(f"  NOTE: spatial bound {err_x:.3e} is the nx/2 grid's error; "
+                  f"this grid's spatial error is far smaller (4th+ order).")
+
+        np.savez_compressed(cache_file, x_grid=x_grid, t_grid=t_grid,
+                            h_sol=h_sol, conv_rel_l2=conv_rel_l2)
         _cached_solution = (x_grid, t_grid, h_sol)
         _cached_config_hash = config_tuple
-        print("  Solution computed.")
     return _cached_solution
 
 

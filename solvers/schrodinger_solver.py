@@ -41,24 +41,31 @@ def solve_nlse_splitstep(
     t_max: float = np.pi / 2,
     nx: int = 1024,
     nt: int = 800,
+    n_sub: int = 16,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Solve the Nonlinear Schrodinger Equation using split-step Fourier method.
-    
+
     Equation: i*h_t + 0.5*h_xx + |h|^2*h = 0
-    
-    The split-step method alternates between:
+
+    The split-step (Strang) method alternates between:
     - Linear step (dispersion): i*h_t + 0.5*h_xx = 0 (solved in Fourier space)
     - Nonlinear step: i*h_t + |h|^2*h = 0 (solved in real space)
-    
+
+    Strang splitting is 2nd order in the step size, so the integrator takes
+    n_sub substeps per saved frame. With dt tied to the save grid (the old
+    n_sub=1 behavior) the 2048x1000 solution was off by 1.4e-4 vs an
+    adaptive-integrator gold run; n_sub=16 puts it near 5e-7.
+
     Args:
         x_min: Minimum spatial coordinate
         x_max: Maximum spatial coordinate
         t_min: Initial time (typically 0)
         t_max: Final time (typically pi/2)
         nx: Number of spatial grid points (use power of 2 for FFT efficiency)
-        nt: Number of temporal grid points
-        
+        nt: Number of temporal grid points (saved frames)
+        n_sub: Strang substeps per saved frame
+
     Returns:
         x_grid: Spatial grid (nx,)
         t_grid: Temporal grid (nt,)
@@ -68,91 +75,116 @@ def solve_nlse_splitstep(
     domain_len = x_max - x_min
     dx = domain_len / nx
     x_grid = np.linspace(x_min, x_max - dx, nx, dtype=np.float64)
-    
+
     # Create temporal grid
     t_grid = np.linspace(t_min, t_max, nt, dtype=np.float64)
-    dt = t_grid[1] - t_grid[0]
-    
+    dt = (t_grid[1] - t_grid[0]) / max(int(n_sub), 1)
+
     # Create wavenumber grid for Fourier space (periodic BC)
     k = 2.0 * np.pi * np.fft.fftfreq(nx, dx)
-    
+
     # Initialize solution array
     h_solution = np.zeros((nt, nx), dtype=np.complex128)
-    
+
     # Set initial condition
     h_solution[0, :] = initial_condition_analytical(x_grid)
-    
+
     # Precompute linear evolution operator in Fourier space
     # Linear step: exp(-i * 0.5 * k^2 * dt)
     # From: i*h_t + 0.5*h_xx = 0 => h_t = i*0.5*h_xx
     # In Fourier space: h_t = -i*0.5*k^2*h_k
     # Solution: h_k(t+dt) = h_k(t) * exp(-i*0.5*k^2*dt)
     linear_operator = np.exp(-0.5j * k**2 * dt)
-    
-    # Time integration using split-step method
+
+    # Time integration using split-step (Strang) method
     h = h_solution[0, :].copy()
-    
+
     for n in range(nt - 1):
-        # Half-step nonlinear evolution in real space
-        # From: i*h_t + |h|^2*h = 0 => h_t = i*|h|^2*h
-        # Solution: h(t+dt/2) = h(t) * exp(i*|h|^2*dt/2)
-        nonlinear_phase = 1j * np.abs(h)**2 * (dt / 2)
-        h = h * np.exp(nonlinear_phase)
-        
-        # Full-step linear evolution in Fourier space
-        h_k = np.fft.fft(h)
-        h_k = h_k * linear_operator
-        h = np.fft.ifft(h_k)
-        
-        # Half-step nonlinear evolution in real space
-        nonlinear_phase = 1j * np.abs(h)**2 * (dt / 2)
-        h = h * np.exp(nonlinear_phase)
-        
+        for _ in range(max(int(n_sub), 1)):
+            # Half-step nonlinear evolution in real space
+            # From: i*h_t + |h|^2*h = 0 => h_t = i*|h|^2*h
+            # Solution: h(t+dt/2) = h(t) * exp(i*|h|^2*dt/2)
+            h = h * np.exp(1j * np.abs(h)**2 * (dt / 2))
+
+            # Full-step linear evolution in Fourier space
+            h = np.fft.ifft(np.fft.fft(h) * linear_operator)
+
+            # Half-step nonlinear evolution in real space
+            h = h * np.exp(1j * np.abs(h)**2 * (dt / 2))
+
         # Store solution
         h_solution[n + 1, :] = h
-    
+
     return x_grid, t_grid, h_solution
 
 
 # Global solution cache (initialized on first dataset generation)
 _cached_solution = None
+_cached_config_hash = None
 
 
 def _get_solution_cached(config: Dict) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    Get cached NLSE solution grid.
-    
+    Get cached NLSE solution grid (in-memory memo + on-disk .npz cache).
+
+    The memo is keyed on the domain config (the old version cached
+    unconditionally, so a changed domain silently reused the stale solution).
+    On first generation runs a self-convergence check (2x substeps; Strang is
+    2nd order so the diff bounds the temporal error), logs it, and stores it
+    in the cache file.
+
     Returns:
         (x_grid, t_grid, h_solution): Native grid arrays from the solver.
         h_solution is complex-valued (nt, nx)
     """
-    global _cached_solution
-    
-    if _cached_solution is None:
-        print("  Generating NLSE ground truth solution (2048x1000 grid)...")
-        problem = config.get('problem', 'problem1')
-        problem_config = config[problem]
-        
-        # Get domain from config
-        spatial_domain = problem_config['spatial_domain'][0]  # [[x_min, x_max]]
-        temporal_domain = problem_config['temporal_domain']  # [t_min, t_max]
-        
-        x_min, x_max = spatial_domain
-        t_min, t_max = temporal_domain
-        
-        # Solve NLSE on fine grid (increased resolution for benchmark accuracy)
+    global _cached_solution, _cached_config_hash
+
+    problem = config.get('problem', 'problem1')
+    problem_config = config[problem]
+    x_min, x_max = problem_config['spatial_domain'][0]
+    t_min, t_max = problem_config['temporal_domain']
+    config_tuple = ((x_min, x_max), (t_min, t_max))
+
+    if _cached_solution is None or _cached_config_hash != config_tuple:
+        nx, nt = 2048, 1000
+
+        from pathlib import Path
+        cache_dir = Path(__file__).resolve().parent.parent / 'datasets' / 'gt_cache'
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        # v2: n_sub=16 Strang substeps per frame (n_sub=1 had ~1.4e-4 error)
+        cache_file = cache_dir / (
+            f"schrodinger_gt_v2_{x_min}_{x_max}_{t_min}_{t_max}_{nx}x{nt}.npz")
+
+        if cache_file.exists():
+            data = np.load(cache_file)
+            _cached_solution = (data['x_grid'], data['t_grid'], data['h_sol'])
+            _cached_config_hash = config_tuple
+            print(f"  Loaded NLSE solution from cache ({cache_file.name}, "
+                  f"self-convergence rel-L2 = {float(data['conv_rel_l2']):.3e})")
+            return _cached_solution
+
+        print(f"  Generating NLSE ground truth solution ({nx}x{nt} grid, "
+              f"split-step n_sub=16)...")
         x_grid, t_grid, h_solution = solve_nlse_splitstep(
-            x_min=x_min,
-            x_max=x_max,
-            t_min=t_min,
-            t_max=t_max,
-            nx=2048,
-            nt=1000
+            x_min=x_min, x_max=x_max, t_min=t_min, t_max=t_max,
+            nx=nx, nt=nt, n_sub=16,
         )
-        
-        print(f"  Solution computed: {h_solution.shape[0]}x{h_solution.shape[1]} grid")
+        _, _, h_fine = solve_nlse_splitstep(
+            x_min=x_min, x_max=x_max, t_min=t_min, t_max=t_max,
+            nx=nx, nt=nt, n_sub=32,
+        )
+        conv_rel_l2 = float(np.linalg.norm(h_solution - h_fine)
+                            / (np.linalg.norm(h_fine) + 1e-300))
+        print(f"  Solution computed (self-convergence rel-L2 = {conv_rel_l2:.3e})")
+        if conv_rel_l2 > 1e-6:
+            print(f"  WARNING: NLSE reference self-convergence {conv_rel_l2:.3e} "
+                  f"> 1e-6 — rel-L2 metrics below this level are unreliable.")
+
+        np.savez_compressed(cache_file, x_grid=x_grid, t_grid=t_grid,
+                            h_sol=h_solution, conv_rel_l2=conv_rel_l2)
         _cached_solution = (x_grid, t_grid, h_solution)
-    
+        _cached_config_hash = config_tuple
+
     return _cached_solution
 
 
