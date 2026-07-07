@@ -385,11 +385,11 @@ def _save_adaptive_sampling_heatmap(
         ax2 = next(panel_iter) if has_adaptive else None
         ax3 = next(panel_iter) if has_causal else None
 
-        # Panel 1: raw (pure) PDE residuals
+        # Panel 1: raw (pure) PDE residuals (epoch is in the filename)
         sc1 = ax1.scatter(x_cached_np, t_cached_np, c=log_r2, cmap='hot', s=1, alpha=0.6)
         ax1.set_xlabel('x')
         ax1.set_ylabel('t')
-        ax1.set_title(f'Pure PDE Residual (epoch {epoch-1})')
+        ax1.set_title('Pure PDE residual')
         plt.colorbar(sc1, ax=ax1, label='log10(r²)')
 
         # Panel 2: adaptive sampling points (only when adaptive sampling is active)
@@ -399,7 +399,7 @@ def _save_adaptive_sampling_heatmap(
             ax2.scatter(x_sampled_np, t_sampled_np, c='blue', s=3, alpha=0.4)
             ax2.set_xlabel('x')
             ax2.set_ylabel('t')
-            ax2.set_title(f'Adaptive Sampling by Pure Residual (epoch {epoch})')
+            ax2.set_title('Adaptive sampling by pure residual')
 
         # Panel 3: causal-weighted residuals
         if has_causal and ax3 is not None:

@@ -178,7 +178,9 @@ def _run_split_segment(
     try:
         training_plots_dir = ctx.run_dir / 'training_plots'
         training_plots_dir.mkdir(exist_ok=True)
-        plot_path = training_plots_dir / f'expert_curves_after_{segment_name}.png'
+        plot_path = (training_plots_dir /
+                     f'expert_curves_after_{segment_name}'
+                     f'_E{len(new_expert_indices)}.png')
         plot_per_expert_curves(
             peh,
             list(regions_list),

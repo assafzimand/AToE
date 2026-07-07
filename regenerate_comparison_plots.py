@@ -118,10 +118,8 @@ def _regen_segment_plots(result_path: Path, helpers) -> None:
             out_dir.mkdir(parents=True, exist_ok=True)
             plot_predictions_and_error_maps(
                 model, out_dir, cfg,
-                filename=f'pred_after_{segment}.png',
-                title=f'{problem} — after {segment} '
-                      f'({ckpt_path.name} @ epoch {epoch})')
-            print(f"  [SegmentPlots] regenerated pred_after_{segment}.png "
+                filename=f'pred_after_{segment}_ep{epoch}_relL2_{{relL2}}.png')
+            print(f"  [SegmentPlots] regenerated pred_after_{segment} "
                   f"(epoch {epoch})")
         except Exception as _seg_err:
             print(f"  [SegmentPlots] {segment}: failed — {_seg_err}")

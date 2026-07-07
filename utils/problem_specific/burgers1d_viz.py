@@ -63,4 +63,6 @@ def visualize_dataset(data_dict: Dict, save_dir: Path, config: Dict, split_name:
 def visualize_evaluation(model: torch.nn.Module, eval_data_path: str,
                          save_dir: Path, config: Dict):
     from utils.problem_specific.generic_viz import plot_predictions_and_error_maps
-    plot_predictions_and_error_maps(model, save_dir, config)
+    plot_predictions_and_error_maps(
+        model, save_dir, config,
+        filename="pred_final_burgers1d_relL2_{relL2}.png")

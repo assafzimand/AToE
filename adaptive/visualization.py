@@ -201,9 +201,9 @@ def _plot_expert_regions_2d(
         
         # Create meshgrid and plot
         T, X = np.meshgrid(grid_t, grid_x)
-        im = ax.pcolormesh(X, T, gt_display, shading='auto', cmap='viridis', 
+        im = ax.pcolormesh(X, T, gt_display, shading='auto', cmap='viridis',
                           alpha=0.7, zorder=0)
-        cbar = plt.colorbar(im, ax=ax, label='Ground Truth (amplitude)', shrink=0.8)
+        cbar = plt.colorbar(im, ax=ax, label='u', shrink=0.8)
     else:
         # Draw domain rectangle as fallback
         domain_rect = patches.Rectangle(
@@ -226,25 +226,23 @@ def _plot_expert_regions_2d(
         )
         ax.add_patch(outline_rect)
     
-    # Set axis limits with padding
-    padding = 0.05
-    x_range = x_max - x_min
-    t_range = t_max - t_min
-    ax.set_xlim(x_min - padding * x_range, x_max + padding * x_range)
-    ax.set_ylim(t_min - padding * t_range, t_max + padding * t_range)
-    
-    # Add depth summary to title
-    max_depth = max((getattr(r, 'depth', 1) for r in regions), default=0) if regions else 0
-    depth_info = f", max depth={max_depth}" if max_depth > 0 else ""
-    
-    ax.set_xlabel('x', fontsize=12)
-    ax.set_ylabel('t', fontsize=12)
-    ax.set_title(title or f'Expert Regions ({len(regions)} experts{depth_info})', fontsize=14)
+    # Tight axis limits: exactly the domain (no padding margin)
+    ax.set_xlim(x_min, x_max)
+    ax.set_ylim(t_min, t_max)
+
+    ax.set_xlabel('x', fontsize=13)
+    ax.set_ylabel('t', fontsize=13)
+    ax.tick_params(labelsize=11)
+    # Paper-ready: no title by default — expert count/depth belong in the
+    # filename and the paper caption. A title is drawn only if explicitly given.
+    if title:
+        ax.set_title(title, fontsize=14)
     ax.set_aspect('auto')
     ax.grid(True, alpha=0.3)
-    
+
     plt.tight_layout()
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    from utils.plot_io import save_png_and_pdf
+    save_png_and_pdf(output_path, fig=fig)
     plt.close()
     logger.info(f"  Expert regions plot saved to {output_path}")
 
@@ -734,47 +732,43 @@ def plot_expert_soft_weights(
 
         if show_base and 'base' in weights_norm:
             psi_base_grid = weights_norm['base'].cpu().numpy().reshape(X.shape)
-            # Label indicates additive mode if base weight is present
-            base_label = 'Root Model (additive)'
-            plot_data.append((base_label, psi_base_grid, None))
+            plot_data.append(('Root', psi_base_grid, None))
 
         for i in expert_ids_to_plot:
             key = f'expert_{i}'
             if key in weights_norm:
                 psi_grid = weights_norm[key].cpu().numpy().reshape(X.shape)
                 region = model.regions[i] if i < len(model.regions) else None
-                depth_str = f', depth={region.depth}' if region else ''
-                label = f'Expert {i+1} Weight{depth_str}'
+                depth_str = f' (depth {region.depth})' if region else ''
+                label = f'Expert {i+1}{depth_str}'
                 plot_data.append((label, psi_grid, region))
 
-    # Create subplots
+    # Create subplots (paper-ready: no suptitle, one SHARED colorbar — all
+    # panels use the identical [0, 1] scale)
     n_plots = len(plot_data)
     if n_plots == 0:
         logger.info("  Warning: No weights to plot")
         return
 
-    n_cols = min(3, n_plots)
+    n_cols = min(4, n_plots)
     n_rows = (n_plots + n_cols - 1) // n_cols
 
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 4 * n_rows))
-    if n_plots == 1:
-        axes = np.array([[axes]])
-    elif n_rows == 1:
-        axes = axes.reshape(1, -1)
-    elif n_cols == 1:
-        axes = axes.reshape(-1, 1)
+    fig, axes = plt.subplots(n_rows, n_cols,
+                             figsize=(4.5 * n_cols, 3.8 * n_rows),
+                             squeeze=False, layout='constrained')
     axes = axes.flatten()
 
     cmap = plt.cm.Reds
 
+    im = None
     for idx, (label, psi_grid, region) in enumerate(plot_data):
         ax = axes[idx]
         im = ax.pcolormesh(eval_grid_x, eval_grid_t, psi_grid.T,
                           cmap=cmap, vmin=0, vmax=1, shading='auto')
-        ax.set_title(label, fontsize=11)
-        ax.set_xlabel('x', fontsize=10)
-        ax.set_ylabel('t', fontsize=10)
-        plt.colorbar(im, ax=ax, label='Normalized Weight')
+        ax.set_title(label, fontsize=13)
+        ax.set_xlabel('x', fontsize=12)
+        ax.set_ylabel('t', fontsize=12)
+        ax.tick_params(labelsize=10)
         ax.grid(True, alpha=0.3)
 
         if region is not None:
@@ -788,16 +782,16 @@ def plot_expert_soft_weights(
     # Hide unused axes
     for j in range(n_plots, len(axes)):
         axes[j].set_visible(False)
-    
-    # Overall title - indicate soft vs hard blending mode
-    mode_str = 'Hard' if blending_mode == 'hard' else 'Soft'
-    pou_str = 'Step Functions (mean on faces)' if blending_mode == 'hard' else 'Partition of Unity'
-    title = f'{title_prefix}{mode_str} Blending Weights ({pou_str})' if title_prefix else f'{mode_str} Blending Weights ({pou_str})'
-    fig.suptitle(title, fontsize=14, fontweight='bold', y=1.02)
-    
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+
+    # One shared colorbar for the whole figure
+    if im is not None:
+        fig.colorbar(im, ax=axes[:n_plots].tolist(), label='Normalized weight',
+                     shrink=0.85, pad=0.01)
+
+    from utils.plot_io import save_png_and_pdf
+    save_png_and_pdf(output_path, fig=fig)
     plt.close()
+    mode_str = 'Hard' if blending_mode == 'hard' else 'Soft'
     logger.info(f"  {mode_str} blending weights plot saved to {output_path}")
 
 def plot_capacity_map(
@@ -876,22 +870,15 @@ def plot_capacity_map(
             (lo[0], lo[1]), hi[0] - lo[0], hi[1] - lo[1],
             linewidth=lw, edgecolor=color, facecolor='none', linestyle=ls))
 
-    n_leaves = len(leaf_set)
-    leaf_total = sum(expert_params[i] for i in leaf_set if i < len(expert_params))
-    ax.set_xlabel('x')
-    ax.set_ylabel('t')
-    ax.set_title(
-        f"Capacity density{title_suffix} — {n_leaves} leaves, "
-        f"{leaf_total:,} leaf params (root: {base_params:,})")
-    handles = [
-        patches.Patch(edgecolor='red', facecolor='none', linestyle='-',
-                      label='Leaf expert region'),
-        patches.Patch(edgecolor='grey', facecolor='none', linestyle='--',
-                      label='Non-leaf (retired)'),
-    ]
-    ax.legend(handles=handles, fontsize=8, loc='upper right')
+    # Paper-ready: no title, no legend — leaf/param counts belong in the
+    # filename (see the caller) and the paper caption; the red leaf outlines
+    # are self-evident.
+    ax.set_xlabel('x', fontsize=13)
+    ax.set_ylabel('t', fontsize=13)
+    ax.tick_params(labelsize=11)
 
     plt.tight_layout()
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    from utils.plot_io import save_png_and_pdf
+    save_png_and_pdf(output_path, fig=fig)
     plt.close()
     logger.info(f"  Capacity-density map saved to {output_path}")

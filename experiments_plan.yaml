@@ -4,15 +4,15 @@ base_config:
   model: AToELeaves
   activation: tanh
   precision: float64
-  epochs: 41000
+  epochs: 45000
   batch_size: 99999
   min_epochs: 1
-  eval_every: 100
-  patience_evals: 50
+  eval_every: 1000
+  patience_epochs: 5000
   patience_rel_delta: 0.001
   optimizer_1: adam
   optimizer_2: ssbroyden
-  optimizer_switch_epoch: 1000
+  optimizer_switch_epoch: 5000
   lr: 0.001
   lr_schedule: none
   lr_decay_rate: 0.98
@@ -43,7 +43,7 @@ base_config:
   cuda: true
   eval_only: false
   resume_from: null
-  print_every: 100
+  print_every: 1000
   save_every: 999999
   seed: 42
   allen_cahn:
@@ -351,7 +351,7 @@ base_config:
       freeze_previous_windows: true
       m_distribution: equal
   sampling:
-    n_residual_train: 4096
+    n_residual_train: 10000
     sample_volume_ratio: 35
     n_initial_train: 256
     n_boundary_train: 256
@@ -375,25 +375,25 @@ base_config:
     split_icbc:
       enabled: true
     initial_train:
-      epochs: 41000
+      epochs: 45000
       optimizer_1: adam
       optimizer_2: ssbroyden
-      optimizer_switch_epoch: 1000
+      optimizer_switch_epoch: 5000
       lr: 0.001
       lr_schedule: none
       lr_decay_rate: 0.98
       lr_decay_steps: 1000
       lr_warmup_steps: 0
     fine_tune:
-      epochs: 40000
-      optimizer_1: ssbroyden
-      optimizer_2: null
-      optimizer_switch_epoch: 99999
+      epochs: 45000
+      optimizer_1: adam
+      optimizer_2: ssbroyden
+      optimizer_switch_epoch: 5000
       lr: 0.0001
       lr_schedule: none
       lr_decay_rate: 0.98
       lr_decay_steps: 1000
-      lr_warmup_steps: 500
+      lr_warmup_steps: 0
       l2sp_lambda: 0.0
 experiments:
 - name: burgers

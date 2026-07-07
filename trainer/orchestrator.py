@@ -550,19 +550,19 @@ def _plot_after_spawn(ctx: TrainingContext, tag: str) -> None:
     gt_grid, gt_x, gt_t = ctx.gt_grid, ctx.gt_x, ctx.gt_t
     adaptive_cfg = ctx.adaptive_cfg
     problem_type = '2d' if len(domain_bounds['lower']) == 2 else '3d'
-    num_experts_str = f" ({model.num_experts} experts)"
     leaf_info = model.get_leaf_info()
     leaf_expert_indices = [idx for _, idx in leaf_info if idx >= 0]
+    n_experts = len(leaf_expert_indices) or model.num_experts
     regions_to_plot = (
         [model.regions[i] for i in leaf_expert_indices]
         if isinstance(model, AToELeaves) else model.regions
     )
+    # Paper-ready filenames carry the run metadata (no in-figure titles)
     plot_expert_regions(
         regions=regions_to_plot,
         domain_bounds=domain_bounds,
-        output_path=adaptive_plots_dir / f"expert_regions_{tag}.png",
+        output_path=adaptive_plots_dir / f"expert_regions_{tag}_E{n_experts}.png",
         problem_type=problem_type,
-        title=f"Expert Regions ({tag}){num_experts_str}",
         ground_truth=gt_grid, grid_x=gt_x, grid_t=gt_t,
     )
     if adaptive_cfg['blending_mode'] == 'soft' and problem_type == '2d':
@@ -570,22 +570,25 @@ def _plot_after_spawn(ctx: TrainingContext, tag: str) -> None:
                             if isinstance(model, AToELeaves) else None)
         plot_expert_soft_weights(
             model=model, domain_bounds=domain_bounds,
-            output_path=adaptive_plots_dir / f"soft_weights_{tag}.png",
-            title_prefix=f"{tag}: ", leaf_indices=leaf_indices_set,
+            output_path=adaptive_plots_dir / f"soft_weights_{tag}_E{n_experts}.png",
+            leaf_indices=leaf_indices_set,
         )
     if problem_type == '2d':
         try:
             expert_params = [sum(p.numel() for p in e.parameters())
                              for e in model.experts]
             base_params = sum(p.numel() for p in model.base_model.parameters())
+            leaf_total = sum(expert_params[i] for i in leaf_expert_indices
+                             if i < len(expert_params))
             plot_capacity_map(
                 regions=model.regions,
                 expert_params=expert_params,
                 leaf_indices=leaf_expert_indices,
                 base_params=base_params,
                 domain_bounds=domain_bounds,
-                output_path=adaptive_plots_dir / f"capacity_map_{tag}.png",
-                title_suffix=f" ({tag})",
+                output_path=adaptive_plots_dir / (
+                    f"capacity_map_{tag}_L{n_experts}"
+                    f"_leafp{leaf_total}_rootp{base_params}.png"),
             )
         except Exception as _cap_err:
             logger.info(f"  [CapacityMap] Failed: {_cap_err}")

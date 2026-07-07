@@ -99,7 +99,9 @@ def visualize_evaluation(model, eval_data_path: str, save_dir: Path, config: Dic
         config: Configuration dictionary
     """
     from utils.problem_specific.generic_viz import plot_predictions_and_error_maps
-    plot_predictions_and_error_maps(model, save_dir, config)
+    plot_predictions_and_error_maps(
+        model, save_dir, config,
+        filename="pred_final_schrodinger_relL2_{relL2}.png")
 
     from utils.dataset_gen import load_dataset
 

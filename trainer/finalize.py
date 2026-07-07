@@ -169,9 +169,13 @@ def _finalize_training(ctx: TrainingContext) -> Path:
     optimizer_switch_epochs = [e['epoch'] for e in metrics.get('optimizer_events', [])]
     segment_markers = [(s['start_epoch'], s.get('segment', ''))
                        for s in metrics.get('segment_events', [])]
+    # Run metadata goes into the filenames (paper-ready; captions carry it)
+    _n_exp = model.num_experts if hasattr(model, 'num_experts') else 0
+    _curves_suffix = f"{cfg.get('problem', '')}_ep{total_epochs}_E{_n_exp}"
     plot_training_curves(metrics, training_plots_dir,
                          optimizer_switch_epochs=optimizer_switch_epochs,
-                         segment_markers=segment_markers)
+                         segment_markers=segment_markers,
+                         name_suffix=_curves_suffix)
 
     # Final adaptive PINN outputs
     if is_adaptive and hasattr(model, 'num_experts') and model.num_experts > 0:
@@ -188,13 +192,12 @@ def _finalize_training(ctx: TrainingContext) -> Path:
             [model.regions[i] for i in leaf_expert_indices]
             if is_leaves_model else model.regions
         )
-        label = 'leaves' if is_leaves_model else 'experts'
+        _n_final = len(regions_to_plot)
         plot_expert_regions(
             regions=regions_to_plot,
             domain_bounds=domain_bounds,
-            output_path=adaptive_plots_dir / "expert_regions_final.png",
+            output_path=adaptive_plots_dir / f"expert_regions_final_E{_n_final}.png",
             problem_type=problem_type,
-            title=f"Final Expert Regions ({len(regions_to_plot)} {label})",
             ground_truth=gt_grid,
             grid_x=gt_x,
             grid_t=gt_t
@@ -205,8 +208,7 @@ def _finalize_training(ctx: TrainingContext) -> Path:
             plot_expert_soft_weights(
                 model=model,
                 domain_bounds=domain_bounds,
-                output_path=adaptive_plots_dir / "soft_weights_final.png",
-                title_prefix="Final: ",
+                output_path=adaptive_plots_dir / f"soft_weights_final_E{_n_final}.png",
                 leaf_indices=leaf_indices_set
             )
         

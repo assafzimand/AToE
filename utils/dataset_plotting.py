@@ -162,7 +162,6 @@ def save_spawn_prediction_plot(
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    problem = cfg.get('problem', '')
     plot_predictions_and_error_maps(
         model,
         output_path.parent,
@@ -170,7 +169,6 @@ def save_spawn_prediction_plot(
         filename=output_path.name,
         n_x=resolution,
         n_t=resolution,
-        title=f'{problem} — epoch {epoch}',
     )
 
 

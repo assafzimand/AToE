@@ -28,21 +28,22 @@ def _safe_log_scale(ax, values_list):
 
 
 # Per-segment marker style for the training-curve vertical lines:
-# name -> (color, legend label). Colors avoid green (optimizer switch)
-# and red/blue solid (loss curves).
+# name -> (color, legend label). Strongly contrasting colors, avoiding green
+# (optimizer switch) and red/blue solid (loss curves).
 _SEGMENT_STYLES = {
     'root':      ('#1f77b4', 'Root start'),
-    'phase3':    ('#9467bd', 'Local Experts start'),
-    'fine_tune': ('#17becf', 'Fine-Tune start'),
+    'phase3':    ('#8e24aa', 'Local Experts start'),   # vivid purple
+    'fine_tune': ('#e67e22', 'Fine-Tune start'),       # orange
 }
 
 
 def _draw_segment_markers(ax, segment_markers):
-    """Vertical dotted lines at segment starts, one color+label per segment.
+    """Vertical dashed lines at segment starts, one color+label per segment.
 
-    ``segment_markers`` is a list of (start_epoch, segment_name) tuples.
-    Epoch <= 1 (start of the first segment) is skipped. Each segment name is
-    labeled once per axis.
+    Bolder than the optimizer-switch markers (these are the primary phase
+    boundaries). ``segment_markers`` is a list of (start_epoch, segment_name)
+    tuples. Epoch <= 1 (start of the first segment) is skipped. Each segment
+    name is labeled once per axis.
     """
     labeled = set()
     for epoch, name in segment_markers:
@@ -50,8 +51,8 @@ def _draw_segment_markers(ax, segment_markers):
             continue
         color, label = _SEGMENT_STYLES.get(
             name, ('#7f7f7f', f'{name} start'))
-        ax.axvline(x=epoch, color=color, linestyle=':',
-                   linewidth=1.5, alpha=0.7,
+        ax.axvline(x=epoch, color=color, linestyle='--',
+                   linewidth=2.5, alpha=0.9,
                    label=label if name not in labeled else None)
         labeled.add(name)
 
@@ -60,23 +61,31 @@ def plot_training_curves(
     metrics: Dict[str, List[float]],
     save_dir: Path,
     optimizer_switch_epochs: List[int] = None,
-    segment_markers: List = None
+    segment_markers: List = None,
+    name_suffix: str = ''
 ) -> None:
     """
-    Plot training and evaluation curves.
+    Plot training curves (paper-ready: no panel titles; the log/linear scale
+    is noted in the y-label; run metadata goes into the filename via
+    ``name_suffix``). Saves the combined figure AND each panel as its own
+    figure, all as PNG + PDF.
 
     Args:
         metrics: Dictionary with keys:
                 - 'train_loss_epochs', 'train_loss' (all epochs)
-                - 'epochs', 'eval_loss', 'eval_rel_l2' (eval epochs only)
+                - 'epochs', 'eval_rel_l2' (eval epochs only)
                 - Optional: 'loss_components' dict with 'epochs', 'residual', 'ic', 'bc' lists
         save_dir: Directory to save plots
         optimizer_switch_epochs: List of epochs where optimizer switched.
                                 Green dashed vertical lines drawn at each.
         segment_markers: List of (start_epoch, segment_name) tuples for
-                        training-segment boundaries. Dotted vertical lines,
+                        training-segment boundaries. Dashed vertical lines,
                         one color + legend label per segment name.
+        name_suffix: Appended to filenames, e.g. 'burgers1d_ep39300_E7' →
+                    training_curves_burgers1d_ep39300_E7.png
     """
+    from utils.plot_io import save_png_and_pdf
+
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 
@@ -85,83 +94,58 @@ def plot_training_curves(
 
     optimizer_switch_epochs = optimizer_switch_epochs or []
     segment_markers = segment_markers or []
-    
+
     # Check if we have loss components for term-wise plot
     loss_comps = metrics.get('loss_components', {})
-    has_components = (loss_comps.get('epochs') and 
+    has_components = (loss_comps.get('epochs') and
                       len(loss_comps.get('epochs', [])) > 0 and
                       any(loss_comps.get(k) for k in ['residual', 'ic', 'bc']))
 
-    # Create figure with 2 or 3 subplots depending on whether we have components
-    n_plots = 3 if has_components else 2
-    fig, axes = plt.subplots(1, n_plots, figsize=(7 * n_plots, 5))
+    def _draw_markers(ax):
+        for i, epoch in enumerate(optimizer_switch_epochs):
+            label = 'Optimizer switch' if i == 0 else None
+            ax.axvline(x=epoch, color='green', linestyle='--',
+                       linewidth=1.5, alpha=0.7, label=label)
+        _draw_segment_markers(ax, segment_markers)
 
-    # Plot 1: Loss curves
-    ax = axes[0]
-    ax.plot(train_loss_epochs, metrics['train_loss'], 'b-', label='Train Loss',
-            linewidth=2, alpha=0.8)
-    ax.plot(eval_epochs, metrics['eval_loss'], 'r-', label='Eval Loss',
-            linewidth=2, alpha=0.8)
-    
-    # Add optimizer switch markers (green dashed)
-    for i, epoch in enumerate(optimizer_switch_epochs):
-        label = 'Optimizer Switch' if i == 0 else None
-        ax.axvline(x=epoch, color='green', linestyle='--', 
-                   linewidth=1.5, alpha=0.7, label=label)
-    
-    # Add segment boundary markers (dotted, one color per segment)
-    _draw_segment_markers(ax, segment_markers)
+    def _finish(ax, ylabel, log_series):
+        ax.set_xlabel('Epoch', fontsize=14)
+        is_log = _safe_log_scale(ax, log_series) if log_series else False
+        ax.set_ylabel(f'{ylabel}{" (log)" if is_log else ""}', fontsize=14)
+        ax.legend(fontsize=12)
+        ax.grid(True, alpha=0.3)
+        ax.tick_params(labelsize=12)
 
-    ax.set_xlabel('Epoch', fontsize=12)
-    ax.set_ylabel('Loss', fontsize=12)
-    ax.legend(fontsize=11)
-    ax.grid(True, alpha=0.3)
-    is_log_loss = _safe_log_scale(ax, [metrics['train_loss'], metrics['eval_loss']])
-    scale_str_loss = "[log]" if is_log_loss else "[linear]"
-    ax.set_title(f'Training and Evaluation Loss {scale_str_loss}', fontsize=14, fontweight='bold')
+    # Panel drawers (each renders into a given ax; reused for the combined
+    # figure and the standalone per-panel figures)
+    def _panel_loss(ax):
+        # Training loss only — patience and this curve both track train loss;
+        # eval loss is intentionally not shown.
+        ax.plot(train_loss_epochs, metrics['train_loss'], 'b-',
+                label='Train loss', linewidth=2, alpha=0.8)
+        _draw_markers(ax)
+        _finish(ax, 'Loss', [metrics['train_loss']])
 
-    # Plot 2: Relative L2 error
-    ax = axes[1]
-    ax.plot(eval_epochs, metrics['eval_rel_l2'], 'r-', label='Eval Rel. L2',
-            linewidth=2, alpha=0.8)
+    def _panel_rel_l2(ax):
+        ax.plot(eval_epochs, metrics['eval_rel_l2'], 'r-',
+                label='Rel. $L^2$ error', linewidth=2, alpha=0.8)
+        # Root rel-L2 baseline (horizontal black line). Only shown when the
+        # root was LOADED from a checkpoint: if it was trained in this
+        # session, the curve itself already contains the root phase.
+        root_rel_l2 = metrics.get('root_rel_l2')
+        _show_root = (root_rel_l2 is not None and root_rel_l2 > 0
+                      and metrics.get('root_loaded_from_checkpoint', False))
+        if _show_root:
+            ax.axhline(y=root_rel_l2, color='black', linestyle='-',
+                       linewidth=1.5, alpha=0.8,
+                       label=f'Root ({root_rel_l2:.2e})')
+        _draw_markers(ax)
+        # Rel-L2 is ALWAYS linear scale (bounded metric; log made near-flat
+        # curves masquerade as linear). log_series=None skips _safe_log_scale.
+        _finish(ax, 'Relative $L^2$ error', None)
 
-    # Root rel-L2 baseline (horizontal black line). Only shown when the root
-    # was LOADED from a checkpoint: if it was trained in this session, the
-    # curve itself already contains the root phase and the line is redundant.
-    root_rel_l2 = metrics.get('root_rel_l2')
-    _show_root_line = (root_rel_l2 is not None and root_rel_l2 > 0
-                       and metrics.get('root_loaded_from_checkpoint', False))
-    if _show_root_line:
-        ax.axhline(y=root_rel_l2, color='black', linestyle='-',
-                   linewidth=1.5, alpha=0.8,
-                   label=f'Root rel-L2 ({root_rel_l2:.2e})')
-
-    # Add optimizer switch markers (green dashed)
-    for i, epoch in enumerate(optimizer_switch_epochs):
-        label = 'Optimizer Switch' if i == 0 else None
-        ax.axvline(x=epoch, color='green', linestyle='--', 
-                   linewidth=1.5, alpha=0.7, label=label)
-    
-    # Add segment boundary markers (dotted, one color per segment)
-    _draw_segment_markers(ax, segment_markers)
-
-    ax.set_xlabel('Epoch', fontsize=12)
-    ax.set_ylabel('Relative L2 Error', fontsize=12)
-    ax.legend(fontsize=11)
-    ax.grid(True, alpha=0.3)
-    _l2_series = [metrics['eval_rel_l2']]
-    if _show_root_line:
-        _l2_series.append([root_rel_l2])
-    is_log_l2 = _safe_log_scale(ax, _l2_series)
-    scale_str_l2 = "[log]" if is_log_l2 else "[linear]"
-    ax.set_title(f'Relative L2 Error {scale_str_l2}', fontsize=14, fontweight='bold')
-
-    # Plot 3: Term-wise loss components (if available)
-    if has_components:
-        ax = axes[2]
+    def _panel_components(ax):
         comp_epochs = loss_comps['epochs']
-        
-        # Color scheme for different loss terms
         term_colors = {
             'residual': '#e74c3c',  # red
             'ic': '#3498db',         # blue
@@ -169,47 +153,48 @@ def plot_training_curves(
             'continuity': '#e67e22', # orange
         }
         term_labels = {
-            'residual': 'PDE Residual',
-            'ic': 'Initial Condition',
-            'bc': 'Boundary Condition',
+            'residual': 'PDE residual',
+            'ic': 'Initial condition',
+            'bc': 'Boundary condition',
             'continuity': 'Continuity',
         }
-        
         values_for_log = []
         for term in ['residual', 'ic', 'bc', 'continuity']:
             if loss_comps.get(term) and len(loss_comps[term]) > 0:
                 values = loss_comps[term]
-                ax.plot(comp_epochs, values, '-', 
-                       color=term_colors.get(term, 'gray'),
-                       label=term_labels.get(term, term),
-                       linewidth=1.5, alpha=0.8)
+                ax.plot(comp_epochs, values, '-',
+                        color=term_colors.get(term, 'gray'),
+                        label=term_labels.get(term, term),
+                        linewidth=1.5, alpha=0.8)
                 values_for_log.append(values)
-        
-        # Add optimizer switch markers
-        for i, epoch in enumerate(optimizer_switch_epochs):
-            label = 'Optimizer Switch' if i == 0 else None
-            ax.axvline(x=epoch, color='green', linestyle='--', 
-                       linewidth=1.5, alpha=0.7, label=label)
-        
-        # Add segment boundary markers (dotted, one color per segment)
-        _draw_segment_markers(ax, segment_markers)
+        _draw_markers(ax)
+        _finish(ax, 'Loss component', values_for_log)
 
-        ax.set_xlabel('Epoch', fontsize=12)
-        ax.set_ylabel('Loss Component', fontsize=12)
-        ax.legend(fontsize=10)
-        ax.grid(True, alpha=0.3)
-        is_log_comp = _safe_log_scale(ax, values_for_log) if values_for_log else False
-        scale_str_comp = "[log]" if is_log_comp else "[linear]"
-        ax.set_title(f'Loss Components {scale_str_comp}', fontsize=14, fontweight='bold')
+    panels = [('loss', _panel_loss), ('rel_l2', _panel_rel_l2)]
+    if has_components:
+        panels.append(('components', _panel_components))
 
+    suffix = f'_{name_suffix}' if name_suffix else ''
+
+    # Combined figure
+    fig, axes = plt.subplots(1, len(panels), figsize=(7 * len(panels), 5))
+    if len(panels) == 1:
+        axes = [axes]
+    for ax, (_, draw) in zip(axes, panels):
+        draw(ax)
     plt.tight_layout()
+    save_path = save_png_and_pdf(save_dir / f'training_curves{suffix}.png', fig=fig)
+    plt.close(fig)
 
-    # Save figure
-    save_path = save_dir / 'training_curves.png'
-    plt.savefig(save_path, dpi=150, bbox_inches='tight')
-    plt.close()
+    # Standalone per-panel figures (papers rarely place all panels together)
+    for key, draw in panels:
+        fig_s, ax_s = plt.subplots(figsize=(7, 5))
+        draw(ax_s)
+        plt.tight_layout()
+        save_png_and_pdf(save_dir / f'training_curves_{key}{suffix}.png', fig=fig_s)
+        plt.close(fig_s)
 
-    print(f"  Training curves saved to {save_path}")
+    print(f"  Training curves saved to {save_path} (+ per-panel files)")
 
 
 def plot_per_expert_curves(
@@ -311,20 +296,26 @@ def plot_per_expert_curves(
         for term, values in eh.items():
             if not values:
                 continue
+            # Zeros (e.g. exactly-satisfied terms) would force a linear axis
+            # where the initial spike flattens the entire history — mask them
+            # to NaN (plotted as gaps) so the axis can stay logarithmic.
+            v = np.asarray(values, dtype=float)
+            v_masked = np.where(v > 0, v, np.nan)
             ax.plot(
-                values,
+                v_masked,
                 color=term_colors.get(term, 'gray'),
                 label=term,
                 linewidth=1.2,
                 alpha=0.85,
             )
-            vals_for_log.append(values)
-        ax.set_xlabel('Epoch')
-        ax.set_ylabel('Loss')
-        ax.legend(fontsize=7, loc='upper right')
+            if np.isfinite(v_masked).any():
+                vals_for_log.append(v_masked[np.isfinite(v_masked)])
+        ax.set_xlabel('Epoch', fontsize=11)
+        ax.set_ylabel('Loss (log)', fontsize=11)
         ax.grid(True, alpha=0.3)
-        _safe_log_scale(ax, vals_for_log)
-        ax.set_title(f'Expert {eidx}', fontsize=11)
+        if vals_for_log:
+            ax.set_yscale('log')
+        ax.set_title(f'Expert {eidx}', fontsize=12)
 
         # ── Bottom: region on GT heatmap ──
         ax2 = axes[1, col]
@@ -382,7 +373,8 @@ def plot_per_expert_curves(
             ax2.set_xlim(lo[0] - pad * xr, hi[0] + pad * xr)
             ax2.set_ylim(lo[-1] - pad * tr, hi[-1] + pad * tr)
 
-        # Scatter IC/BC interface samples for this expert
+        # Scatter IC/BC interface samples for this expert (legend is shared
+        # at figure level, so labels are attached only on the first column)
         if eidx in _sd_by_expert:
             for kcode, (label, color, marker, ms) in _icbc_kinds.items():
                 if kcode in _sd_by_expert[eidx]:
@@ -393,19 +385,31 @@ def plot_per_expert_curves(
                         label=label, zorder=20, alpha=0.8,
                         linewidths=0,
                     )
-            ax2.legend(fontsize=6, loc='upper right',
-                       markerscale=1.2, framealpha=0.7)
 
-        ax2.set_xlabel('x')
-        ax2.set_ylabel('t')
-        ax2.set_title(f'Region (expert {eidx})', fontsize=10)
+        ax2.set_xlabel('x', fontsize=11)
+        ax2.set_ylabel('t', fontsize=11)
+        ax2.set_title(f'Region E{eidx}', fontsize=12)
 
-    fig.suptitle(
-        f'Per-Expert Curves — {segment_name}',
-        fontsize=13, fontweight='bold',
-    )
+    # Shared figure-level legends (deduplicated across panels) instead of
+    # one repeated legend per panel; no suptitle — segment/expert counts
+    # belong in the filename and the paper caption.
+    def _fig_legend(row_axes, loc_y):
+        seen = {}
+        for ax_ in row_axes:
+            h_, l_ = ax_.get_legend_handles_labels()
+            for h, l in zip(h_, l_):
+                seen.setdefault(l, h)
+        if seen:
+            fig.legend(seen.values(), seen.keys(), ncol=len(seen),
+                       fontsize=10, loc='upper center',
+                       bbox_to_anchor=(0.5, loc_y), frameon=True)
+
+    _fig_legend(axes[0, :], 1.06)   # loss terms
+    _fig_legend(axes[1, :], 0.52)   # IC/BC scatter kinds
+
     plt.tight_layout()
-    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    from utils.plot_io import save_png_and_pdf
+    save_png_and_pdf(save_path, fig=fig)
     plt.close()
 
 

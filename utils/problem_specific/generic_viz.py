@@ -67,7 +67,13 @@ def plot_predictions_and_error_maps(
 ):
     """
     Create a heatmap figure with one row per output dimension, columns:
-      [Ground Truth | Prediction | Error]
+      [Ground Truth | Prediction | Error] — GT and Prediction share one
+    colorbar (identical scale); the error panel has its own.
+
+    Paper-ready: no suptitle; run metadata belongs in the filename/caption.
+    If ``filename`` contains the placeholder ``{relL2}``, it is substituted
+    with the computed rel-L2 (e.g. ``pred_final_{relL2}.png`` →
+    ``pred_final_2.41e-03.png``). Saved as PNG + PDF.
 
     The model is evaluated on the solver's native solution grid (restricted
     to the config's temporal domain, so time-marching windows are scored on
@@ -77,11 +83,13 @@ def plot_predictions_and_error_maps(
         model:    Trained model.
         save_dir: Directory to save the figure.
         config:   Full config dict.
-        filename: Output filename.
+        filename: Output filename (may contain the ``{relL2}`` placeholder).
         n_x:      Spatial grid size for the fallback dense grid.
         n_t:      Temporal grid size for the fallback dense grid.
-        title:    Optional figure suptitle (default: '<problem> — Predictions
-                  & Error Maps').
+        title:    Deprecated — ignored (kept for caller compatibility).
+
+    Returns:
+        The overall rel-L2 (all output dims), or None if skipped.
     """
     problem = config.get('problem', '')
     if problem not in _PROBLEM_META:
@@ -139,50 +147,58 @@ def plot_predictions_and_error_maps(
             preds.append(model(torch.cat([xb, tb], dim=1)).cpu())
     pred_np = torch.cat(preds).numpy()              # (N, output_dim)
 
-    # Build figure: output_dim rows × 3 cols
+    # Overall rel-L2 across all output dims (goes into filename/caption)
+    gt_all = np.stack([gt_channels[d].reshape(n_t_eval, n_x_eval)
+                       for d in range(output_dim)])
+    pr_all = np.stack([pred_np[:, d].reshape(n_t_eval, n_x_eval)
+                       for d in range(output_dim)])
+    rel_l2 = (np.linalg.norm(pr_all - gt_all)
+              / (np.linalg.norm(gt_all) + 1e-300))
+
+    # Build figure: output_dim rows × 3 cols (constrained layout places the
+    # shared colorbars without overlap)
     fig, axes = plt.subplots(output_dim, 3,
-                             figsize=(15, 4.5 * output_dim),
-                             squeeze=False)
+                             figsize=(14, 4.5 * output_dim),
+                             squeeze=False, layout='constrained')
 
     for d, label in enumerate(dim_labels):
-        gt  = gt_channels[d].reshape(n_t_eval, n_x_eval)
-        pr  = pred_np[:, d].reshape(n_t_eval, n_x_eval)
+        gt, pr = gt_all[d], pr_all[d]
         err = np.abs(pr - gt)
 
         vmax = max(np.abs(gt).max(), np.abs(pr).max())
         vmin = -vmax
+        # Prefix panel titles with the channel label only when multi-output
+        prefix = f'{label} — ' if output_dim > 1 else ''
 
         # pcolormesh (not contourf): continuous paper-style rendering with
         # the exact grid values — contour levels band smooth fields and
         # make near-noise-floor error maps look artificially grainy.
-        # Ground Truth
+        # Ground Truth + Prediction share one colorbar (same scale)
         im0 = axes[d, 0].pcolormesh(X, T, gt, shading='auto', cmap='RdBu_r',
                                     vmin=vmin, vmax=vmax)
-        axes[d, 0].set_title(f'{label} — Ground Truth', fontsize=12, fontweight='bold')
-        axes[d, 0].set_xlabel('x')
-        axes[d, 0].set_ylabel('t')
-        plt.colorbar(im0, ax=axes[d, 0])
-
-        # Prediction
+        axes[d, 0].set_title(f'{prefix}Ground truth', fontsize=14)
         im1 = axes[d, 1].pcolormesh(X, T, pr, shading='auto', cmap='RdBu_r',
                                     vmin=vmin, vmax=vmax)
-        axes[d, 1].set_title(f'{label} — Prediction', fontsize=12, fontweight='bold')
-        axes[d, 1].set_xlabel('x')
-        axes[d, 1].set_ylabel('t')
-        plt.colorbar(im1, ax=axes[d, 1])
+        axes[d, 1].set_title(f'{prefix}Prediction', fontsize=14)
+        fig.colorbar(im1, ax=axes[d, :2], pad=0.01)
 
-        # Error
+        # Error (own scale, scientific ticks)
         im2 = axes[d, 2].pcolormesh(X, T, err, shading='auto', cmap='Reds')
-        axes[d, 2].set_title(f'{label} — Absolute Error', fontsize=12, fontweight='bold')
-        axes[d, 2].set_xlabel('x')
-        axes[d, 2].set_ylabel('t')
-        plt.colorbar(im2, ax=axes[d, 2])
+        axes[d, 2].set_title(f'{prefix}Absolute error', fontsize=14)
+        cb2 = fig.colorbar(im2, ax=axes[d, 2], pad=0.01)
+        cb2.formatter.set_powerlimits((-2, 2))
+        cb2.update_ticks()
 
-    plt.suptitle(title or f'{problem} — Predictions & Error Maps',
-                 fontsize=14, fontweight='bold')
-    plt.tight_layout()
+        for c in range(3):
+            axes[d, c].set_xlabel('x', fontsize=13)
+            axes[d, c].set_ylabel('t', fontsize=13)
+            axes[d, c].tick_params(labelsize=11)
 
-    save_path = Path(save_dir) / filename
-    plt.savefig(save_path, dpi=150, bbox_inches='tight')
-    plt.close()
-    print(f"  Predictions & error maps saved to {save_path}")
+    if '{relL2}' in filename:
+        filename = filename.replace('{relL2}', f'{rel_l2:.2e}')
+    from utils.plot_io import save_png_and_pdf
+    save_path = save_png_and_pdf(Path(save_dir) / filename, fig=fig)
+    plt.close(fig)
+    print(f"  Predictions & error maps saved to {save_path} "
+          f"(rel-L2 = {rel_l2:.3e})")
+    return rel_l2

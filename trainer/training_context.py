@@ -75,7 +75,7 @@ class TrainingContext:
     metrics: Dict = field(default_factory=dict)
     best_eval_loss: float = float('inf')
     best_checkpoint_path: Any = None
-    patience_evals: int = 0
+    patience_epochs: int = 0  # train-loss plateau window, counted in epochs
     min_epochs: int = 0
     patience_rel_delta: float = 0.0
 

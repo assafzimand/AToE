@@ -28,7 +28,10 @@ def get_visualization_module(problem_name: str):
         from .generic_viz import plot_predictions_and_error_maps
 
         def _generic_visualize_evaluation(model, eval_data_path, save_dir, config):
-            plot_predictions_and_error_maps(model, save_dir, config)
+            problem = config.get('problem', 'problem')
+            plot_predictions_and_error_maps(
+                model, save_dir, config,
+                filename=f"pred_final_{problem}_relL2_{{relL2}}.png")
 
         def _noop(*args, **kwargs):
             pass
