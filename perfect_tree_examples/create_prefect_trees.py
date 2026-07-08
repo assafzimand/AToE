@@ -33,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from adaptive.region_detector import RegionDetector  # noqa: E402
 from adaptive.visualization import prepare_ground_truth_grid  # noqa: E402
 from utils.dataset_gen import calculate_dataset_sizes  # noqa: E402
+from utils.plot_io import save_png_and_pdf  # noqa: E402
 from trainer.time_marching import compute_m_per_window  # noqa: E402
 
 
@@ -123,8 +124,46 @@ def extract_xy(eval_data: dict, output_dim: int):
     return X, y
 
 
+def build_symmetric_grid_data(eval_data, domain_bounds, resolution=200):
+    """Interpolate the GT onto a symmetric regular grid for tree fitting.
+
+    Random eval points put sklearn's split candidates (sample midpoints) at
+    asymmetric, draw-dependent locations; a regular grid keeps candidate
+    splits symmetric under the domain's reflections. Interpolates each
+    output channel separately (unlike prepare_ground_truth_grid, which
+    collapses multi-output to a norm for display).
+
+    Returns (X_grid, y_grid) or (None, None) if the domain is not 2D.
+    """
+    from scipy.interpolate import griddata
+    if len(domain_bounds['lower']) != 2:
+        return None, None
+    X_pts, y_pts = extract_xy(eval_data, output_dim=None)
+    x_min, t_min = domain_bounds['lower']
+    x_max, t_max = domain_bounds['upper']
+    gx = np.linspace(x_min, x_max, resolution)
+    gt = np.linspace(t_min, t_max, resolution)
+    XX, TT = np.meshgrid(gx, gt, indexing='ij')
+    X_grid = np.column_stack([XX.ravel(), TT.ravel()])
+
+    y2 = y_pts if y_pts.ndim > 1 else y_pts[:, None]
+    channels = []
+    for c in range(y2.shape[1]):
+        v = griddata(X_pts, y2[:, c], (XX, TT), method='linear')
+        nan_mask = np.isnan(v)
+        if nan_mask.any():
+            v_nn = griddata(X_pts, y2[:, c], (XX, TT), method='nearest')
+            v[nan_mask] = v_nn[nan_mask]
+        channels.append(v.ravel())
+    y_grid = np.column_stack(channels)
+    if y_grid.shape[1] == 1:
+        y_grid = y_grid.ravel()
+    return X_grid, y_grid
+
+
 def fit_and_get_all_nodes(
     X, y, max_depth, min_samples_leaf, M, variable_for_node_accept,
+    epsilon_node_acceptance=0.0,
 ):
     """Fit tree, prune, return visualization + reconstruction data.
 
@@ -149,6 +188,8 @@ def fit_and_get_all_nodes(
         M=M,
         variable_for_node_accept=variable_for_node_accept,
         verbose=True,
+        retain_siblings=True,
+        epsilon_node_acceptance=epsilon_node_acceptance,
     )
     accepted_ids = {n.node_id for n, _ in accepted_nodes}
 
@@ -258,7 +299,7 @@ def _plot_regions_panel(ax, regions_dicts, domain_bounds, gt_grid, grid_x, grid_
 def _plot_hierarchy_panel(ax, all_nodes, variable_for_node_accept):
     """Dendrogram-style tree hierarchy colored by the configured metric."""
     if not all_nodes:
-        ax.set_title('Tree Hierarchy')
+        ax.set_title('Tree hierarchy')
         return
 
     children_map = {}
@@ -273,7 +314,7 @@ def _plot_hierarchy_panel(ax, all_nodes, variable_for_node_accept):
     if not root_children:
         root_children = [n for n in all_nodes if n.get('parent_node_id', -1) == -1]
     if not root_children:
-        ax.set_title('Tree Hierarchy')
+        ax.set_title('Tree hierarchy')
         return
 
     leaf_counter = [0]
@@ -376,7 +417,7 @@ def _plot_hierarchy_panel(ax, all_nodes, variable_for_node_accept):
     ax.set_yticklabels([str(d) for d in range(max_depth + 1)])
     ax.set_xticks([])
     
-    ax.set_title('Tree Hierarchy', fontsize=11)
+    ax.set_title('Tree hierarchy', fontsize=11)
     ax.grid(True, alpha=0.15, axis='y')
 
 
@@ -384,6 +425,7 @@ def build_problem_tree_data(
     problem, domain_bounds,
     max_depth, min_samples_leaf, M,
     bfs_accepted, node_dicts,
+    epsilon_node_acceptance=0.0,
 ):
     """Build the dict for one problem's perfect tree."""
     n_leaves = sum(
@@ -396,6 +438,7 @@ def build_problem_tree_data(
             'max_depth': max_depth,
             'min_samples_leaf': min_samples_leaf,
             'M': M,
+            'epsilon_node_acceptance': epsilon_node_acceptance,
         },
         'summary': {
             'total_nodes': len(node_dicts),
@@ -430,14 +473,16 @@ def process_problem_with_time_marching(
     global_M = adaptive_cfg.get('M_experts_num', 40)
     output_dim = problem_cfg.get('output_dim', 1)
     variable_for_node_accept = adaptive_cfg.get('variable_for_node_accept', 'norm')
-    
+    epsilon_node_acceptance = adaptive_cfg.get('epsilon_node_acceptance', 0.0)
+
     num_windows = tm_cfg.get('num_windows', 5)
     m_distribution = tm_cfg.get('m_distribution', 'equal')
-    
+
     # Compute M per window
     m_per_window = compute_m_per_window(global_M, num_windows, m_distribution)
-    
-    print(f"  max_depth={max_depth}, min_samples_leaf={min_samples_leaf}")
+
+    print(f"  max_depth={max_depth}, min_samples_leaf={min_samples_leaf}, "
+          f"epsilon_node_acceptance={epsilon_node_acceptance}")
     print(f"  num_windows={num_windows}, m_distribution={m_distribution}")
     print(f"  global_M={global_M}, M per window: {m_per_window}")
 
@@ -448,8 +493,14 @@ def process_problem_with_time_marching(
         print(f"  Skipping {problem}: only 2D (x,t) domains supported.")
         return None
 
-    X_full, y_full = extract_xy(eval_data, output_dim)
-    print(f"  Full data: X={X_full.shape}, y={y_full.shape if hasattr(y_full, 'shape') else '?'}")
+    # Fit on a symmetric regular grid (eval points only supply GT values)
+    n_eval = eval_data['x'].shape[0]
+    X_full, y_full = build_symmetric_grid_data(eval_data, domain_bounds)
+    min_samples_leaf = max(
+        min_samples_leaf,
+        int(round(min_samples_leaf * len(X_full) / max(n_eval, 1))))
+    print(f"  Full data: X={X_full.shape}, y={y_full.shape if hasattr(y_full, 'shape') else '?'}, "
+          f"min_samples_leaf={min_samples_leaf}")
 
     # Compute window boundaries
     t_min, t_max = problem_cfg['temporal_domain']
@@ -492,6 +543,7 @@ def process_problem_with_time_marching(
             (node_dicts, accepted_ids,
              bfs_accepted, children_left) = fit_and_get_all_nodes(
                 X_win, y_win, max_depth, min_samples_leaf, win_M, variable_for_node_accept,
+                epsilon_node_acceptance=epsilon_node_acceptance,
             )
             
             # Extend node bounds to exact window boundaries (fixes visualization gaps)
@@ -548,6 +600,7 @@ def process_problem_with_time_marching(
             'max_depth': max_depth,
             'min_samples_leaf': min_samples_leaf,
             'global_M': global_M,
+            'epsilon_node_acceptance': epsilon_node_acceptance,
             'num_windows': num_windows,
             'm_distribution': m_distribution,
             'm_per_window': m_per_window,
@@ -566,24 +619,23 @@ def process_problem_with_time_marching(
         eval_data, domain_bounds, resolution=150)
     
     fig, axes = plt.subplots(1, 2, figsize=(18, 7))
-    
+
     _plot_regions_panel(
         axes[0], all_window_nodes, domain_bounds,
         gt_grid, grid_x, grid_t,
-        f'{problem}: Original Trees (all {num_windows} windows)')
+        'Original trees')
     _plot_regions_panel(
         axes[1], all_accepted_nodes, domain_bounds,
         gt_grid, grid_x, grid_t,
-        f'{problem}: After Pruning ({n_accepted} total experts)')
-    
-    fig.suptitle(
-        f'Perfect Tree \u2014 {problem}  '
-        f'({num_windows} windows, {m_distribution}, total_M={global_M})',
-        fontsize=14, fontweight='bold', y=1.01)
+        'After pruning')
+
     plt.tight_layout()
-    
-    out_path = output_dir / f'{problem}_perfect_tree.png'
-    plt.savefig(out_path, dpi=150, bbox_inches='tight')
+
+    out_path = save_png_and_pdf(
+        output_dir / (
+            f'perfect_tree_{problem}_W{num_windows}_{m_distribution}'
+            f'_M{global_M}_acc{n_accepted}.png'),
+        fig=fig)
     plt.close()
     print(f"  Saved plot: {out_path}")
     
@@ -623,12 +675,14 @@ def process_problem(
     
     # Read variable_for_node_accept
     variable_for_node_accept = adaptive_cfg.get('variable_for_node_accept', 'norm')
+    epsilon_node_acceptance = adaptive_cfg.get('epsilon_node_acceptance', 0.0)
 
     print(
         f"  max_depth={max_depth}, "
         f"min_samples_leaf={min_samples_leaf}, "
         f"M={M}, "
-        f"variable_for_node_accept={variable_for_node_accept}")
+        f"variable_for_node_accept={variable_for_node_accept}, "
+        f"epsilon_node_acceptance={epsilon_node_acceptance}")
 
     eval_data = ensure_eval_data(problem, base_cfg)
     domain_bounds = build_domain_bounds(problem_cfg)
@@ -639,20 +693,29 @@ def process_problem(
             f"only 2D (x,t) domains supported.")
         return None
 
-    X, y = extract_xy(eval_data, output_dim)
+    # Fit on a symmetric regular grid (eval points only supply GT values)
+    n_eval = eval_data['x'].shape[0]
+    X, y = build_symmetric_grid_data(eval_data, domain_bounds)
+    msl = max(min_samples_leaf,
+              int(round(min_samples_leaf * len(X) / max(n_eval, 1))))
+    if msl != min_samples_leaf:
+        print(f"  min_samples_leaf scaled {min_samples_leaf} -> {msl} "
+              f"for {len(X)} grid points")
     print(f"  Data: X={X.shape}, y="
           f"{y.shape if hasattr(y, 'shape') else '?'}")
 
     (node_dicts, accepted_ids,
      bfs_accepted, children_left) = fit_and_get_all_nodes(
-        X, y, max_depth, min_samples_leaf, M, variable_for_node_accept,
+        X, y, max_depth, msl, M, variable_for_node_accept,
+        epsilon_node_acceptance=epsilon_node_acceptance,
     )
 
     # -- Build tree data for unified JSON --
     tree_data = build_problem_tree_data(
         problem, domain_bounds,
-        max_depth, min_samples_leaf, M,
+        max_depth, msl, M,
         bfs_accepted, node_dicts,
+        epsilon_node_acceptance=epsilon_node_acceptance,
     )
 
     # -- Generate 3-panel plot --
@@ -673,21 +736,21 @@ def process_problem(
     _plot_regions_panel(
         axes[0], all_region_dicts, domain_bounds,
         gt_grid, grid_x, grid_t,
-        f'{problem}: Original Tree')
+        'Original tree')
     _plot_regions_panel(
         axes[1], accepted_region_dicts, domain_bounds,
         gt_grid, grid_x, grid_t,
-        f'{problem}: After Pruning ({n_accepted} nodes)')
+        'After pruning')
     _plot_hierarchy_panel(
         axes[2], node_dicts, variable_for_node_accept)
 
-    fig.suptitle(
-        f'Perfect Tree \u2014 {problem}  (depth={max_depth}, M={M})',
-        fontsize=14, fontweight='bold', y=1.01)
     plt.tight_layout()
 
-    out_path = output_dir / f'{problem}_perfect_tree.png'
-    plt.savefig(out_path, dpi=150, bbox_inches='tight')
+    out_path = save_png_and_pdf(
+        output_dir / (
+            f'perfect_tree_{problem}_depth{max_depth}'
+            f'_M{M}_acc{n_accepted}.png'),
+        fig=fig)
     plt.close()
     print(f"  Saved plot: {out_path}")
 

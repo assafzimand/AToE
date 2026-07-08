@@ -453,6 +453,7 @@ class RegionDetector:
         variable_for_node_accept: str = 'norm',
         verbose: bool = True,
         retain_siblings: bool = True,
+        epsilon_node_acceptance: float = 0.0,
         **kwargs,
     ) -> Tuple[List[Tuple[TreeNodeInfo, int]], Dict]:
         """
@@ -464,7 +465,7 @@ class RegionDetector:
             - 'norm': highest wavelet_norm_squared
             - 'new_norm': highest new_wavelet_norm_squared
             - 'smoothness': lowest smoothness_alpha (roughest regions)
-            
+
         Then ensure valid structure by adding:
             - All ancestors of selected nodes (paths to root) — always
             - Siblings of any node in closure — only if retain_siblings=True
@@ -478,6 +479,12 @@ class RegionDetector:
             retain_siblings: If True (default), add siblings to ensure complete
                            binary tree (needed for ANT routing, AToE-Leaves tiling).
                            If False, keep only ancestors (AToE additive composition).
+            epsilon_node_acceptance: Relative tie tolerance at the M cutoff.
+                           Nodes ranked below M whose metric is within
+                           epsilon*|metric of the M-th node| are also accepted,
+                           so near-equal candidates (e.g. mirror regions of a
+                           symmetric solution) are not split by the budget
+                           boundary. 0 disables (exact top-M).
             **kwargs: ignored (backward compat)
 
         Returns:
@@ -561,11 +568,29 @@ class RegionDetector:
         M_actual = min(M, len(nodes_with_metrics))
         top_M_nodes = {nid for nid, _ in nodes_with_metrics[:M_actual]}
 
+        # Tie tolerance at the cutoff: nodes just below rank M whose metric is
+        # within epsilon (relative) of the M-th node are near-indistinguishable
+        # from it, so accept them too instead of letting the budget boundary
+        # break e.g. mirror-symmetric region pairs.
+        n_ties = 0
+        if epsilon_node_acceptance > 0 and 0 < M_actual < len(nodes_with_metrics):
+            cutoff_val = nodes_with_metrics[M_actual - 1][1]
+            tol = epsilon_node_acceptance * abs(cutoff_val)
+            for nid, val in nodes_with_metrics[M_actual:]:
+                gap = (cutoff_val - val) if reverse_sort else (val - cutoff_val)
+                if gap > tol:
+                    break
+                top_M_nodes.add(nid)
+                n_ties += 1
+
         if verbose:
             if M_actual < M:
                 logger.info(f"  [M-term Tree] Requested M={M}, but only {M_actual} nodes with valid metrics")
             else:
                 logger.info(f"  [M-term Tree] Selected top M={M_actual} nodes by {variable_for_node_accept}")
+            if n_ties:
+                logger.info(f"  [M-term Tree] Tie tolerance eps={epsilon_node_acceptance}: "
+                            f"accepted {n_ties} additional near-tied node(s)")
 
         # Build closure: add ancestors (always) and siblings (conditional)
         accepted = set(top_M_nodes)

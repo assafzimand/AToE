@@ -325,9 +325,40 @@ def _build_tree_once(ctx: TrainingContext, retain_siblings: bool) -> Dict:
     variable_for_node_accept = ctx.variable_for_node_accept
     M = adaptive_cfg['M_experts_num']
 
+    # ── Tree-fitting sample: symmetric regular grid over the domain ──
+    # Random eval points put sklearn's split candidates (sample midpoints) at
+    # asymmetric, draw-dependent locations. A regular grid keeps candidate
+    # splits symmetric under the domain's reflections and makes the tree
+    # independent of the eval draw; eval_data stays metric-only.
+    problem_cfg = ctx.problem_cfg or {}
+    tmpl = eval_data['x']
+    if problem_cfg.get('spatial_dim') == 1:
+        grid_res = 200  # 200x200 = 40k points, one cheap forward pass
+        x_min, x_max = problem_cfg['spatial_domain'][0]
+        t_min, t_max = problem_cfg['temporal_domain']
+        gx = torch.linspace(x_min, x_max, grid_res,
+                            device=tmpl.device, dtype=tmpl.dtype)
+        gt = torch.linspace(t_min, t_max, grid_res,
+                            device=tmpl.device, dtype=tmpl.dtype)
+        XX, TT = torch.meshgrid(gx, gt, indexing='ij')
+        eval_inputs = torch.stack([XX.reshape(-1), TT.reshape(-1)], dim=1)
+        logger.info(f"  [Tree] Fitting on symmetric {grid_res}x{grid_res} grid "
+                    f"(eval_data used for metrics only)")
+    else:
+        eval_inputs = torch.cat([eval_data['x'], eval_data['t']], dim=1)
+
+    # Keep points-per-leaf comparable to what tree_min_samples_leaf was tuned
+    # for on the eval sample size.
+    n_fit = eval_inputs.shape[0]
+    n_eval = eval_data['x'].shape[0]
+    base_msl = region_detector.min_samples_leaf
+    msl_eff = max(base_msl, int(round(base_msl * n_fit / max(n_eval, 1))))
+    if msl_eff != base_msl:
+        logger.info(f"  [Tree] min_samples_leaf scaled {base_msl} -> {msl_eff} "
+                    f"for {n_fit} grid points")
+
     model.eval()
     with torch.no_grad():
-        eval_inputs = torch.cat([eval_data['x'], eval_data['t']], dim=1)
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         u_pred = model(eval_inputs)
@@ -340,13 +371,20 @@ def _build_tree_once(ctx: TrainingContext, retain_siblings: bool) -> Dict:
                     else "ancestors+siblings")
     logger.info(f"\n[Tree] Computing M-term tree (retain_siblings={retain_siblings}) — "
           f"closure: {closure_desc}")
+    epsilon_node_acceptance = adaptive_cfg.get('epsilon_node_acceptance', 0.0)
     logger.info(f"  [M-term Tree] Fitting full tree (max_depth={region_detector.max_depth}, "
-          f"min_samples_leaf={region_detector.min_samples_leaf}), selecting top M={M}...")
-    accepted_nodes, prune_depth_stats = region_detector.fit_full_tree_and_prune(
-        X=X_eval, y=y_eval, M=M,
-        variable_for_node_accept=variable_for_node_accept,
-        verbose=True, retain_siblings=retain_siblings,
-    )
+          f"min_samples_leaf={msl_eff}), selecting top M={M} "
+          f"(eps={epsilon_node_acceptance})...")
+    region_detector.min_samples_leaf = msl_eff
+    try:
+        accepted_nodes, prune_depth_stats = region_detector.fit_full_tree_and_prune(
+            X=X_eval, y=y_eval, M=M,
+            variable_for_node_accept=variable_for_node_accept,
+            verbose=True, retain_siblings=retain_siblings,
+            epsilon_node_acceptance=epsilon_node_acceptance,
+        )
+    finally:
+        region_detector.min_samples_leaf = base_msl
 
     tree = region_detector.rf.estimators_[0].tree_
     children_left = tree.children_left

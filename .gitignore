@@ -17,3 +17,5 @@ __pycache__/
 *.png
 .Python
 *.pt.legacy
+perfect_tree_examples/*
+!perfect_tree_examples/create_prefect_trees.py
