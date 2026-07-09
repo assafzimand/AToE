@@ -153,6 +153,24 @@ def build_subdomain_static(
     if len(new_expert_indices) == 0:
         return _empty(spatial_dim, output_dim, device)
 
+    # Time-marching windows >= 1: the "true IC" faces at this window's
+    # t_start must carry the PREVIOUS window's converged prediction, not the
+    # analytic t=0 IC (mirrors _override_ic_for_time_marching on the plain
+    # dataset). Window 0 (and non-TM runs) keep the analytic IC.
+    tm_window = cfg.get('_time_marching_window', {})
+    ic_model = None
+    if tm_window.get('enabled', False) and tm_window.get('idx', 0) > 0:
+        ic_model = tm_window.get('prev_model')
+        if ic_model is not None:
+            ic_model.eval()
+            logger.info(f"[SplitData] Window {tm_window['idx']}: true-IC "
+                        f"faces minted from previous window's model at "
+                        f"t={t_min_global:.4f}")
+        else:
+            logger.warning(f"[SplitData] Window {tm_window['idx']}: no "
+                           f"prev_model available — IC faces fall back to "
+                           f"the analytic t=0 IC (wrong for windows >= 1).")
+
     # Shared t-values per dimension (full global range); each expert filters
     # to its own temporal range so periodic pairing lines up across experts.
     bc_t_global = {}
@@ -171,7 +189,7 @@ def build_subdomain_static(
             eidx, region, spatial_dim, spatial_domain,
             t_min_global, n_ic_per_face, output_dim,
             problem, pc, device, xs, ts, gs, eids, ks,
-            bc_fids,
+            bc_fids, ic_model=ic_model,
         )
         _add_bc_faces_periodic(
             eidx, region, spatial_dim, spatial_domain,
@@ -340,8 +358,14 @@ def _add_ic_face(
     eidx, region, spatial_dim, spatial_domain,
     t_min_global, n_pts, output_dim, problem, pc,
     device, xs, ts, gs, eids, ks, bc_fids,
+    ic_model=None,
 ):
-    """Add IC face points (t = region lower-t boundary)."""
+    """Add IC face points (t = region lower-t boundary).
+
+    ``ic_model``: when set (time-marching windows >= 1), true-IC targets at
+    the window's t_start come from this frozen model (the previous window)
+    instead of the analytic t=0 IC.
+    """
     bl, bu = region.bounds_lower, region.bounds_upper
     t_face = bl[spatial_dim]
     is_true = abs(t_face - t_min_global) < 1e-8
@@ -354,7 +378,11 @@ def _add_ic_face(
     t_ic = torch.full((n_pts, 1), t_face, device=device)
 
     if is_true:
-        h_gt = _analytic_ic(problem, x_ic, pc)
+        if ic_model is not None:
+            with torch.no_grad():
+                h_gt = ic_model(torch.cat([x_ic, t_ic], dim=1))
+        else:
+            h_gt = _analytic_ic(problem, x_ic, pc)
         kind_val = KIND_IC_TRUE
     else:
         # Interface target: placeholder 0; minted from the frozen root later

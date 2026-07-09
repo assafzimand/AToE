@@ -31,18 +31,21 @@ class TimeWindow:
     t_start: float    # start of window
     t_end: float      # end of window
     is_first: bool    # True for window 0
-    M: int            # experts allocated to this window
+    M: int            # M-term budget allocated to this window (top-M tree
+                      # nodes; the spawned expert count is the leaf count of
+                      # the closed tree and generally differs from M)
 
 
 def compute_m_per_window(global_M: int, num_windows: int, distribution: str) -> List[int]:
     """
-    Distribute global_M experts across windows based on distribution strategy.
-    
+    Distribute the global M-term budget across windows.
+
     Args:
-        global_M: Total number of experts to distribute
+        global_M: Total M-term budget (top-M tree nodes) to distribute —
+            not the number of experts, which is each window's leaf count.
         num_windows: Number of time windows
         distribution: 'equal' | 'linear' | 'quadratic'
-    
+
     Returns:
         List of M values for each window, summing to global_M
     
@@ -134,7 +137,7 @@ def narrow_config_for_window(cfg: Dict, window: TimeWindow, prev_model: nn.Modul
     - Dataset generation uses temporal_domain → generates points in [t_start, t_end]
     - Tree spawning uses domain_bounds from data → automatically matches window
     - Resampling uses temporal_domain → stays within window
-    - M_experts_num is set per-window for variable expert allocation
+    - M_experts_num (the M-term budget) is set per-window
     
     Args:
         cfg: Full configuration dictionary
@@ -245,47 +248,26 @@ def _compute_full_domain_rel_l2(
     combined_model: nn.Module,
     config: Dict,
     device: torch.device,
-    n_x: int = 256,
-    n_t: int = 200,
 ) -> float:
-    """Compute rel-L2 of the combined model over the full temporal domain.
+    """Rel-L2 of the combined model on the solver's NATIVE full-domain grid.
 
-    Uses a dense regular grid so the metric is independent of the training
-    dataset composition (per-window splits, IC overrides, etc.).
+    Same interpolation-free metric as every other reported rel-L2 (per-window
+    evals, finalize, comparison reports): the reference solution's own grid
+    nodes, all output components. ``config`` is the original un-narrowed
+    config, so the metric spans the full temporal domain.
     """
-    import importlib
+    from trainer.utils import compute_native_grid_metrics
 
-    problem = config['problem']
-    pc = config[problem]
-    x_min, x_max = pc['spatial_domain'][0]
-    t_min, t_max = pc['temporal_domain']
-
-    x_vals = np.linspace(x_min, x_max, n_x)
-    t_vals = np.linspace(t_min, t_max, n_t)
-    X, T = np.meshgrid(x_vals, t_vals)
-    x_flat = X.flatten()
-    t_flat = T.flatten()
-
-    # Ground truth from solver (full-domain solve, cached)
-    solver_mod = importlib.import_module(f'solvers.{problem}_solver')
-    interp = solver_mod._get_interpolator(config)
-    gt = np.asarray(interp(x_flat, t_flat), dtype=np.float64)
-
-    # Model predictions — chunk to avoid OOM on large grids
-    precision = config.get('precision', 'float32')
-    dtype = torch.float64 if precision == 'float64' else torch.float32
-    combined_model.eval()
-    xt = torch.tensor(np.column_stack([x_flat, t_flat]), dtype=dtype, device=device)
-    chunk = 8192
-    preds = []
-    with torch.no_grad():
-        for i in range(0, len(xt), chunk):
-            preds.append(combined_model(xt[i:i + chunk])[:, 0])
-    pred = torch.cat(preds).cpu().numpy().astype(np.float64)
-
-    diff = pred - gt
-    rel_l2 = float(np.sqrt((diff ** 2).sum()) / (np.sqrt((gt ** 2).sum()) + 1e-10))
-    return rel_l2
+    combined_model = combined_model.to(device)
+    metrics = compute_native_grid_metrics(combined_model, config, device)
+    if metrics is None:
+        raise RuntimeError(
+            f"Solver native grid unavailable for '{config['problem']}'")
+    logger.info(f"  Full-domain native grid: "
+                f"{metrics['grid_shape'][0]}x{metrics['grid_shape'][1]} "
+                f"({metrics['n_points']:,} points), "
+                f"inf-norm = {metrics['inf_norm']:.6e}")
+    return metrics['rel_l2']
 
 
 def _plot_combined_loss_curves(
@@ -437,6 +419,42 @@ def _plot_combined_heatmap(
         logger.info(f"    Warning: Could not create combined heatmap: {e}")
 
 
+def _ensure_full_domain_dataset(config: Dict) -> None:
+    """Make sure datasets/<problem>/training_data.pt spans the FULL domain.
+
+    Each window filters its own [t_start, t_end) slice from this one file in
+    _setup_training, so it must be generated from the ORIGINAL (un-narrowed)
+    config. Generating it lazily inside a window would narrow it to that
+    window and starve every later window (the file is only written when
+    missing). A stale file that doesn't span the domain (e.g. left over from
+    an old windowed run) is regenerated.
+    """
+    from utils.dataset_gen import generate_and_save_datasets
+
+    problem = config['problem']
+    t_min, t_max = config[problem]['temporal_domain']
+    train_path = Path("datasets") / problem / "training_data.pt"
+
+    if train_path.exists():
+        span_ok = False
+        try:
+            data = torch.load(train_path, map_location='cpu')
+            t = data['t']
+            margin = 0.05 * (t_max - t_min)
+            span_ok = (float(t.min()) <= t_min + margin
+                       and float(t.max()) >= t_max - margin)
+        except Exception as e:
+            logger.warning(f"  [Dataset] Could not inspect {train_path}: {e}")
+        if not span_ok:
+            logger.warning(
+                f"  [Dataset] {train_path} does not span the full temporal "
+                f"domain [{t_min}, {t_max}] — regenerating from the original "
+                f"config (stale window-narrowed file?).")
+            train_path.unlink()
+
+    generate_and_save_datasets(config)  # no-op when a valid file exists
+
+
 def train_with_time_marching(
     model_class,
     architecture: List[int],
@@ -473,14 +491,17 @@ def train_with_time_marching(
         Tuple of (combined_model, best_checkpoint_path)
     """
     from trainer.trainer import train
-    from utils.dataset_gen import generate_and_save_datasets
     from models.time_marching_model import TimeMarchingModel
     
     problem = config['problem']
     tm_cfg = config[problem]['time_marching']
     global_M = config['adaptive_pinn']['M_experts_num']
-    
-    # Compute time windows with M allocation
+
+    # Full-domain training dataset, generated ONCE from the original config;
+    # each window filters its own time slice in _setup_training.
+    _ensure_full_domain_dataset(config)
+
+    # Compute time windows with the M-term budget allocation
     windows = compute_time_windows(
         config[problem]['temporal_domain'],
         tm_cfg['num_windows'],
@@ -511,15 +532,13 @@ def train_with_time_marching(
         window_cfg = narrow_config_for_window(config, window, prev_model=prev_model)
         window_run_dir = run_dir / f"window_{window.idx}"
         window_run_dir.mkdir(parents=True, exist_ok=True)
-        
-        # 2. Generate datasets with narrowed domain
-        logger.info(f"\n  Generating datasets for window {window.idx}...")
-        generate_and_save_datasets(window_cfg)
-        
-        # NOTE: IC override for windows 1+ is now handled in-memory by trainer.py
-        # (_override_ic_for_time_marching) which runs before filtering and after each resample.
-        # This avoids corrupting the disk dataset if a previous window diverged with NaN.
-        
+
+        # 2. Dataset: the FULL-domain file generated before the loop is
+        # shared by all windows; _setup_training filters this window's time
+        # slice from it. IC override for windows 1+ is handled in-memory by
+        # _override_ic_for_time_marching (runs before filtering and after
+        # each resample), so the disk dataset is never mutated.
+
         # 3. Create fresh model for this window
         logger.info(f"\n  Creating model for window {window.idx}...")
         window_model = model_class(architecture, activation, window_cfg, window_cfg['adaptive_pinn'])
@@ -558,7 +577,9 @@ def train_with_time_marching(
             },
             'model_state_dict': window_model.state_dict(),
             'is_adaptive': True,
-            'adaptive_state': window_model.get_state_dict_extended() if hasattr(window_model, 'get_state_dict_extended') else None,
+            'adaptive_state': (window_model.state_dict_extended()
+                               if hasattr(window_model, 'state_dict_extended')
+                               else None),
         }
         window_checkpoint_path = window_run_dir / f"window_{window.idx}_final.pt"
         torch.save(window_checkpoint, window_checkpoint_path)

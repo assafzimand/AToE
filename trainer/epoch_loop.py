@@ -791,6 +791,17 @@ def _train_segment(
             metrics['epochs'].append(epoch)
             metrics['rel_l2'].append(rel_l2)
             metrics['inf_norm'].append(inf_norm)
+            # Blending regime this eval was computed under: 'hard' during
+            # split segments, the configured mode otherwise, 'base_only'
+            # before any experts exist. The rel_l2 curve intentionally mixes
+            # regimes across segments — this flag says which is which.
+            if hasattr(model, 'blending_mode'):
+                _blend = ('base_only'
+                          if -1 in getattr(model, 'leaf_indices', set())
+                          else model.blending_mode)
+            else:
+                _blend = None
+            metrics.setdefault('eval_blending_mode', []).append(_blend)
 
             # ── Term-wise loss components (from the same eval pass) ──
             metrics['loss_components']['epochs'].append(epoch)
@@ -1233,7 +1244,7 @@ def _save_segment_pred_plot(ctx: TrainingContext, segment_name: str) -> None:
         save_spawn_prediction_plot(
             model=ctx.model,
             domain_bounds=ctx.domain_bounds,
-            gt_grid=gt_grid,
+            gt_grid=ctx.gt_grid,
             grid_x=ctx.gt_x,
             grid_t=ctx.gt_t,
             # {relL2} placeholder is filled in by the renderer

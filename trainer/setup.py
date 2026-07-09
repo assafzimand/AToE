@@ -1015,7 +1015,8 @@ def _setup_training(
         logger.info(f"  Max experts: {max_experts}")
         logger.info(f"  Tree max depth: {tree_max_depth}")
         logger.info(f"  Tree min samples leaf: {tree_min_samples_leaf}")
-        logger.info(f"  M experts num: {adaptive_cfg['M_experts_num']}")
+        logger.info(f"  M-term budget (top-M tree nodes, NOT the expert "
+                    f"count): {adaptive_cfg['M_experts_num']}")
         logger.info(f"  Blending mode: {adaptive_cfg['blending_mode']}")
         logger.info(f"  Model type: {type(model).__name__}")
         enable_timing_cfg = adaptive_cfg['enable_timing']

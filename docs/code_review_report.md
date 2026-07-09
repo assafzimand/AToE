@@ -52,6 +52,8 @@ Scope: the "cleanest run" configuration (no causal / LRA / FF / RWF / adaptive-s
 
 ## C — Potential bugs / metric issues / paper–pipeline mismatches
 
+> **Status (2026-07-09):** C1–C9 addressed (C1: pairing extended to all periodic problems; C3: KdV only — TM is only used for KdV/KS; C8: log/docstring phrasing separates the M-term budget from expert counts; C9: `eval_blending_mode` flag added per eval epoch — the mixed-regime curve itself is intended). C10–C15 deliberately left open for now.
+
 ### Real bugs
 
 1. **Split expert training enforces the wrong BC on periodic problems.** `_add_bc_faces_periodic` marks global x-boundary faces `KIND_BC_TRUE` with `h_gt = 0` (`adaptive/subdomain_data.py:441`), and `_compute_expert_loss` applies Dirichlet matching for every problem except Allen–Cahn (`losses/split_loss.py:291`). KdV, KS, Schrödinger are periodic (their global losses pair left/right + h_x), so during Phase 3 boundary experts are pulled to u=0 at x-boundaries — wrong physics that fine-tune must undo. Fix: extend the cross-expert pairing path to all periodic problems (it's keyed on `is_allen_cahn` only), or mint boundary targets from the frozen root like the interfaces.

@@ -134,14 +134,27 @@ def _get_solution_cached(config: Dict) -> Tuple[np.ndarray, np.ndarray, np.ndarr
     global _cached_solution, _cached_config_hash
     problem = config.get('problem', 'kdv')
     pc = config[problem]
+
+    # Time marching narrows the config's temporal_domain per window, but the
+    # numerical solution must always start from t=0 with the true IC (this
+    # solver hardcodes u0 = cos(pi*x) at its t_min). Solve the ORIGINAL full
+    # domain once and let callers slice their window's time range from it —
+    # otherwise windows >= 1 would be scored against a solution restarted
+    # from the t=0 IC at t_start. (Same handling as ks_solver.)
+    tm_window = config.get('_time_marching_window', {})
+    original_td = tm_window.get('original_temporal_domain')
+    if original_td is not None:
+        t_min, t_max = original_td
+    else:
+        t_min, t_max = pc['temporal_domain']
+
     config_tuple = (
         tuple(pc['spatial_domain'][0]),
-        tuple(pc['temporal_domain']),
+        (t_min, t_max),
         pc['mu'],
     )
     if _cached_solution is None or _cached_config_hash != config_tuple:
         x_min, x_max = pc['spatial_domain'][0]
-        t_min, t_max = pc['temporal_domain']
         mu = pc['mu']
         nx, nt = 512, 500
 
