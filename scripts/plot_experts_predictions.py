@@ -9,7 +9,8 @@ Produces per batch:
   - composed_predictions_summary.png
   - base_predictions_summary.png
 
-Checkpoint priority: final_model.pt (last epoch) → best_model.pt (lowest eval loss)
+Checkpoint priority: last segment's best_model_<segment>.pt (reconciled best);
+legacy runs fall back to final_model.pt / best_model.pt.
 
 Ground truth source (1D spatial):
   - Uses solver interpolator (high accuracy, full spectral solution)
@@ -145,6 +146,15 @@ def _load_checkpoint(model, ckpt_path, is_adaptive):
     return checkpoint.get('epoch', '?')
 
 
+# The run's result checkpoint: the LAST pipeline segment's reconciled best
+# (best == end-of-segment by construction). Older runs fall back to
+# final_model.pt / best_model.pt.
+_CKPT_PRIORITY = [
+    'best_model_fine_tune.pt', 'best_model_phase3.pt', 'best_model_root.pt',
+    'best_model_main.pt', 'final_model.pt', 'best_model.pt',
+]
+
+
 def _find_checkpoint(ts_dir, cfg):
     ckpt_dir = ts_dir / 'checkpoints'
 
@@ -154,8 +164,7 @@ def _find_checkpoint(ts_dir, cfg):
         if spawn_ckpt.exists():
             return spawn_ckpt
 
-    # Priority: final_model.pt first (last epoch), then best_model.pt (lowest eval loss)
-    for name in ['final_model.pt', 'best_model.pt']:
+    for name in _CKPT_PRIORITY:
         candidate = ckpt_dir / name
         if candidate.exists():
             return candidate
@@ -166,7 +175,7 @@ def _find_checkpoint(ts_dir, cfg):
     act = cfg.get('activation', 'tanh')
     arch_str = f"{problem}-{'-'.join(map(str, arch))}-{act}"
     legacy_dir = ts_dir.parent / 'checkpoints' / arch_str
-    for name in ['final_model.pt', 'best_model.pt']:
+    for name in _CKPT_PRIORITY:
         candidate = legacy_dir / name
         if candidate.exists():
             return candidate

@@ -44,52 +44,82 @@ def _pin_float32_precision() -> None:
         torch.backends.cudnn.allow_tf32 = False
 
 
-def _eval_checkpoint_rel_l2(result_path: Path, helpers) -> Dict:
-    """Reload the run's checkpoint and recompute rel-L2 on the solver's
-    native grid.
+_SEGMENT_ORDER = {'root': 0, 'phase3': 2, 'fine_tune': 3, 'main': 4}
 
-    This is the number to trust when reproducing results: metrics.json
+
+def _segment_sort_key(seg: str):
+    """Canonical pipeline order: root -> level_* -> phase3 -> fine_tune."""
+    if seg.startswith('level'):
+        return (1, seg)
+    return (_SEGMENT_ORDER.get(seg, 5), seg)
+
+
+def _segment_checkpoints(ckpt_dir: Path) -> Dict:
+    """Map segment name -> its best checkpoint, in pipeline order.
+
+    New runs store one checkpoint per segment (``best_model_<segment>.pt``,
+    reconciled so best == end-of-segment). Old runs fall back to their
+    ``checkpoint_after_<segment>.pt`` files.
+    """
+    seg_ckpts = {}
+    for p in sorted(ckpt_dir.glob('checkpoint_after_*.pt')):
+        seg_ckpts[p.stem.replace('checkpoint_after_', '')] = p
+    for p in sorted(ckpt_dir.glob('best_model_*.pt')):
+        seg_ckpts[p.stem.replace('best_model_', '')] = p  # new format wins
+    return dict(sorted(seg_ckpts.items(),
+                       key=lambda kv: _segment_sort_key(kv[0])))
+
+
+def _eval_segment_rel_l2s(result_path: Path, helpers) -> Dict:
+    """Reload every segment's best checkpoint and recompute its rel-L2 on
+    the solver's native grid.
+
+    These are the numbers to trust when reproducing results: metrics.json
     stores training-time values, which carry the training environment's
-    numerics (e.g. TF32 on Ampere GPUs). Returns
-    {'rel_l2', 'inf_norm', 'ckpt', 'epoch'} or None on failure.
+    numerics (e.g. TF32 on Ampere GPUs). phase3 checkpoints are scored with
+    HARD indicators, matching how that segment trains and evaluates.
+
+    Returns {segment: {'rel_l2', 'epoch', 'ckpt'}} (possibly empty).
     """
     import torch
     import yaml
 
     cfg_path = result_path / 'config_used.yaml'
-    if not cfg_path.exists():
-        return None
+    ckpt_dir = result_path / 'checkpoints'
+    if not cfg_path.exists() or not ckpt_dir.exists():
+        return {}
     with open(cfg_path) as f:
         cfg = yaml.safe_load(f)
     if cfg.get(cfg.get('problem', ''), {}).get('spatial_dim', 1) != 1:
-        return None  # native-grid metric only exists for 1D problems
+        return {}  # native-grid metric only exists for 1D problems
 
-    ckpt_path = helpers._find_checkpoint(result_path, cfg)
-    if ckpt_path is None:
-        print(f"  [CkptEval] no checkpoint found in {result_path.name}")
-        return None
+    from trainer.utils import compute_native_grid_metrics
+    is_adaptive = cfg.get('adaptive_pinn', {}).get('enabled', False)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    try:
-        from trainer.utils import compute_native_grid_metrics
-        is_adaptive = cfg.get('adaptive_pinn', {}).get('enabled', False)
-        model = helpers._build_model(cfg)
-        epoch = helpers._load_checkpoint(model, ckpt_path, is_adaptive)
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        model = model.to(device).eval()
-        metrics = compute_native_grid_metrics(model, cfg, device)
-        if metrics is None:
-            return None
-        return {'rel_l2': metrics['rel_l2'], 'inf_norm': metrics['inf_norm'],
-                'ckpt': ckpt_path.name, 'epoch': epoch}
-    except Exception as _eval_err:
-        print(f"  [CkptEval] {result_path.name}: failed — {_eval_err}")
-        return None
+    out = {}
+    for segment, ckpt_path in _segment_checkpoints(ckpt_dir).items():
+        try:
+            model = helpers._build_model(cfg)
+            epoch = helpers._load_checkpoint(model, ckpt_path, is_adaptive)
+            model = model.to(device).eval()
+            if segment.startswith('phase3') and hasattr(model, 'blending_mode'):
+                model.blending_mode = 'hard'
+            metrics = compute_native_grid_metrics(model, cfg, device)
+            if metrics is not None:
+                out[segment] = {'rel_l2': metrics['rel_l2'],
+                                'epoch': epoch, 'ckpt': ckpt_path.name}
+        except Exception as _eval_err:
+            print(f"  [CkptEval] {result_path.name} [{segment}]: "
+                  f"failed — {_eval_err}")
+    return out
 
 
 def _regen_segment_plots(result_path: Path, helpers) -> None:
-    """Re-render pred_after_<segment>.png in adaptive_plots/ from the
-    checkpoint_after_<segment>.pt checkpoints (root, phase3, fine_tune, ...),
-    replacing the in-training plots with the unified native-grid renderer."""
+    """Re-render pred_after_<segment>.png in adaptive_plots/ from each
+    segment's best checkpoint (best_model_<segment>.pt; legacy runs:
+    checkpoint_after_<segment>.pt), replacing the in-training plots with the
+    unified native-grid renderer."""
     import yaml
 
     cfg_path = result_path / 'config_used.yaml'
@@ -104,8 +134,7 @@ def _regen_segment_plots(result_path: Path, helpers) -> None:
 
     from utils.problem_specific.generic_viz import plot_predictions_and_error_maps
 
-    for ckpt_path in sorted(ckpt_dir.glob('checkpoint_after_*.pt')):
-        segment = ckpt_path.stem.replace('checkpoint_after_', '')
+    for segment, ckpt_path in _segment_checkpoints(ckpt_dir).items():
         try:
             model = helpers._build_model(cfg)
             epoch = helpers._load_checkpoint(model, ckpt_path, is_adaptive)
@@ -309,10 +338,15 @@ def _generate_training_results_plot(parent_dir, df,
     info_cols = [
         'PDE', 'Model', 'Capacity', 'Optimizer',
         'LR / Sched', 'Spawning']
-    result_cols = [
-        'Train\nLoss',
-        'Rel-L2\n(grid)', 'Inf\n(grid)', 'Dense\nRel-L2',
-        'Ckpt\nRel-L2']
+    # Per-segment best-checkpoint columns (best_<segment>_rel_l2), in
+    # pipeline order — shows which stage produced which accuracy.
+    seg_keys = sorted(
+        [c for c in df.columns
+         if c.startswith('best_') and c.endswith('_rel_l2')],
+        key=lambda c: _segment_sort_key(c[len('best_'):-len('_rel_l2')]))
+    result_keys = ['final_train_loss', 'final_rel_l2', 'final_inf_norm'] + seg_keys
+    result_cols = ['Train\nLoss', 'Rel-L2\n(final)', 'Inf\n(final)'] + [
+        f"Best\n{k[len('best_'):-len('_rel_l2')]}" for k in seg_keys]
     col_labels = ['Experiment'] + info_cols + result_cols
     n_info = len(info_cols)
     first_result_col = 1 + n_info
@@ -341,12 +375,7 @@ def _generate_training_results_plot(parent_dir, df,
             info.get('optimizer', '-'),
             info.get('lr_sched', '-'),
             info.get('spawning', '-'),
-            _fmt(row['final_train_loss']),
-            _fmt(row['final_rel_l2']),
-            _fmt(row['final_inf_norm']),
-            _fmt(row.get('final_dense_rel_l2')),
-            _fmt(row.get('final_ckpt_rel_l2')),
-        ]
+        ] + [_fmt(row.get(k)) for k in result_keys]
         table_data.append(row_data)
 
     n_rows = len(table_data)
@@ -373,10 +402,6 @@ def _generate_training_results_plot(parent_dir, df,
     cmap = LinearSegmentedColormap.from_list(
         'GreenRed', ['#2ecc71', '#f1c40f', '#e74c3c'])
 
-    result_keys = [
-        'final_train_loss',
-        'final_rel_l2', 'final_inf_norm',
-        'final_dense_rel_l2', 'final_ckpt_rel_l2']
     for ri, key in enumerate(result_keys):
         ci = first_result_col + ri
         if key not in df.columns:
@@ -504,34 +529,40 @@ def generate_comparison_for_batch(batch_dir: Path, label: str = None):
         def _last(lst):
             return lst[-1] if lst else float('nan')
 
+        # Headline rel-L2: the reconciled end-of-run value recomputed by
+        # finalize ('final_dense_rel_l2'); older runs fall back to the last
+        # training-curve point.
         dense_rel_l2 = train_metrics.get('final_dense_rel_l2', float('nan'))
         if dense_rel_l2 == dense_rel_l2:  # not nan
-            print(f"  {exp_name}: dense-grid rel-L2 = {dense_rel_l2:.6e}")
+            final_rel_l2 = dense_rel_l2
+        else:
+            final_rel_l2 = _last(train_metrics.get(
+                'rel_l2', train_metrics.get('eval_rel_l2', [])))
 
-        # Recompute rel-L2 from the checkpoint (authoritative for
-        # reproduction — training-time metrics carry the training
-        # environment's numerics, e.g. TF32 on Ampere GPUs).
-        ckpt_rel_l2 = float('nan')
+        # Recompute rel-L2 of EVERY segment's best checkpoint (authoritative
+        # for reproduction — training-time metrics carry the training
+        # environment's numerics, e.g. TF32 on Ampere GPUs). One column per
+        # segment shows which stage produced which accuracy.
+        seg_rel = {}
         if _ckpt_helpers is not None:
-            _ckpt_eval = _eval_checkpoint_rel_l2(result_path, _ckpt_helpers)
-            if _ckpt_eval is not None:
-                ckpt_rel_l2 = _ckpt_eval['rel_l2']
-                print(f"  {exp_name}: recomputed ckpt rel-L2 = "
-                      f"{ckpt_rel_l2:.6e} ({_ckpt_eval['ckpt']} "
-                      f"@ epoch {_ckpt_eval['epoch']})")
+            seg_rel = _eval_segment_rel_l2s(result_path, _ckpt_helpers)
+            for _seg, _info in seg_rel.items():
+                print(f"  {exp_name}: best[{_seg}] rel-L2 = "
+                      f"{_info['rel_l2']:.6e} ({_info['ckpt']} "
+                      f"@ epoch {_info['epoch']})")
 
-        metrics_data.append({
+        _row = {
             'experiment': exp_name,
             'final_train_loss': _last(train_metrics.get('train_loss', [])),
-            # 'rel_l2'/'inf_norm' are the solver-grid metrics; older runs
-            # stored them as 'eval_rel_l2'/'eval_inf_norm'.
-            'final_rel_l2': _last(train_metrics.get(
-                'rel_l2', train_metrics.get('eval_rel_l2', []))),
+            'final_rel_l2': final_rel_l2,
+            # 'inf_norm' is the solver-grid metric; older runs stored it
+            # as 'eval_inf_norm'.
             'final_inf_norm': _last(train_metrics.get(
                 'inf_norm', train_metrics.get('eval_inf_norm', []))),
-            'final_dense_rel_l2': dense_rel_l2,
-            'final_ckpt_rel_l2': ckpt_rel_l2,
-        })
+        }
+        for _seg, _info in seg_rel.items():
+            _row[f'best_{_seg}_rel_l2'] = _info['rel_l2']
+        metrics_data.append(_row)
 
     if not metrics_data:
         print(f"  No valid results to compare for batch {batch_dir.name}")

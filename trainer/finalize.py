@@ -107,15 +107,11 @@ def _finalize_training(ctx: TrainingContext) -> Path:
         logger.info("[NaN] Skipping remaining post-training cleanup — moving to next experiment.")
         return
 
-    # Save final model
-    final_checkpoint_path = checkpoint_dir / "final_model.pt"
-    _save_checkpoint(final_checkpoint_path, model, optimizer, current_optimizer_name, total_epochs,
-                    train_loss, rel_l2, cfg, metrics)
-
+    # No separate final checkpoint: segment-end reconciliation guarantees the
+    # in-memory model == best_model_<last_segment>.pt (the run's result).
     logger.info(f"\nTraining completed in {time.time() - start_time:.1f}s")
-    logger.info(f"  Best rel-L2 (solver grid): {best_rel_l2:.6e}")
+    logger.info(f"  Best rel-L2 (solver grid, last segment): {best_rel_l2:.6e}")
     logger.info(f"  Best checkpoint: {best_checkpoint_path}")
-    logger.info(f"  Final checkpoint: {final_checkpoint_path}")
 
     # ── Headline metric: rel-L2 on the solver's dense solution grid ──
     dense_rel_l2 = None
@@ -282,9 +278,12 @@ def _finalize_training(ctx: TrainingContext) -> Path:
         f.write(f"Final train loss: {train_loss:.6e}\n")
         f.write(f"Final rel-L2 (solver grid): {dense_rel_l2:.6e}\n" if dense_rel_l2 is not None else "Final rel-L2 (solver grid): N/A\n")
         f.write(f"Final inf-norm (solver grid): {inf_norm:.6e}\n" if inf_norm is not None else "Final inf-norm (solver grid): N/A\n")
-        f.write(f"Best rel-L2 (solver grid): {best_rel_l2:.6e}\n\n")
-        f.write(f"Best checkpoint: {best_checkpoint_path}\n")
-        f.write(f"Final checkpoint: {final_checkpoint_path}\n")
+        # Per-segment bests (each == its best_model_<segment>.pt)
+        for _ev in metrics.get('segment_reconcile_events', []):
+            _kept = _ev.get('best_rel_l2') if _ev.get('kept') == 'best' else _ev.get('final_rel_l2')
+            if _kept is not None:
+                f.write(f"Best rel-L2 [{_ev['segment']}]: {_kept:.6e}\n")
+        f.write(f"\nBest checkpoint: {best_checkpoint_path}\n")
     logger.info(f"  Summary saved to {summary_path}")
 
     # Save config used

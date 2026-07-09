@@ -76,6 +76,9 @@ class TrainingContext:
     # ── Metrics / best-model tracking ───────────────────────────────────────
     # All rel-L2 / inf-norm values are computed on the ground-truth solver's
     # NATIVE grid (the single reported metric — there is no eval dataset).
+    # Best tracking is PER SEGMENT (best_model_<segment>.pt, reconciled with
+    # the end-of-segment weights); these fields hold the LATEST segment's
+    # best, so after the last segment they are the run's result.
     metrics: Dict = field(default_factory=dict)
     best_rel_l2: float = float('inf')
     best_checkpoint_path: Any = None

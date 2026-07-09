@@ -83,8 +83,12 @@ def _train_segment(
     eval_every = ctx.eval_every
     save_every = ctx.save_every
     metrics = ctx.metrics
-    best_rel_l2 = ctx.best_rel_l2
-    best_checkpoint_path = ctx.best_checkpoint_path
+    # Best-model tracking is PER SEGMENT: reset at every segment start; the
+    # segment's best is reconciled against the end-of-segment weights below.
+    best_rel_l2 = float('inf')
+    _best_epoch = None
+    best_checkpoint_path = (ctx.checkpoint_dir / f"best_model_{segment_name}.pt"
+                            if ctx.checkpoint_dir is not None else None)
     patience_epochs = ctx.patience_epochs
     patience_rel_delta = ctx.patience_rel_delta
     lra_weights = ctx.lra_weights
@@ -967,13 +971,15 @@ def _train_segment(
                            train_loss, rel_l2, cfg, metrics)
             logger.info(f"  Checkpoint saved: {checkpoint_path}")
 
-        # Save best model on the solver-grid rel-L2 (checked at eval epochs)
-        if (should_evaluate and rel_l2 is not None
+        # Save the SEGMENT's best model on the solver-grid rel-L2 (checked at
+        # eval epochs). Reconciled against the end-of-segment weights below.
+        if (should_evaluate and best_checkpoint_path is not None
+                and rel_l2 is not None
                 and math.isfinite(rel_l2) and rel_l2 < best_rel_l2):
             best_rel_l2 = rel_l2
-            best_checkpoint_path = checkpoint_dir / "best_model.pt"
             _save_checkpoint(best_checkpoint_path, model, optimizer, current_optimizer_name, epoch,
                            train_loss, rel_l2, cfg, metrics)
+            _best_epoch = epoch
 
         # Patience-based early stopping on TRAIN loss, counted in epochs
         # (checked every epoch — train loss exists every epoch, unlike the
@@ -1021,6 +1027,19 @@ def _train_segment(
                     _stop_reason = 'early_stop'
                     break
 
+    # ── Reconcile the segment's best with the end-of-segment weights ──
+    # After this, the in-memory model == best_model_<segment>.pt == the
+    # segment's best; the next segment (tree build, interface snapshot,
+    # fine-tune) continues from it.
+    if _nan_detected:
+        _stop_reason = 'nan'
+    else:
+        rel_l2, inf_norm = _reconcile_segment_best(
+            model, optimizer, current_optimizer_name, segment_name, epoch,
+            train_loss, best_rel_l2, _best_epoch, best_checkpoint_path,
+            cfg, metrics, device)
+        best_rel_l2 = min(best_rel_l2, rel_l2) if math.isfinite(rel_l2) else best_rel_l2
+
     # ── Write reassigned segment state back to ctx ──
     # (objects mutated in place — model, metrics, timer — need no write-back.)
     ctx.epoch = epoch
@@ -1040,17 +1059,11 @@ def _train_segment(
     ctx.train_loader = train_loader
     ctx._nan_detected = _nan_detected
 
-    if _nan_detected:
-        _stop_reason = 'nan'
     if not _nan_detected:
         _save_segment_pred_plot(ctx, segment_name)
     _final_tl = train_loss if train_loss is not None else float('nan')
     _final_rl2 = rel_l2 if rel_l2 is not None else float('nan')
     _oom_stopped = getattr(ctx, 'oom_stopped', False)
-
-    # Save segment-end checkpoint
-    _save_segment_checkpoint(ctx, segment_name, epoch, optimizer, current_optimizer_name,
-                             train_loss, rel_l2, metrics, cfg)
 
     logger.info(f"[Segment:{segment_name}] done | ran {epoch - segment_start_epoch} "
           f"epochs (stop={_stop_reason}) | "
@@ -1071,26 +1084,84 @@ def _train_segment(
 # ======================================================================
 
 
-def _save_segment_checkpoint(ctx: TrainingContext, segment_name: str, epoch: int,
-                             optimizer, optimizer_name: str, train_loss: float,
-                             rel_l2: float, metrics: Dict, cfg: Dict) -> None:
-    """Save checkpoint at the end of a training segment.
-    
-    Creates a checkpoint file named `checkpoint_after_<segment>.pt` in the 
-    checkpoint directory. This captures the model state at each stage boundary
-    (root, level_1, level_2, ..., fine_tune, phase3) for debugging and recovery.
+def _reconcile_segment_best(model, optimizer, optimizer_name: str,
+                            segment_name: str, epoch: int, train_loss: float,
+                            best_rel_l2: float, best_epoch,
+                            best_checkpoint_path, cfg: Dict, metrics: Dict,
+                            device) -> tuple:
+    """End-of-segment reconciliation: keep the segment's best model.
+
+    Recomputes the in-memory (end-of-segment) rel-L2 fresh on the solver
+    grid (on early stop the last logged value can be up to eval_every-1
+    epochs stale), then:
+
+      * best checkpoint better  -> restore ``best_model_<segment>.pt`` into
+        the model, so the next segment continues from it;
+      * end-of-segment better   -> overwrite ``best_model_<segment>.pt``
+        with the in-memory weights.
+
+    Either way the invariant holds: in-memory model == the segment's best ==
+    ``best_model_<segment>.pt`` (there is no separate final checkpoint).
+    The comparison uses the model's CURRENT blending mode (hard indicators
+    during split segments), i.e. like-with-like within the segment.
+
+    Returns:
+        (rel_l2, inf_norm) of the reconciled model on the solver grid.
     """
-    checkpoint_dir = ctx.checkpoint_dir
-    if checkpoint_dir is None:
-        return
-    
-    try:
-        checkpoint_path = checkpoint_dir / f"checkpoint_after_{segment_name}.pt"
-        _save_checkpoint(checkpoint_path, ctx.model, optimizer, optimizer_name, epoch,
-                        train_loss, rel_l2, cfg, metrics)
-        logger.info(f"  [Segment:{segment_name}] saved checkpoint_after_{segment_name}.pt")
-    except Exception as e:
-        logger.info(f"  [Segment:{segment_name}] checkpoint save failed: {e}")
+    final_metrics = compute_native_grid_metrics(model, cfg, device)
+    final_rel = final_metrics['rel_l2'] if final_metrics else float('nan')
+
+    restore_best = (
+        best_checkpoint_path is not None
+        and Path(best_checkpoint_path).exists()
+        and math.isfinite(best_rel_l2)
+        and (not math.isfinite(final_rel) or best_rel_l2 < final_rel)
+    )
+
+    if restore_best:
+        try:
+            ckpt = torch.load(best_checkpoint_path, map_location=device,
+                              weights_only=False)
+            model.load_state_dict(ckpt['model_state_dict'])
+            if hasattr(model, 'batched_models'):
+                model.batched_models.sync_from_models(model.base_model, model.experts)
+            chosen_metrics = compute_native_grid_metrics(model, cfg, device)
+            logger.info(f"  [Segment:{segment_name}] restored best "
+                        f"(epoch {best_epoch}, rel_l2={best_rel_l2:.6e}) over "
+                        f"end-of-segment (rel_l2={final_rel:.6e})")
+            chosen = 'best'
+        except Exception as e:
+            logger.warning(f"  [Segment:{segment_name}] best-model restore "
+                           f"failed ({e}); keeping end-of-segment weights.")
+            chosen_metrics = final_metrics
+            chosen = 'final'
+    else:
+        chosen_metrics = final_metrics
+        chosen = 'final'
+        if best_checkpoint_path is not None:
+            try:
+                _save_checkpoint(best_checkpoint_path, model, optimizer,
+                                 optimizer_name, epoch, train_loss, final_rel,
+                                 cfg, metrics)
+                logger.info(f"  [Segment:{segment_name}] end-of-segment is the "
+                            f"segment best (rel_l2={final_rel:.6e}) — saved "
+                            f"{Path(best_checkpoint_path).name}")
+            except Exception as e:
+                logger.warning(f"  [Segment:{segment_name}] best-model save "
+                               f"failed: {e}")
+
+    metrics.setdefault('segment_reconcile_events', []).append({
+        'segment': segment_name,
+        'end_epoch': epoch,
+        'best_epoch': best_epoch,
+        'best_rel_l2': best_rel_l2 if math.isfinite(best_rel_l2) else None,
+        'final_rel_l2': final_rel if math.isfinite(final_rel) else None,
+        'kept': chosen,
+    })
+
+    if chosen_metrics is not None:
+        return chosen_metrics['rel_l2'], chosen_metrics['inf_norm']
+    return float('nan'), float('nan')
 
 
 def _save_segment_pred_plot(ctx: TrainingContext, segment_name: str) -> None:
