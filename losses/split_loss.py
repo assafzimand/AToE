@@ -1,39 +1,37 @@
-"""Per-expert split loss for PDD-style subdomain training.
+"""Per-expert split loss with u0-guided interfaces and composition IC/BC.
 
-Each leaf expert is trained on its OWN output (no PoU), with:
-  - PDE residual inside its subdomain
-  - Dirichlet matching to the frozen root on interior faces (interface)
-  - True IC/BC on faces coinciding with global domain bounds
-  - Neighbor-to-neighbor continuity on shared interior faces
+Each leaf expert is trained on its OWN output (no PoU inside the
+per-expert terms), with:
+  - PDE residual inside its inflated training box (region + collar)
+  - u0-guide matching on every outer face of that box (value on the
+    lower-t face; value + d/dx on x-faces for problems whose global BC
+    pairs u and u_x), scaled by the annealable interface weight
+  - Neighbor-to-neighbor continuity on shared interior faces (optional)
 
-For problems with periodic BCs (allen_cahn, kdv, ks, schrodinger — the
-same problems whose GLOBAL loss enforces periodicity), global boundary
-points are paired across experts (left/right at the same t), penalizing
-value and spatial-derivative mismatches per output component. Dirichlet
-problems (burgers1d) instead match the dataset boundary targets.
+The EXACT physics constraints are enforced once, on the blended PoU
+composition u_theta (the reported object): the global loss's IC and BC
+terms are evaluated on the plain training set's IC/BC rows through the
+composed model, at full, un-annealed weight.
 
-Total loss = SUM over experts of:
-    w_res*L_res + w_ic*L_ic + w_bc*L_bc + w_cont*L_cont
-where interface faces inherit the IC or BC weight by face type.
+Total loss:
+    L = sum_j [ w_res*L_res_j
+                + s(e)*( w_ic*L_iface_t_j
+                         + w_bc*(L_iface_x_j + L_iface_x_deriv_j) )
+                + w_cont*L_cont_j ]
+        + w_ic*L_IC(u_theta) + w_bc*L_BC(u_theta)
+with s(e) the linear interface anneal (interface_decrease_weight).
 """
 
-import logging
 import torch
 import importlib
 from typing import Dict, Callable
 from adaptive.subdomain_data import (
-    KIND_RESIDUAL, KIND_IC_TRUE, KIND_INTERFACE, KIND_INTERFACE_BC, KIND_BC_TRUE,
+    KIND_RESIDUAL, KIND_INTERFACE_T, KIND_INTERFACE_X,
     KIND_CONTINUITY, PERIODIC_PROBLEMS,
 )
 from utils.logging_config import get_logger
 
 logger = get_logger(__name__)
-
-# Single source of truth for the periodic-problem set lives in
-# adaptive.subdomain_data (the data builder mints the matching targets).
-# Periodic problems get cross-expert boundary pairing AND d/dx interface
-# matching against the root (D3); others use value-only Dirichlet matching.
-_PERIODIC_PROBLEMS = PERIODIC_PROBLEMS
 
 
 def build_split_loss(
@@ -41,15 +39,19 @@ def build_split_loss(
     cfg: Dict,
     *,
     orig_loss_fn: Callable = None,
+    ic_bc_batch: Dict = None,
 ) -> Callable:
     """Build a split loss for per-expert subdomain training.
 
     Returns a callable ``loss_fn(model, batch)`` compatible
     with ``_train_segment``.
 
-    If ``orig_loss_fn`` is provided, batches missing split-specific
-    keys (expert_id, kind) will fall back to the original loss
-    (used for eval batches).
+    ``orig_loss_fn`` serves two roles: fallback for eval batches missing
+    the split keys (expert_id, kind), and — via ``ic_bc_batch`` — the
+    source of the exact global IC/BC terms evaluated on the blended PoU
+    composition. ``ic_bc_batch`` is a plain-format batch holding ONLY the
+    training set's IC/BC rows (its residual mask is all-false, so the
+    global loss skips the residual term).
     """
     problem = cfg['problem']
     pc = cfg[problem]
@@ -59,16 +61,18 @@ def build_split_loss(
     w_bc = loss_weights['bc']
     w_cont = loss_weights.get('continuity', 1.0)
 
-    # Problems whose global loss enforces periodic BCs by pairing the two
-    # spatial boundaries (value + d/dx). Their split path must do the same
-    # cross-expert pairing — Dirichlet-matching the dataset's zero targets
-    # would enforce u=0 at the boundary, which is wrong physics for them.
-    is_periodic = problem in _PERIODIC_PROBLEMS
+    # Problems whose global BC pairs u AND u_x (periodic set): their x-face
+    # guides carry d/dx targets too, matched in the grad-enabled interface
+    # pass. Value-only-BC problems (burgers1d) match values only.
+    match_x_derivs = problem in PERIODIC_PROBLEMS
 
     pde_res_fn, deriv_fn = _import_pde_helpers(problem)
     pde_params = _get_pde_params(problem, pc)
 
     per_expert_history: Dict[int, Dict[str, list]] = {}
+    # Composition IC/BC history (recorded once per epoch like the per-
+    # expert history; read by the [SplitTerms] eval log).
+    global_history: Dict[str, list] = {'ic_comp': [], 'bc_comp': []}
     # Per-epoch residual cache: list of (x, t, r²) tuples (detached CPU tensors).
     # Populated when split_loss_fn._cache_residuals is True; drained by the trainer
     # to produce diagnostic heatmap plots (same as the non-split residual-cache path).
@@ -94,10 +98,9 @@ def build_split_loss(
         x = batch['x']
         t = batch['t']
         h_gt = batch['h_gt']
-        h_x_gt = batch.get('h_x_gt', None)  # D3 interface d/dx targets
+        h_x_gt = batch.get('h_x_gt', None)  # interface d/dx guide targets
         expert_ids = batch['expert_id']
         kinds = batch['kind']
-        bc_face_ids = batch.get('bc_face_id', None)
         cont_neighbors = batch.get('cont_neighbor', None)
         cont_dims = batch.get('cont_dim', None)
         device = x.device
@@ -136,7 +139,7 @@ def build_split_loss(
                 model, eidx,
                 x[emask], t[emask], h_gt[emask],
                 kinds[emask],
-                w_res, w_ic, w_bc, is_periodic,
+                w_res, w_ic, w_bc, match_x_derivs,
                 device,
                 residual_loss=residual_losses.get(eidx),
                 h_x_gt=h_x_gt[emask] if h_x_gt is not None else None,
@@ -148,20 +151,28 @@ def build_split_loss(
             if return_components:
                 all_comps[eidx] = comps
 
-        # ── Periodic BC: cross-expert pairing of the two spatial boundaries ──
-        if is_periodic and bc_face_ids is not None:
-            bc_loss_contrib = _compute_periodic_bc_loss(
-                model, x, t, expert_ids, kinds,
-                bc_face_ids, deriv_fn, device,
-            )
-            # .item() here would force a GPU sync on every loss call just
-            # for a debug log — only pay it when DEBUG logging is on.
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(
-                    f"[SplitLoss] Periodic BC contrib: "
-                    f"{bc_loss_contrib.item():.6e}"
-                )
-            total_loss = total_loss + w_bc * bc_loss_contrib
+        # ── Exact physics on the composition: global IC + BC on u_theta ──
+        # The global loss's own IC/BC terms (periodic pairing included),
+        # evaluated through the blended PoU composition on the plain
+        # training set's IC/BC rows, at FULL weight — the u0 face guides
+        # above are the annealable part, this is the ground truth.
+        if ic_bc_batch is not None and orig_loss_fn is not None:
+            comps_g = orig_loss_fn(model, ic_bc_batch,
+                                   return_components=True,
+                                   update_causal_state=False)
+            ic_comp = comps_g.get('ic', torch.tensor(0.0, device=device))
+            bc_comp = comps_g.get('bc', torch.tensor(0.0, device=device))
+            total_loss = total_loss + w_ic * ic_comp + w_bc * bc_comp
+            if record_now:
+                global_history['ic_comp'].append(
+                    float(ic_comp.detach()) if torch.is_tensor(ic_comp)
+                    else float(ic_comp))
+                global_history['bc_comp'].append(
+                    float(bc_comp.detach()) if torch.is_tensor(bc_comp)
+                    else float(bc_comp))
+            if return_components:
+                all_comps['composition'] = {'ic_comp': ic_comp,
+                                            'bc_comp': bc_comp}
 
         # ── Continuity loss: neighbor-to-neighbor on shared interior faces ──
         # Skipped entirely (not computed, not recorded/plotted) when its
@@ -172,7 +183,7 @@ def build_split_loss(
                 cont_neighbors, cont_dims, deriv_fn,
                 pde_params, device, problem,
             )
-            if logger.isEnabledFor(logging.DEBUG):
+            if logger.isEnabledFor(10):  # DEBUG
                 logger.debug(
                     f"[SplitLoss] Continuity contrib: "
                     f"{cont_loss.item():.6e}"
@@ -188,10 +199,11 @@ def build_split_loss(
         return total_loss
 
     split_loss_fn._per_expert_history = per_expert_history
+    split_loss_fn._global_history = global_history
     split_loss_fn._residual_cache = residual_cache
     split_loss_fn._cache_residuals = False  # trainer sets True when a plot is due
     split_loss_fn._record_next = True  # trainer re-arms once per epoch
-    # D7: interface-weight anneal — the trainer sets _interface_anneal_w
+    # Interface-weight anneal — the trainer sets _interface_anneal_w
     # from config and updates _interface_scale each epoch.
     split_loss_fn._interface_scale = 1.0
     split_loss_fn._interface_anneal_w = 0.0
@@ -269,49 +281,38 @@ def _compute_all_residual_losses(
 
 def _compute_expert_loss(
     model, expert_idx, x, t, h_gt, kinds,
-    w_res, w_ic, w_bc, is_periodic, device,
+    w_res, w_ic, w_bc, match_x_derivs, device,
     residual_loss=None,
     h_x_gt=None,
     interface_scale=1.0,
 ):
     """Per-expert local loss (no PoU). Residual is supplied precomputed.
 
-    Value-only face terms (IC / t-interfaces / Dirichlet BC) share ONE
-    stacked forward with per-kind means sliced from its output. For
-    periodic problems the x-interface rows instead get a grad-enabled pass
-    (D3): value MSE plus 'interface_bc_deriv' — d(u_j)/dx matched to the
-    root's d(u_0)/dx targets (``h_x_gt``), mimicking the u/u_x structure of
-    the global periodic BC.
+    Every face of the expert's training box is a u0 guide:
+      * ``interface_t`` — lower-t face, value matching, one plain forward;
+      * ``interface_x`` — x-faces, value matching, plus d(u_j)/dx matched
+        to the minted d(u_0)/dx targets (``interface_x_deriv``) when the
+        problem's global BC pairs u and u_x (``match_x_derivs``) — that
+        pass is grad-enabled; value-only problems keep it in the plain
+        forward.
 
-    ``interface_scale`` (D7) multiplies the interface terms only; true
-    IC/BC terms keep their full weight.
+    ``interface_scale`` multiplies ALL guide terms (the exact IC/BC live
+    on the composition, at full weight, outside this function).
     """
     z = torch.tensor(0.0, device=device)
     comps = {
         'residual': residual_loss if residual_loss is not None else z.clone(),
-        'ic': z.clone(),
-        'interface_ic': z.clone(),
-        'interface_bc': z.clone(),
-        'interface_bc_deriv': z.clone(),
-        'bc': z.clone(),
+        'interface_t': z.clone(),
+        'interface_x': z.clone(),
+        'interface_x_deriv': z.clone(),
     }
 
-    # x-interfaces of periodic problems need input gradients (deriv
-    # matching) — handled in a separate grad-enabled pass below.
-    deriv_interfaces = is_periodic and h_x_gt is not None
+    deriv_pass = match_x_derivs and h_x_gt is not None
 
-    # Kinds handled by the single stacked face forward. For periodic
-    # problems the bc_true points are instead consumed by the batch-level
-    # cross-expert pairing (Dirichlet-matching their zero targets would
-    # wrongly enforce u=0 at the boundary).
-    face_kinds = [
-        ('ic', KIND_IC_TRUE),
-        ('interface_ic', KIND_INTERFACE),
-    ]
-    if not deriv_interfaces:
-        face_kinds.append(('interface_bc', KIND_INTERFACE_BC))
-    if not is_periodic:
-        face_kinds.append(('bc', KIND_BC_TRUE))
+    # Kinds handled by the single plain (no input-grad) face forward.
+    face_kinds = [('interface_t', KIND_INTERFACE_T)]
+    if not deriv_pass:
+        face_kinds.append(('interface_x', KIND_INTERFACE_X))
 
     face_mask = torch.zeros_like(kinds, dtype=torch.bool)
     for _, kval in face_kinds:
@@ -327,15 +328,15 @@ def _compute_expert_loss(
             if kmask.any():
                 comps[key] = torch.mean(se_face[kmask])
 
-    # ── D3: x-interfaces with value + d/dx matching (periodic problems) ──
-    if deriv_interfaces:
-        ifm_bc = (kinds == KIND_INTERFACE_BC)
-        if ifm_bc.any():
-            x_if = x[ifm_bc].clone().detach().requires_grad_(True)
-            t_if = t[ifm_bc].clone().detach()
+    # ── x-faces with value + d/dx guide matching (grad-enabled pass) ──
+    if deriv_pass:
+        ifm_x = (kinds == KIND_INTERFACE_X)
+        if ifm_x.any():
+            x_if = x[ifm_x].clone().detach().requires_grad_(True)
+            t_if = t[ifm_x].clone().detach()
             u_if = model.forward_single_expert(
                 expert_idx, torch.cat([x_if, t_if], dim=1))
-            comps['interface_bc'] = torch.mean((u_if - h_gt[ifm_bc]) ** 2)
+            comps['interface_x'] = torch.mean((u_if - h_gt[ifm_x]) ** 2)
             n_out = u_if.shape[1]
             d_loss = torch.tensor(0.0, device=device)
             for c in range(n_out):
@@ -344,152 +345,27 @@ def _compute_expert_loss(
                     create_graph=True, retain_graph=True,
                 )[0][:, 0]
                 d_loss = d_loss + torch.mean(
-                    (g - h_x_gt[ifm_bc][:, c]) ** 2)
+                    (g - h_x_gt[ifm_x][:, c]) ** 2)
             # Mean over output components (matches the value term's
             # mean-over-all-elements convention).
-            comps['interface_bc_deriv'] = d_loss / n_out
+            comps['interface_x_deriv'] = d_loss / n_out
 
     comps['total'] = (
         w_res * comps['residual']
-        + w_ic * comps['ic']
-        + w_bc * comps['bc']
         + interface_scale * (
-            w_ic * comps['interface_ic']
-            + w_bc * (comps['interface_bc'] + comps['interface_bc_deriv'])
+            w_ic * comps['interface_t']
+            + w_bc * (comps['interface_x'] + comps['interface_x_deriv'])
         )
     )
     return comps
-
-
-def _compute_periodic_bc_loss(
-    model, x, t, expert_ids, kinds, bc_face_ids, deriv_fn, device,
-):
-    """Periodic BC loss via cross-expert pairing (all periodic problems).
-
-    Pairs left/right boundary points by sorting on t-value (the subdomain
-    builder samples both sides from the SAME t draw, so sorted pairing is
-    exact) and penalizes, for every output component c:
-        (u_c_left - u_c_right)² + (∂u_c/∂x_left - ∂u_c/∂x_right)².
-    For Schrödinger's [u, v] this equals the global loss's squared complex
-    magnitude of the value/derivative mismatch.
-    """
-    bc_mask = (kinds == KIND_BC_TRUE)
-    if bc_mask.sum() == 0:
-        return torch.tensor(0.0, device=device)
-
-    x_bc = x[bc_mask]
-    t_bc = t[bc_mask]
-    eid_bc = expert_ids[bc_mask]
-    fid_bc = bc_face_ids[bc_mask]
-    
-    # Group by dimension (face_id // 2)
-    dims = fid_bc // 2
-    sides = fid_bc % 2
-    
-    unique_dims = dims.unique().tolist()
-    total_bc_loss = torch.tensor(0.0, device=device)
-    n_pairs = 0
-    
-    for d in unique_dims:
-        d_mask = (dims == d)
-        x_d = x_bc[d_mask]
-        t_d = t_bc[d_mask]
-        eid_d = eid_bc[d_mask]
-        side_d = sides[d_mask]
-        
-        # Separate left (side=0) and right (side=1)
-        left_mask = (side_d == 0)
-        right_mask = (side_d == 1)
-        
-        n_left = left_mask.sum().item()
-        n_right = right_mask.sum().item()
-        
-        if n_left == 0 or n_right == 0:
-            continue
-        
-        # Extract left and right data
-        x_left_all = x_d[left_mask]
-        t_left_all = t_d[left_mask]
-        eid_left_all = eid_d[left_mask]
-        
-        x_right_all = x_d[right_mask]
-        t_right_all = t_d[right_mask]
-        eid_right_all = eid_d[right_mask]
-        
-        # Sort both sides by t-value for matching
-        t_left_vals = t_left_all[:, 0]
-        t_right_vals = t_right_all[:, 0]
-        sort_left = torch.argsort(t_left_vals)
-        sort_right = torch.argsort(t_right_vals)
-        
-        n_match = min(n_left, n_right)
-        
-        x_left = x_left_all[sort_left[:n_match]]
-        t_left = t_left_all[sort_left[:n_match]]
-        eid_left = eid_left_all[sort_left[:n_match]]
-        
-        x_right = x_right_all[sort_right[:n_match]]
-        t_right = t_right_all[sort_right[:n_match]]
-        eid_right = eid_right_all[sort_right[:n_match]]
-        
-        # Vectorized evaluation: group by (expert_left, expert_right) pairs
-        # Create pair keys for grouping
-        pair_keys = eid_left * 10000 + eid_right  # assumes < 10000 experts
-        unique_pairs = pair_keys.unique().tolist()
-        
-        for pair_key in unique_pairs:
-            pair_mask = (pair_keys == pair_key)
-            eid_l = pair_key // 10000
-            eid_r = pair_key % 10000
-            
-            # Batch all points with this expert pair
-            x_l_batch = x_left[pair_mask].clone().detach()
-            x_l_batch.requires_grad_(True)
-            t_l_batch = t_left[pair_mask].clone().detach()
-            x_r_batch = x_right[pair_mask].clone().detach()
-            x_r_batch.requires_grad_(True)
-            t_r_batch = t_right[pair_mask].clone().detach()
-            
-            xt_l = torch.cat([x_l_batch, t_l_batch], dim=1)
-            xt_r = torch.cat([x_r_batch, t_r_batch], dim=1)
-
-            # Single batched forward pass per expert (all output components)
-            u_l_full = model.forward_single_expert(eid_l, xt_l)
-            u_r_full = model.forward_single_expert(eid_r, xt_r)
-
-            # Value + spatial-derivative mismatch per output component
-            for c in range(u_l_full.shape[1]):
-                u_l = u_l_full[:, c]
-                u_r = u_r_full[:, c]
-                ux_l = torch.autograd.grad(
-                    u_l, x_l_batch,
-                    grad_outputs=torch.ones_like(u_l),
-                    create_graph=True, retain_graph=True,
-                )[0][:, d]
-                ux_r = torch.autograd.grad(
-                    u_r, x_r_batch,
-                    grad_outputs=torch.ones_like(u_r),
-                    create_graph=True, retain_graph=True,
-                )[0][:, d]
-                total_bc_loss = (
-                    total_bc_loss
-                    + torch.sum((u_l - u_r) ** 2)
-                    + torch.sum((ux_l - ux_r) ** 2)
-                )
-            n_pairs += pair_mask.sum().item()
-    
-    if n_pairs > 0:
-        return total_bc_loss / n_pairs
-    return torch.tensor(0.0, device=device)
 
 
 def _record(history, expert_idx, comps):
     if expert_idx not in history:
         history[expert_idx] = {
             k: [] for k in [
-                'residual', 'ic', 'interface_ic',
-                'interface_bc', 'interface_bc_deriv',
-                'bc', 'total', 'continuity',
+                'residual', 'interface_t', 'interface_x',
+                'interface_x_deriv', 'total', 'continuity',
             ]
         }
     for k in history[expert_idx]:
@@ -505,9 +381,8 @@ def _record_continuity(history, expert_idx, cont_val):
     if expert_idx not in history:
         history[expert_idx] = {
             k: [] for k in [
-                'residual', 'ic', 'interface_ic',
-                'interface_bc', 'interface_bc_deriv',
-                'bc', 'total', 'continuity',
+                'residual', 'interface_t', 'interface_x',
+                'interface_x_deriv', 'total', 'continuity',
             ]
         }
     # Append to continuity; if list is shorter, pad with 0

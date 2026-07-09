@@ -120,9 +120,34 @@ def _run_split_segment(
     orig_train_data = ctx.train_data
     orig_train_loader = ctx.train_loader
 
-    # Build split loss with original loss as fallback for eval batches
+    # Composition IC/BC batch: the plain training set's IC/BC rows with an
+    # all-false residual mask. The split loss runs the ORIGINAL global loss
+    # on it through the blended PoU composition — exact physics (periodic
+    # pairing included) enforced once, on the reported object, at full
+    # weight. (In time-marching windows these rows already carry the
+    # previous window's IC override.)
+    pd = ctx.plain_train_data
+    _sel = pd['mask']['IC'] | pd['mask']['BC']
+    ic_bc_batch = {
+        'x': pd['x'][_sel],
+        't': pd['t'][_sel],
+        'h_gt': pd['h_gt'][_sel],
+        'mask': {
+            'residual': torch.zeros(int(_sel.sum()), dtype=torch.bool,
+                                    device=pd['x'].device),
+            'IC': pd['mask']['IC'][_sel],
+            'BC': pd['mask']['BC'][_sel],
+        },
+    }
+    logger.info(f"[SplitLoss] composition IC/BC term: "
+                f"n_ic={int(ic_bc_batch['mask']['IC'].sum())}, "
+                f"n_bc={int(ic_bc_batch['mask']['BC'].sum())} "
+                f"(exact physics on the blended PoU, full weight)")
+
+    # Build split loss with original loss as fallback for eval batches and
+    # as the source of the composition IC/BC terms.
     split_loss = build_split_loss(
-        model, cfg, orig_loss_fn=orig_loss_fn,
+        model, cfg, orig_loss_fn=orig_loss_fn, ic_bc_batch=ic_bc_batch,
     )
 
     # D7: interface-weight anneal — lambda_Gamma scales linearly from 1.0
@@ -166,12 +191,16 @@ def _run_split_segment(
                          lr_override=lr_override,
                          min_epochs_override=min_epochs_override)
 
-    # Save per-expert loss history into metrics
+    # Save per-expert and composition loss histories into metrics
     peh = getattr(split_loss, '_per_expert_history', {})
     if peh:
         if 'split_expert_losses' not in ctx.metrics:
             ctx.metrics['split_expert_losses'] = {}
         ctx.metrics['split_expert_losses'][segment_name] = peh
+    gh = getattr(split_loss, '_global_history', {})
+    if gh and any(gh.values()):
+        ctx.metrics.setdefault('split_composition_losses', {})[
+            segment_name] = gh
 
     # Per-expert training curves + region panel
     def _to_numpy(x):
@@ -270,8 +299,10 @@ def _log_subdomain_summary(new_expert_indices, regions, split_data, cfg):
         )
         if counts.get('residual', 0) == 0:
             logger.warning(f"[SplitData] expert={eidx} has 0 residual points!")
-        if counts.get('ic_true', 0) + counts.get('interface_ic', 0) == 0:
-            logger.warning(f"[SplitData] expert={eidx} has 0 IC/interface points!")
+        if counts.get('interface_t', 0) == 0:
+            logger.warning(f"[SplitData] expert={eidx} has 0 t-interface points!")
+        if counts.get('interface_x', 0) == 0:
+            logger.warning(f"[SplitData] expert={eidx} has 0 x-interface points!")
     
     # Log continuity pair summary
     if cont_neighbors is not None:

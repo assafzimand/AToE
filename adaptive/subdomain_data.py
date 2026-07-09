@@ -1,12 +1,12 @@
-"""Per-expert subdomain data builder for split IC/BC training.
+"""Per-expert subdomain data builder for split expert training.
 
 Builds a combined training dataset where each point is tagged with the
-owning expert, its kind (residual / ic_true / interface / bc_true),
-and bc_face_id for periodic BC pairing.
-
-For bc_true points on global spatial boundaries, bc_face_id encodes
-dim*2 + side (side=0 lower, side=1 upper) to enable cross-expert
-pairing in periodic BC loss (Allen-Cahn).
+owning expert and its kind. Every outer face of an expert's inflated
+training box is a u0-GUIDED INTERFACE — including faces that land on the
+physical boundary or on t_min. The exact IC/BC physics is NOT enforced
+per expert; the split loss applies the true global IC/BC terms once, on
+the blended PoU composition (the reported object). The u0 face targets
+act as an annealable guide (interface_decrease_weight).
 
 Used by the split-loss training path for AToE-Leaves.
 """
@@ -14,31 +14,27 @@ Used by the split-loss training path for AToE-Leaves.
 import torch
 from typing import Dict, List
 from adaptive.indicators import RegionDescriptor, inflated_bounds  # noqa: F401
-from utils.dataset_gen import _analytic_ic
 from utils.logging_config import get_logger
 
 logger = get_logger(__name__)
 
-# Problems whose GLOBAL loss enforces periodic BCs by pairing the two spatial
-# boundaries (value + d/dx per output component). The split loss mirrors that
-# with cross-expert pairing, and their interior x-interfaces mimic the same
-# structure: value AND d/dx targets minted from the frozen root (D3).
+# Problems whose GLOBAL BC pairs value AND d/dx (periodic). Their x-face
+# interfaces mimic the same structure: u0 value AND d(u0)/dx targets.
+# Value-only-BC problems (burgers1d Dirichlet) get value-only interfaces.
 PERIODIC_PROBLEMS = frozenset({'allen_cahn', 'kdv', 'ks', 'schrodinger'})
 
-# Integer codes stored in the ``kind`` tensor
+# Integer codes stored in the ``kind`` tensor.
+# (Codes 1 and 4 were the removed per-expert true-IC/true-BC kinds; the
+# numbering of the survivors is kept stable.)
 KIND_RESIDUAL = 0
-KIND_IC_TRUE = 1
-KIND_INTERFACE = 2      # t-face interface (weighted by w_ic)
-KIND_INTERFACE_BC = 3   # x-face interface (weighted by w_bc)
-KIND_BC_TRUE = 4
+KIND_INTERFACE_T = 2    # lower-t face of the training box (weighted by w_ic)
+KIND_INTERFACE_X = 3    # x-faces of the training box (weighted by w_bc)
 KIND_CONTINUITY = 5     # continuity points on shared interior faces (neighbor-to-neighbor)
 
 KIND_NAMES = {
     KIND_RESIDUAL: 'residual',
-    KIND_IC_TRUE: 'ic_true',
-    KIND_INTERFACE: 'interface_ic',
-    KIND_INTERFACE_BC: 'interface_bc',
-    KIND_BC_TRUE: 'bc_true',
+    KIND_INTERFACE_T: 'interface_t',
+    KIND_INTERFACE_X: 'interface_x',
     KIND_CONTINUITY: 'continuity',
 }
 
@@ -107,7 +103,7 @@ def sample_subdomain_residuals(
     t_g[:, 0] = (torch.rand(n_res_total, device=device)
                  * (t_max_global - t_min_global) + t_min_global)
 
-    xs, ts, gs, eids, ks, bc_fids = [], [], [], [], [], []
+    xs, ts, gs, eids, ks = [], [], [], [], []
     for eidx in new_expert_indices:
         region = regions[eidx]
         bl, bu = inflated_bounds(region, sigma_fraction, g_lo, g_hi)
@@ -124,7 +120,6 @@ def sample_subdomain_residuals(
             gs.append(torch.zeros(n, output_dim, device=device))
             eids.append(torch.full((n,), eidx, dtype=torch.long, device=device))
             ks.append(torch.full((n,), KIND_RESIDUAL, dtype=torch.long, device=device))
-            bc_fids.append(torch.full((n,), -1, dtype=torch.long, device=device))
 
     if not xs:
         return _empty(spatial_dim, output_dim, device)
@@ -137,7 +132,6 @@ def sample_subdomain_residuals(
         'h_x_gt': torch.zeros(n_pts, output_dim, device=device),
         'expert_id': torch.cat(eids, dim=0),
         'kind': torch.cat(ks, dim=0),
-        'bc_face_id': torch.cat(bc_fids, dim=0),
         'cont_neighbor': torch.full((n_pts,), -1, dtype=torch.long, device=device),
         'cont_dim': torch.full((n_pts,), -1, dtype=torch.long, device=device),
     }
@@ -154,10 +148,14 @@ def build_subdomain_static(
 ) -> Dict[str, torch.Tensor]:
     """Build the static (non-residual) part of the split dataset.
 
-    IC/BC/interface faces, their minted targets, and the O(K²)
-    continuity-neighbor pairs depend only on the regions and the frozen
-    snapshot — both constant within a training segment — so this is built
-    ONCE per segment and reused across resamples.
+    Every outer face of each expert's inflated training box becomes a
+    u0-guided interface (KIND_INTERFACE_T on the lower-t face,
+    KIND_INTERFACE_X on both x-faces) — the physical boundary and t_min get
+    no special treatment here, because the split loss enforces the true
+    global IC/BC once, on the blended composition. Faces, minted targets,
+    and the O(K²) continuity-neighbor pairs depend only on the regions and
+    the frozen snapshot — both constant within a training segment — so this
+    is built ONCE per segment and reused across resamples.
     """
     torch.manual_seed(seed)
 
@@ -166,63 +164,30 @@ def build_subdomain_static(
     spatial_dim = pc['spatial_dim']
     spatial_domain = pc['spatial_domain']
     temporal_domain = pc['temporal_domain']
-    t_min_global = temporal_domain[0]
-    t_max_global = temporal_domain[1]
     output_dim = pc['output_dim']
 
-    n_ic_per_face, n_bc_per_face = _face_counts(cfg)
+    n_t_face, n_x_face = _face_counts(cfg)
 
     if len(new_expert_indices) == 0:
         return _empty(spatial_dim, output_dim, device)
 
-    # Time-marching windows >= 1: the "true IC" faces at this window's
-    # t_start must carry the PREVIOUS window's converged prediction, not the
-    # analytic t=0 IC (mirrors _override_ic_for_time_marching on the plain
-    # dataset). Window 0 (and non-TM runs) keep the analytic IC.
-    tm_window = cfg.get('_time_marching_window', {})
-    ic_model = None
-    if tm_window.get('enabled', False) and tm_window.get('idx', 0) > 0:
-        ic_model = tm_window.get('prev_model')
-        if ic_model is not None:
-            ic_model.eval()
-            logger.info(f"[SplitData] Window {tm_window['idx']}: true-IC "
-                        f"faces minted from previous window's model at "
-                        f"t={t_min_global:.4f}")
-        else:
-            logger.warning(f"[SplitData] Window {tm_window['idx']}: no "
-                           f"prev_model available — IC faces fall back to "
-                           f"the analytic t=0 IC (wrong for windows >= 1).")
+    xs, ts, gs, eids, ks = [], [], [], [], []
 
-    # Shared t-values per dimension (full global range); each expert filters
-    # to its own temporal range so periodic pairing lines up across experts.
-    bc_t_global = {}
-    for d in range(spatial_dim):
-        bc_t_global[d] = (
-            torch.rand(n_bc_per_face, 1, device=device)
-            * (t_max_global - t_min_global) + t_min_global
-        )
-
-    xs, ts, gs, eids, ks, bc_fids = [], [], [], [], [], []
-
-    # ── IC / BC faces per expert, placed on the INFLATED training box ──
-    # (D2: the expert trains on region + window collar; interfaces sit on
+    # ── Interface faces per expert, on the INFLATED training box ──
+    # (D2: the expert trains on region + window collar; its faces sit on
     # the outer edge of that box, clipped to the domain.)
     sigma_fraction = cfg['adaptive_pinn']['sigma_fraction']
     g_lo, g_hi = _domain_box(pc)
     for eidx in new_expert_indices:
         region = regions[eidx]
         infl_bl, infl_bu = inflated_bounds(region, sigma_fraction, g_lo, g_hi)
-        _add_ic_face(
-            eidx, region, infl_bl, infl_bu, spatial_dim, spatial_domain,
-            t_min_global, n_ic_per_face, output_dim,
-            problem, pc, device, xs, ts, gs, eids, ks,
-            bc_fids, ic_model=ic_model,
+        _add_t_interface_face(
+            eidx, region, infl_bl, infl_bu, spatial_dim, temporal_domain[0],
+            n_t_face, output_dim, device, xs, ts, gs, eids, ks,
         )
-        _add_bc_faces_periodic(
+        _add_x_interface_faces(
             eidx, region, infl_bl, infl_bu, spatial_dim, spatial_domain,
-            n_bc_per_face, output_dim, device,
-            xs, ts, gs, eids, ks, bc_fids,
-            bc_t_global,
+            n_x_face, output_dim, device, xs, ts, gs, eids, ks,
         )
 
     # ── Continuity faces: neighbor-to-neighbor on shared interior faces ──
@@ -230,7 +195,7 @@ def build_subdomain_static(
     cont_neighbors, cont_dims = [], []
     _add_continuity_faces(
         new_expert_indices, regions, spatial_dim, spatial_domain,
-        temporal_domain, n_bc_per_face, output_dim, device,
+        temporal_domain, n_x_face, output_dim, device,
         cont_xs, cont_ts, cont_gs, cont_eids, cont_ks,
         cont_neighbors, cont_dims,
     )
@@ -240,44 +205,42 @@ def build_subdomain_static(
     h_gt_cat = torch.cat(gs, dim=0)
     eid_cat = torch.cat(eids, dim=0)
     kind_cat = torch.cat(ks, dim=0)
-    bc_fid_cat = torch.cat(bc_fids, dim=0)
 
     n_main = x_cat.shape[0]
     cont_neighbor_main = torch.full((n_main,), -1, dtype=torch.long, device=device)
     cont_dim_main = torch.full((n_main,), -1, dtype=torch.long, device=device)
 
-    # ── Mint interface targets from the frozen field ──
-    # interface_model overrides which frozen field defines the interface targets.
-    # For AToE-Leaves it is the base (root), so targets are good root predictions
-    # even when experts differ in shape from the base; None falls back to `model`
-    # (composed snapshot).
+    # ── Mint u0-guide targets from the frozen field ──
+    # interface_model overrides which frozen field defines the face targets.
+    # For AToE-Leaves it is the base (root), so targets are good root
+    # predictions even when experts differ in shape from the base; None
+    # falls back to `model` (composed snapshot).
     iface_src = interface_model if interface_model is not None else model
-    # t-face interfaces (KIND_INTERFACE, weighted by w_ic)
-    iface_mask = (kind_cat == KIND_INTERFACE)
-    if iface_mask.sum() > 0:
+    iface_t_mask = (kind_cat == KIND_INTERFACE_T)
+    if iface_t_mask.sum() > 0:
         with torch.no_grad():
-            xt_if = torch.cat([x_cat[iface_mask], t_cat[iface_mask]], dim=1)
-            h_gt_cat[iface_mask] = iface_src(xt_if)
+            xt_if = torch.cat([x_cat[iface_t_mask], t_cat[iface_t_mask]], dim=1)
+            h_gt_cat[iface_t_mask] = iface_src(xt_if)
 
-    # x-face interfaces (KIND_INTERFACE_BC, weighted by w_bc)
-    iface_bc_mask = (kind_cat == KIND_INTERFACE_BC)
-    if iface_bc_mask.sum() > 0:
+    iface_x_mask = (kind_cat == KIND_INTERFACE_X)
+    if iface_x_mask.sum() > 0:
         with torch.no_grad():
-            xt_if_bc = torch.cat([x_cat[iface_bc_mask], t_cat[iface_bc_mask]], dim=1)
-            h_gt_cat[iface_bc_mask] = iface_src(xt_if_bc)
+            xt_if_x = torch.cat([x_cat[iface_x_mask], t_cat[iface_x_mask]], dim=1)
+            h_gt_cat[iface_x_mask] = iface_src(xt_if_x)
     _src = 'base(root)' if interface_model is not None else 'composed'
-    logger.info(f"[SplitData] interface targets minted from {_src} model")
+    logger.info(f"[SplitData] interface guide targets minted from {_src} model "
+                f"(n_t_face={int(iface_t_mask.sum())}, "
+                f"n_x_face={int(iface_x_mask.sum())})")
 
-    # ── D3: derivative targets on x-interfaces (periodic problems) ──
-    # The global BC for these problems pairs u AND u_x, so interior
-    # x-interfaces mimic the same structure: d(u0)/dx minted from the
-    # frozen root at the face points (face normal = spatial dim 0; the
-    # pipeline is 1D-spatial). Value-only problems (burgers1d Dirichlet)
-    # keep value-only interfaces.
+    # ── Derivative targets on x-interfaces ──
+    # For problems whose global BC pairs u AND u_x (periodic set), x-face
+    # guides mimic the same structure: d(u0)/dx minted at the face points
+    # (face normal = spatial dim 0; the pipeline is 1D-spatial). Value-only
+    # BC problems (burgers1d Dirichlet) keep value-only guides.
     h_x_gt_cat = torch.zeros_like(h_gt_cat)
-    if problem in PERIODIC_PROBLEMS and iface_bc_mask.sum() > 0:
-        x_if = x_cat[iface_bc_mask].clone().detach().requires_grad_(True)
-        t_if = t_cat[iface_bc_mask].clone().detach()
+    if problem in PERIODIC_PROBLEMS and iface_x_mask.sum() > 0:
+        x_if = x_cat[iface_x_mask].clone().detach().requires_grad_(True)
+        t_if = t_cat[iface_x_mask].clone().detach()
         u_if = iface_src(torch.cat([x_if, t_if], dim=1))
         n_out = u_if.shape[1]
         deriv_cols = []
@@ -287,26 +250,16 @@ def build_subdomain_static(
                 retain_graph=(c < n_out - 1),
             )[0][:, 0]
             deriv_cols.append(g)
-        h_x_gt_cat[iface_bc_mask] = torch.stack(deriv_cols, dim=1).detach()
+        h_x_gt_cat[iface_x_mask] = torch.stack(deriv_cols, dim=1).detach()
         _norms = ', '.join(
-            f'comp{c}={h_x_gt_cat[iface_bc_mask][:, c].norm().item():.4e}'
+            f'comp{c}={h_x_gt_cat[iface_x_mask][:, c].norm().item():.4e}'
             for c in range(n_out))
-        logger.info(f"[SplitData] interface u_x targets minted from {_src}: "
-                    f"n={int(iface_bc_mask.sum())} points, norms [{_norms}] "
-                    f"(periodic problem '{problem}')")
+        logger.info(f"[SplitData] interface u_x guide targets minted from "
+                    f"{_src}: n={int(iface_x_mask.sum())} points, norms "
+                    f"[{_norms}] (u/u_x-BC problem '{problem}')")
     elif problem not in PERIODIC_PROBLEMS:
-        logger.info(f"[SplitData] value-only interfaces "
-                    f"(Dirichlet-BC problem '{problem}')")
-
-    # Log BC statistics for periodic pairing
-    bc_true_mask = (kind_cat == KIND_BC_TRUE)
-    n_bc_true = bc_true_mask.sum().item()
-    if n_bc_true > 0:
-        unique_fids = bc_fid_cat[bc_true_mask].unique().tolist()
-        logger.info(
-            f"[SplitData] bc_true points: {n_bc_true}, "
-            f"unique face_ids: {unique_fids}"
-        )
+        logger.info(f"[SplitData] value-only interface guides "
+                    f"(value-only-BC problem '{problem}')")
 
     # ── Append continuity data (if any) ──
     if cont_xs:
@@ -321,10 +274,6 @@ def build_subdomain_static(
         ], dim=0)
         eid_cat = torch.cat([eid_cat, torch.cat(cont_eids, dim=0)], dim=0)
         kind_cat = torch.cat([kind_cat, torch.cat(cont_ks, dim=0)], dim=0)
-        bc_fid_cat = torch.cat([
-            bc_fid_cat,
-            torch.full((n_cont,), -1, dtype=torch.long, device=device),
-        ], dim=0)
         cont_neighbor_main = torch.cat(
             [cont_neighbor_main, torch.cat(cont_neighbors, dim=0)], dim=0)
         cont_dim_main = torch.cat(
@@ -338,7 +287,6 @@ def build_subdomain_static(
         'h_x_gt': h_x_gt_cat,
         'expert_id': eid_cat,
         'kind': kind_cat,
-        'bc_face_id': bc_fid_cat,
         'cont_neighbor': cont_neighbor_main,
         'cont_dim': cont_dim_main,
     }
@@ -356,12 +304,8 @@ def build_subdomain_data(
 ) -> Dict[str, torch.Tensor]:
     """Build per-expert dataset for split-loss training.
 
-    Returns dict with keys ``x``, ``t``, ``h_gt``,
-    ``expert_id``, ``kind``, ``bc_face_id``, ``cont_neighbor``, ``cont_dim``.
-
-    ``bc_face_id`` encodes which spatial boundary face
-    for periodic pairing: ``dim * 2 + side`` where
-    side=0 for lower, side=1 for upper.
+    Returns dict with keys ``x``, ``t``, ``h_gt``, ``h_x_gt``,
+    ``expert_id``, ``kind``, ``cont_neighbor``, ``cont_dim``.
 
     Args:
         static: Optional pre-built static part (from
@@ -400,9 +344,6 @@ def _empty(spatial_dim, output_dim, device):
         'kind': torch.zeros(
             0, dtype=torch.long, device=device
         ),
-        'bc_face_id': torch.zeros(
-            0, dtype=torch.long, device=device
-        ),
         'cont_neighbor': torch.zeros(
             0, dtype=torch.long, device=device
         ),
@@ -417,169 +358,97 @@ def _is_global_boundary(val, global_lo, global_hi, tol=1e-8):
             or abs(val - global_hi) < tol)
 
 
-def _add_ic_face(
-    eidx, region, infl_bl, infl_bu, spatial_dim, spatial_domain,
-    t_min_global, n_pts, output_dim, problem, pc,
-    device, xs, ts, gs, eids, ks, bc_fids,
-    ic_model=None,
+def _add_t_interface_face(
+    eidx, region, infl_bl, infl_bu, spatial_dim, t_min_global,
+    n_pts, output_dim, device, xs, ts, gs, eids, ks,
 ):
-    """Add IC face points at the INFLATED box's lower-t boundary (D2).
+    """Add the lower-t interface face of the INFLATED training box (D2).
 
-    ``infl_bl``/``infl_bu``: the expert's inflated training box (region +
-    window collar, clipped to the domain). The face sits on its lower-t
-    edge; when the collar clips onto the domain's t_min the face IS the
-    true IC.
-
-    ``ic_model``: when set (time-marching windows >= 1), true-IC targets at
-    the window's t_start come from this frozen model (the previous window)
-    instead of the analytic t=0 IC.
+    Always a u0-guided interface (KIND_INTERFACE_T) — a face that lands on
+    the domain's t_min gets no special treatment: u0 was trained on the
+    true IC there, so the guide is already near-exact, and the exact IC is
+    enforced by the split loss's composition term. Targets are placeholder
+    zeros here; minted from the frozen root by the caller.
     """
     t_face = infl_bl[spatial_dim]
     t_face_hard = region.bounds_lower[spatial_dim]
-    is_true = abs(t_face - t_min_global) < 1e-8
+    on_t_min = abs(t_face - t_min_global) < 1e-8
 
-    x_ic = torch.zeros(n_pts, spatial_dim, device=device)
+    x_face = torch.zeros(n_pts, spatial_dim, device=device)
     for d in range(spatial_dim):
         lo, hi = infl_bl[d], infl_bu[d]
-        x_ic[:, d] = (torch.rand(n_pts, device=device)
-                       * (hi - lo) + lo)
-    t_ic = torch.full((n_pts, 1), t_face, device=device)
+        x_face[:, d] = (torch.rand(n_pts, device=device)
+                        * (hi - lo) + lo)
+    t_face_pts = torch.full((n_pts, 1), t_face, device=device)
 
-    _clipped = is_true and (t_face_hard - t_min_global) > 1e-8
     logger.info(
-        f"[SplitData] expert={eidx} face=t-lower kind="
-        f"{'ic_true' if is_true else 'interface_ic'} at t={t_face:.6f} "
-        f"(hard {t_face_hard:.6f}, clipped={_clipped}) "
+        f"[SplitData] expert={eidx} face=t-lower kind=interface_t "
+        f"at t={t_face:.6f} (hard {t_face_hard:.6f}, "
+        f"on_t_min={on_t_min}) "
         f"n={n_pts} x_range=[{infl_bl[0]:.6f}, {infl_bu[0]:.6f}]")
 
-    if is_true:
-        if ic_model is not None:
-            with torch.no_grad():
-                h_gt = ic_model(torch.cat([x_ic, t_ic], dim=1))
-        else:
-            h_gt = _analytic_ic(problem, x_ic, pc)
-        kind_val = KIND_IC_TRUE
-    else:
-        # Interface target: placeholder 0; minted from the frozen root later
-        h_gt = torch.zeros(n_pts, output_dim, device=device)
-        kind_val = KIND_INTERFACE
-
-    xs.append(x_ic)
-    ts.append(t_ic)
-    gs.append(h_gt)
+    xs.append(x_face)
+    ts.append(t_face_pts)
+    gs.append(torch.zeros(n_pts, output_dim, device=device))
     eids.append(torch.full(
         (n_pts,), eidx, dtype=torch.long, device=device
     ))
     ks.append(torch.full(
-        (n_pts,), kind_val, dtype=torch.long, device=device
-    ))
-    bc_fids.append(torch.full(
-        (n_pts,), -1, dtype=torch.long, device=device
+        (n_pts,), KIND_INTERFACE_T, dtype=torch.long, device=device
     ))
 
 
-def _add_bc_faces_periodic(
+def _add_x_interface_faces(
     eidx, region, infl_bl, infl_bu, spatial_dim, spatial_domain,
-    n_pts, output_dim, device,
-    xs, ts, gs, eids, ks, bc_fids,
-    bc_t_global,
+    n_pts, output_dim, device, xs, ts, gs, eids, ks,
 ):
-    """Add BC face points on the INFLATED training box (D2), with periodic
-    pairing support.
+    """Add both x-interface faces of the INFLATED training box (D2).
 
-    Face values sit at the inflated-and-clipped x-bounds; a collar clipped
-    onto the global boundary makes the face the TRUE boundary.
-
-    For bc_true faces on global boundaries:
-    - Uses shared t-values per dimension (both left and right sides)
-    - Filters to t-values within this expert's HARD temporal range —
-      inflated t-ranges of temporal neighbors overlap, and a duplicated t
-      on one side would break the sorted periodic pairing
-    - Assigns bc_face_id = dim*2 + side (side=0 lower, 1 upper)
-
-    For interior x-face interfaces (non-global boundaries):
-    - Uses KIND_INTERFACE_BC (weighted by w_bc), sampled over the inflated
-      temporal range
+    Always u0-guided interfaces (KIND_INTERFACE_X) — faces clipped onto the
+    physical boundary get no special treatment: the exact BC (periodic
+    pairing / Dirichlet) is enforced by the split loss's composition term,
+    and the u0 guide there anneals away with interface_decrease_weight.
+    Value targets are placeholder zeros here; minted from the frozen root
+    (plus d/dx targets for u/u_x-BC problems) by the caller.
     """
-    bl, bu = region.bounds_lower, region.bounds_upper
-    t_lo_hard = bl[spatial_dim]
-    t_hi_hard = bu[spatial_dim]
     t_lo_infl = infl_bl[spatial_dim]
     t_hi_infl = infl_bu[spatial_dim]
 
     for d in range(spatial_dim):
-        g_lo, g_hi = spatial_domain[d]
-        for side_idx, (face_val, hard_val) in enumerate(
-                [(infl_bl[d], bl[d]), (infl_bu[d], bu[d])]):
-            is_true = _is_global_boundary(
-                face_val, g_lo, g_hi
-            )
-
-            if is_true:
-                # Shared t per dimension, filtered to this expert's HARD
-                # t-range, so periodic pairing lines up across experts
-                # (each shared t appears exactly once per side).
-                t_global = bc_t_global[d]
-                t_mask = ((t_global[:, 0] >= t_lo_hard)
-                          & (t_global[:, 0] <= t_hi_hard))
-                t_bc = t_global[t_mask]
-                n_actual = t_bc.shape[0]
-
-                if n_actual == 0:
-                    continue
-
-                kind_val = KIND_BC_TRUE
-                face_id = d * 2 + side_idx
-            else:
-                # Interior x-face interface (weighted by w_bc), spanning the
-                # inflated temporal range of the training box.
-                t_bc = (
-                    torch.rand(n_pts, 1, device=device)
-                    * (t_hi_infl - t_lo_infl) + t_lo_infl
-                )
-                n_actual = n_pts
-                kind_val = KIND_INTERFACE_BC
-                face_id = -1
-
+        g_lo_d, g_hi_d = spatial_domain[d]
+        for side, (face_val, hard_val) in enumerate(
+                [(infl_bl[d], region.bounds_lower[d]),
+                 (infl_bu[d], region.bounds_upper[d])]):
+            on_boundary = _is_global_boundary(face_val, g_lo_d, g_hi_d)
             logger.info(
-                f"[SplitData] expert={eidx} face=x{'-lower' if side_idx == 0 else '-upper'} "
-                f"kind={KIND_NAMES[kind_val]} at x={face_val:.6f} "
-                f"(hard {hard_val:.6f}, clipped={is_true and abs(hard_val - face_val) > 1e-12}) "
-                f"n={n_actual} "
-                f"t_range=[{t_lo_hard if is_true else t_lo_infl:.6f}, "
-                f"{t_hi_hard if is_true else t_hi_infl:.6f}]"
-                + (f" side={side_idx}" if is_true else ""))
+                f"[SplitData] expert={eidx} "
+                f"face=x{'-lower' if side == 0 else '-upper'} "
+                f"kind=interface_x at x={face_val:.6f} "
+                f"(hard {hard_val:.6f}, on_domain_boundary={on_boundary}) "
+                f"n={n_pts} t_range=[{t_lo_infl:.6f}, {t_hi_infl:.6f}]")
 
-            x_bc = torch.zeros(
-                n_actual, spatial_dim, device=device
+            t_face_pts = (
+                torch.rand(n_pts, 1, device=device)
+                * (t_hi_infl - t_lo_infl) + t_lo_infl
             )
-            x_bc[:, d] = face_val
+            x_face = torch.zeros(n_pts, spatial_dim, device=device)
+            x_face[:, d] = face_val
             for d2 in range(spatial_dim):
                 if d2 != d:
                     lo2, hi2 = infl_bl[d2], infl_bu[d2]
-                    x_bc[:, d2] = (
-                        torch.rand(n_actual, device=device)
+                    x_face[:, d2] = (
+                        torch.rand(n_pts, device=device)
                         * (hi2 - lo2) + lo2
                     )
 
-            h_gt = torch.zeros(
-                n_actual, output_dim, device=device
-            )
-
-            xs.append(x_bc)
-            ts.append(t_bc)
-            gs.append(h_gt)
+            xs.append(x_face)
+            ts.append(t_face_pts)
+            gs.append(torch.zeros(n_pts, output_dim, device=device))
             eids.append(torch.full(
-                (n_actual,), eidx,
-                dtype=torch.long, device=device
+                (n_pts,), eidx, dtype=torch.long, device=device
             ))
             ks.append(torch.full(
-                (n_actual,), kind_val,
-                dtype=torch.long, device=device
-            ))
-            bc_fids.append(torch.full(
-                (n_actual,), face_id,
-                dtype=torch.long, device=device
+                (n_pts,), KIND_INTERFACE_X, dtype=torch.long, device=device
             ))
 
 

@@ -453,10 +453,10 @@ def _create_split_dataloader(
     batch_size: int,
     shuffle: bool,
 ) -> DataLoader:
-    """Create DataLoader for split-loss subdomain data (expert_id + kind + bc_face_id + h_x_gt + continuity schema)."""
+    """Create DataLoader for split-loss subdomain data (expert_id + kind + h_x_gt + continuity schema)."""
     dataset = TensorDataset(
         data['x'], data['t'], data['h_gt'], data['h_x_gt'],
-        data['expert_id'], data['kind'], data['bc_face_id'],
+        data['expert_id'], data['kind'],
         data['cont_neighbor'], data['cont_dim'],
     )
 
@@ -468,9 +468,8 @@ def _create_split_dataloader(
             'h_x_gt': torch.stack([b[3] for b in batch_list]),
             'expert_id': torch.stack([b[4] for b in batch_list]),
             'kind': torch.stack([b[5] for b in batch_list]),
-            'bc_face_id': torch.stack([b[6] for b in batch_list]),
-            'cont_neighbor': torch.stack([b[7] for b in batch_list]),
-            'cont_dim': torch.stack([b[8] for b in batch_list]),
+            'cont_neighbor': torch.stack([b[6] for b in batch_list]),
+            'cont_dim': torch.stack([b[7] for b in batch_list]),
         }
 
     return DataLoader(

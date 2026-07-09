@@ -237,15 +237,11 @@ def plot_per_expert_curves(
 
     # Pre-process split_data into per-expert numpy arrays keyed by kind
     # KIND codes match adaptive/subdomain_data.py
-    _KIND_IC_TRUE    = 1
-    _KIND_IFACE_IC   = 2
-    _KIND_IFACE_BC   = 3
-    _KIND_BC_TRUE    = 4
+    _KIND_IFACE_T = 2
+    _KIND_IFACE_X = 3
     _icbc_kinds = {
-        _KIND_IC_TRUE:  ('IC true',      '#3498db', 'o',  18),
-        _KIND_IFACE_IC: ('Interface IC', '#9b59b6', 's',  18),
-        _KIND_IFACE_BC: ('Interface BC', '#f39c12', '^',  18),
-        _KIND_BC_TRUE:  ('BC true',      '#2ecc71', 'D',  18),
+        _KIND_IFACE_T: ('Interface t-face', '#9b59b6', 's', 18),
+        _KIND_IFACE_X: ('Interface x-face', '#f39c12', '^', 18),
     }
     _sd_by_expert: dict = {}   # {eidx: {kind_code: (x_arr, t_arr)}}
     if split_data is not None:
@@ -281,10 +277,9 @@ def plot_per_expert_curves(
 
     term_colors = {
         'residual': '#e74c3c',
-        'ic': '#3498db',
-        'interface_ic': '#9b59b6',
-        'interface_bc': '#f39c12',
-        'bc': '#2ecc71',
+        'interface_t': '#9b59b6',
+        'interface_x': '#f39c12',
+        'interface_x_deriv': '#e84393',
         'continuity': '#e67e22',  # orange for continuity term
         'total': '#2c3e50',
     }

@@ -4,6 +4,9 @@ Date: 2026-07-09. Scope: design-level changes on top of the clean-run pipeline (
 
 > **Status (2026-07-09, branch `AToE`):** D1, D2 (incl. the soft-PoU reporting change), and D3 implemented, always on (`per_leaf_normalization: true` flag exists for D1 ablation). D7 (`adaptive_pinn.split_icbc.interface_decrease_weight`) and D6 (`adaptive_pinn.fine_tune.collar_data_ratio`) implemented, configurable, default 0 (off). All mechanisms log their trigger/data/result (`[Norm]`, `[SplitData] face=... train_box=...`, `[InterfaceAnneal]`, `[Resample-Collar]`) and were verified by unit tests + allen_cahn and KdV time-marching smoke runs.
 
+> **Revision (same day):** the expert-phase closure was redesigned (FBPINN / mixed-Schwarz style, see [2311.00224], survey 2312.14050): EVERY outer face of an expert's training box is now a u0-guided interface (`interface_t` value-only; `interface_x` value + d/dx for u/u_x-BC problems) scaled by the D7 anneal, and the EXACT global IC/BC terms are enforced once, on the blended PoU composition, at full un-annealed weight (reusing the global loss on the plain data's IC/BC rows — TM windows inherit the prev-window IC override for free). This removed the per-expert true-IC/true-BC branches, the cross-expert periodic pairing, and the split builder's prev-model IC minting. Phase-3 loss:
+> `L = Σ_j [ w_res·L_res_j + s(e)·( w_ic·L_Γt_j + w_bc·(L_Γx_j + L_Γx∂_j) ) ] + w_ic·L_IC(u_θ) + w_bc·L_BC(u_θ)`
+
 ---
 
 ## Decided — to implement

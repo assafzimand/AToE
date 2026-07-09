@@ -857,6 +857,14 @@ def _train_segment(
                     logger.info(
                         f"  [SplitTerms] expert={_eidx} {_s}"
                     )
+                # Composition IC/BC terms (exact physics on the blended PoU)
+                _gh = getattr(loss_fn, '_global_history', None)
+                if _gh and _gh.get('ic_comp'):
+                    logger.info(
+                        f"  [SplitTerms] composition "
+                        f"ic={_gh['ic_comp'][-1]:.6e} "
+                        f"bc={_gh['bc_comp'][-1]:.6e}"
+                    )
 
         # End epoch timing (handles printing based on print_every)
         timer.end_epoch()
