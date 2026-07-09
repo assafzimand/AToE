@@ -25,7 +25,7 @@ os.chdir(REPO_ROOT)  # ensure_eval_data uses paths relative to the repo root
 
 from perfect_tree_examples import create_prefect_trees as cpt  # noqa: E402
 
-M_VALUES = [15]
+M_VALUES = [7]
 # 0.0 = exact top-M baseline; 0.02/0.05 cover typical near-tie gaps at the
 # cutoff; 0.1 is aggressive (observed mirror-pair gaps ran up to ~13%).
 EPS_VALUES = [0.0]

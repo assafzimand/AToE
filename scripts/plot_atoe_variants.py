@@ -248,8 +248,8 @@ def draw_domain(ax):
                 arrowprops=dict(arrowstyle="-|>", color=AXIS, lw=1.1))
     ax.annotate("", xy=(-0.03, 1.07), xytext=(-0.03, 0.0),
                 arrowprops=dict(arrowstyle="-|>", color=AXIS, lw=1.1))
-    ax.text(1.09, -0.03, "$x$", color=AXIS, fontsize=12, ha="left", va="center")
-    ax.text(-0.03, 1.10, "$t$", color=AXIS, fontsize=12, ha="center", va="bottom")
+    ax.text(1.09, -0.03, "$x$", color=AXIS, fontsize=16, ha="left", va="center")
+    ax.text(-0.03, 1.10, "$t$", color=AXIS, fontsize=16, ha="center", va="bottom")
     ax.text(-0.055, -0.055, "0", color=MUTED, fontsize=9, ha="center", va="center")
 
 
@@ -281,7 +281,7 @@ def draw_bars(ax, panel):
                 solid_capstyle="round", zorder=2)
         ax.plot([x0, x0 + (x1 - x0) * val], [y, y], color=swatch, lw=5.5,
                 solid_capstyle="round", zorder=3)
-        ax.text(1.0, y, f"{val:.2f}", color=LABEL, fontsize=10,
+        ax.text(1.0, y, f"{val:.2f}", color=INK, fontsize=10.5,
                 ha="right", va="center")
 
 
@@ -313,7 +313,7 @@ def _ant_arrow(ax, p_parent, p_child, off=8.0):
 
 def draw_tree(ax, panel):
     ax.set_xlim(-8, 308)
-    ax.set_ylim(-352, 8)
+    ax.set_ylim(-360, 12)
     ax.set_aspect("equal")
     ax.axis("off")
 
@@ -372,12 +372,12 @@ def draw_tree(ax, panel):
     # input (x, t) into the root
     ax.annotate("", xy=(150, -13), xytext=(150, -2),
                 arrowprops=dict(arrowstyle="-|>", color=INK, lw=1.4))
-    ax.text(150, 4, r"$(x,t)$", color=INK, fontsize=12, style="italic",
+    ax.text(150, 6, r"$(x,t)$", color=INK, fontsize=15, style="italic",
             ha="center", va="bottom")
     # Sigma -> u(x, t)
     ax.annotate("", xy=(150, -332), xytext=(150, -318),
                 arrowprops=dict(arrowstyle="-|>", color=INK, lw=1.4))
-    ax.text(150, -344, r"$u(x,t)$", color=INK, fontsize=12.5, style="italic",
+    ax.text(150, -346, r"$u(x,t)$", color=INK, fontsize=15, style="italic",
             ha="center", va="top")
 
 
@@ -409,8 +409,6 @@ def build_figure():
                  fontweight="bold", ha="left", va="center")
         fig.text(lft + 0.028, 0.958, panel["name"], color=INK, fontsize=13,
                  fontweight="bold", ha="left", va="center")
-        fig.text(lft, 0.937, "D E C O M P O S E D   D O M A I N", color=MUTED,
-                 fontsize=8, fontweight="bold", ha="left", va="center")
 
         ax_dom = fig.add_axes([lft, 0.635, col_w, 0.295])
         draw_domain(ax_dom)
@@ -421,7 +419,7 @@ def build_figure():
         ax_tree = fig.add_axes([lft, 0.135, col_w, 0.32])
         draw_tree(ax_tree, panel)
 
-        fig.text(cx, 0.085, panel["eq"], color=INK, fontsize=15,
+        fig.text(cx, 0.083, panel["eq"], color=INK, fontsize=18,
                  ha="center", va="center")
 
     return fig

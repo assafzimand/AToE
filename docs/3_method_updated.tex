@@ -1,15 +1,58 @@
-\section{Proposed Adaptive Domain Decomposition Method}
+\section{The adaptive PINN method}
 \label{sec:method}
 
 \subsection{Overview of the Method}
+\label{sec:overview}
 
-We propose an adaptive domain decomposition framework in which the computational
-domain is partitioned into subregions, each associated with a local neural network
-expert. The decomposition mechanism is based on a decision tree structure, guided by
-the theoretical connection between tree-based representations and smoothness
-introduced in Section~\ref{sec:background}. In contrast, the global composition
-of local experts follows a  POU (partition of unity) formulation inspired by existing
-domain decomposition and MoE (Mixture of Experts) methods.
+The tree based structure described in
+Section~\ref{sec:background} form a natural starting point for a wide range of domain decomposition
+designs that combine local models into a Mixture of Experts (MoE). In this
+section we present the method adopted in this work, which we refer to as
+AToE (Adaptive Tree of Experts). Section~\ref{sec:additional_methods}
+describes additional variants of the main algorithm. Throughout, we
+deliberately keep the training scheme as clean as possible in order to
+demonstrate the advantages of the method itself. The enhancement techniques
+mentioned in Section~\ref{sec:introduction} and described in more detail in
+Section~\ref{sec:additional_methods} may be applied on top of it and can
+further improve results, as illustrated by several examples in
+Section~\ref{sec:experiments}.
+
+\noindent The full procedure is summarized in Algorithm~\ref{alg:atoe}, Where each of
+its stages is described in detail in the subsections that follow.
+
+\begin{algorithm}[H]
+\caption{AToE: Adaptive Tree of Experts}
+\label{alg:atoe}
+\begin{algorithmic}[1]
+\Require PDE problem, architectures $\mathcal{A}_{\mathrm{base}}$, $\mathcal{A}_{\mathrm{exp}}$, budget $M$
+\State Train a vanilla PINN $u_0$ with $\mathcal{A}_{\mathrm{base}}$ to convergence
+\State Build a decision tree from $u_0$; trim to an $M$-term complete binary tree
+\State Record $u_0$ on the leaf interfaces
+\ForAll{leaf regions $\Omega_j$ \textbf{in parallel}}
+    \State Train an expert $u_j$ with $\mathcal{A}_{\mathrm{exp}}$ on $\Omega_j$, with interface data from $u_0$
+\EndFor
+\State Blend the experts via smoothstep POU (partition of unity) weights
+\State Fine tune the blended composition under the global loss
+\Ensure Global approximate solution $u_\theta$
+\end{algorithmic}
+\end{algorithm}
+
+\vspace{0.5em}
+
+\subsection{Root Model Training}
+\label{sec:root_training}
+
+The root model $u_0$ follows the classic PINN formulation described in
+Section~\ref{sec:background}. For the second order benchmarks we use an MLP
+with 4 hidden layers of 60 neurons. For the third and fourth order benchmarks
+we use the same architecture combined with a time marching mechanism: the time
+axis is split into windows (4 for KdV, 10 for KS), each window is trained in
+turn, and the prediction of the converged window at its final time serves as
+the initial condition for the next. Training consists of 5k Adam iterations
+with learning rate $10^{-3}$, followed by 40k SSBroyden iterations. Both
+stages use full batch training with 10k residual points and 256 points each
+for the initial and boundary conditions, and all computations are performed in
+double precision, as suggested in~\cite{kiyani2025optimizer}.
 
 \vspace{0.5em}
 
@@ -17,100 +60,25 @@ domain decomposition and MoE (Mixture of Experts) methods.
 \label{sec:tree_construction}
 
 The goal of the decomposition is to partition the domain into regions that
-reflect the local complexity of the solution. To better understand the desired
-structure, we construct reference trees using ground truth solutions,
-where the decomposition is determined directly from the geometric wavelet
-representation. Examples for several benchmark PDEs are shown in
-Figure~\ref{fig:perfect_trees}. These trees provide intuition regarding the
-regions that are expected to receive additional refinement under an ideal
-decomposition and serve as a reference for the adaptive procedures considered
-in this work.
+reflect the local complexity of the solution. A geometric wavelet tree
+$\mathcal{T}$ is constructed from the converged root approximation $u_0$ and
+compressed using an $M$-term approximation, retaining the $M$ nodes with the
+largest geometric wavelet norms $\|\psi_\Omega\|$. To preserve a clean
+hierarchical structure, both the ancestors and the siblings of the selected
+nodes are always retained, so that the accepted regions form a complete binary
+tree in which every point of the domain is covered.
 
-\begin{figure}[H]
-\centering
+\noindent When time-marching is employed, the global budget $M$ is distributed
+across the windows according to a prescribed allocation strategy (e.g.,
+uniform, linear, or quadratic). An independent $M_i$-term tree is then
+constructed within each window, with $\sum_i M_i = M$.
 
-\begin{subfigure}{\textwidth}
-    \centering
-    \includegraphics[width=\textwidth]
-    {images/section3_method/schrodinger_perfect_tree.png}
-    \caption{Schrödinger}
-\end{subfigure}
-
-\vspace{0.5em}
-
-\begin{subfigure}{\textwidth}
-    \centering
-    \includegraphics[width=\textwidth]
-    {images/section3_method/allen_cahn_perfect_tree.png}
-    \caption{Allen--Cahn}
-\end{subfigure}
-
-\vspace{0.5em}
-
-\begin{subfigure}{\textwidth}
-    \centering
-    \includegraphics[width=\textwidth]
-    {images/section3_method/burgers1d_perfect_tree.png}
-    \caption{Burgers}
-\end{subfigure}
-
-\vspace{0.5em}
-
-\begin{subfigure}{\textwidth}
-    \centering
-    \includegraphics[width=\textwidth]
-    {images/section3_method/kdv_perfect_tree.png}
-    \caption{KdV}
-\end{subfigure}
-
-\caption{
-Examples of reference trees constructed from ground truth solutions.
-For each benchmark, the left panel shows the initial tree before pruning,
-the middle panel shows the retained decomposition after pruning according
-to the geometric wavelet norm, and the right panel shows the corresponding
-tree hierarchy. The resulting partitions reveal regions of elevated local
-complexity and illustrate the structures that the proposed adaptive
-decomposition aims to recover during training.
-}
-\label{fig:perfect_trees}
-\end{figure}
-
-\textbf{[TODO: Consider smaller M.]}
-
-\vspace{0.5em}
-
-\noindent In practice, we consider two approaches for constructing the tree:
-
-\noindent {\bf === Assaf: Should the incremental splitting be moved to the future work / discussion?}\\
-\subsubsection{Incremental splitting:} training is performed for a fixed number
-of epochs (or until a convergence criterion), after which a single split is
-introduced by fitting a shallow decision tree (depth 1). The split is accepted
-if it satisfies a norm-based criterion motivated by the theory. This approach may be advantageous when an initial vanilla PINN is unable to
-capture sufficient structure of the solution to reliably estimate a complete
-tree.
-
-\subsubsection{$M$-term tree construction:} following MoE
-training practices that advocate training components
-separately, the root model is first
-trained to convergence using a standard PINN formulation. This root model
-serves a dual purpose: it provides the approximation from which the geometric
-wavelet tree is constructed, and it is subsequently reused as the base expert
-in the final adaptive composition. A geometric wavelet tree is then
-constructed from this converged approximation and compressed using an $M$-term
-approximation, retaining the $M$ largest geometric wavelet coefficients.
-To preserve a clean hierarchical structure, both the ancestors and the
-siblings of the selected nodes are always retained, so that the accepted
-regions form a complete binary tree.
-When time-window training is employed, the global budget $M$ is distributed across the windows according to a prescribed allocation strategy (e.g., uniform, linear, or quadratic). An independent $M_i$-term tree is then constructed within each window, with $\sum_i M_i = M$.
-
-\noindent The $M$-term construction avoids the need to manually select a wavelet-norm
-threshold and is generally more robust to such choices. Furthermore, it
-reduces the interaction between training and tree construction, providing a
-stable initialization of the decomposition while preserving the most
-significant structures identified by the geometric wavelet representation. Examples of the
-resulting decompositions for several benchmark PDEs are shown in
+\noindent Each leaf region $\Omega_j \in \mathcal{L}$ of the resulting tree is
+assigned a neural network expert $u_j$ with the expert architecture
+$\mathcal{A}_{\mathrm{exp}}$, which is smaller than the root architecture. Ee
+use an MLP with 3 hidden layers of 20 neurons. Examples of the resulting
+decompositions for several benchmark PDEs are shown in
 Figure~\ref{fig:mterm_trees}.
-
 \vspace{0.5em}
 
 \begin{figure}[H]
@@ -146,56 +114,225 @@ Figure~\ref{fig:mterm_trees}.
 \caption{KdV}
 \end{subfigure}
 
-\textbf{[TODO: Update KS to be by window, consider smaller M}
+\textbf{[TODO: Update KS, KdV to be by window, update All to actually used M]}
 
 \vspace{0.5em}
 
 \caption{
 Examples of adaptive decompositions obtained using the proposed $M$-term tree
-construction procedure. For each benchmark, an initial vanilla PINN was fully trained. A geometric wavelet tree of maximum depth 15 was then constructed from the resulting approximation and compressed using the $M$-term by norm procedure. The resulting trees fully capture the dominant structures
-observed in the corresponding reference decompositions.
-}
+construction procedure as described in Section~\ref{sec:tree_construction}.}
 \label{fig:mterm_trees}
 \end{figure}
-\textbf{[TODO: Update to fully converged root based trees, consider smaller M.]}
-
-\subsection{Local Neural Network Experts}
-
-Each subdomain is associated with a neural network expert. We consider standard
-architectures such as multilayer perceptrons and residual networks.
-
-\noindent The capacity assigned to each expert may be adapted according to the
-local complexity of the corresponding region. In particular, regions associated
-with larger geometric wavelet norms may require larger models, while smoother
-regions may be represented using smaller networks. This possibility is motivated
-by the relationship between geometric wavelet coefficients, smoothness, and
-approximation rates established in the previous section.
 
 \vspace{0.5em}
 
-\subsection{Compact Smoothstep Windows}
+\subsection{Interpretation of the Adaptive Decomposition}
+\label{sec:interpretation}
+
+As discussed in Section~\ref{sec:background}, the equivalence between the
+Tree-Besov semi-norm and the geometric wavelet norm implies that the decay of
+geometric wavelet coefficients is directly related to the smoothness of the
+underlying function.
+
+\noindent A large geometric wavelet norm at a single node does not necessarily
+imply that the corresponding region is non-smooth, since nodes near the root
+of the tree may simply capture large scale variations of the solution.
+Instead, smoothness is reflected in how rapidly the geometric wavelet norms
+decay along a branch of the tree. Regions associated with branches whose
+coefficients remain significant at increasing depths exhibit slower decay and
+therefore correspond to lower regularity and higher local complexity.
+
+\noindent Viewed through this lens, the tree construction procedure described
+in Section~\ref{sec:tree_construction} naturally favors the retention of
+branches that exhibit slow coefficient decay across multiple levels of the
+hierarchy. Consequently, the resulting decomposition concentrates refinement
+in the less smooth and more complex portions of the domain, while maintaining
+a coarser representation in regions where the coefficient decay is more rapid.
+
+\noindent Extended methods that take further advantage of the theory presented
+here are detailed in Section~\ref{sec:additional_methods}. However, even the
+simple choice of a fixed expert architecture already applies a form of
+adaptive capacity allocation. Regions associated with branches that persist to
+greater depths receive a larger number of experts and therefore a larger
+effective approximation capacity, whereas smoother regions are represented by
+shallower portions of the tree. As illustrated in
+Figure~\ref{fig:capacity_maps}, this mechanism produces a nonlinear
+distribution of capacity across the domain that reflects the underlying
+complexity of the solution.
+
+\vspace{0.5em}
+
+\begin{figure}[H]
+\centering
+
+\begin{subfigure}{0.45\textwidth}
+\centering
+\includegraphics[width=\textwidth]
+{images/section3_method/schrodinger_capacity_map.png}
+\caption{Schrödinger}
+\end{subfigure}
+\hfill
+\begin{subfigure}{0.45\textwidth}
+\centering
+\includegraphics[width=\textwidth]
+{images/section3_method/ks_capacity_map.png}
+\caption{KS}
+\end{subfigure}
+
+\vspace{0.5em}
+
+\begin{subfigure}{0.45\textwidth}
+\centering
+\includegraphics[width=\textwidth]
+{images/section3_method/burgers_capacity_map.png}
+\caption{Burgers}
+\end{subfigure}
+\hfill
+\begin{subfigure}{0.45\textwidth}
+\centering
+\includegraphics[width=\textwidth]
+{images/section3_method/allen_cahn_capacity_map.png}
+\caption{Allen--Cahn}
+\end{subfigure}
+\begin{subfigure}{0.45\textwidth}
+\centering
+\includegraphics[width=\textwidth]
+{images/section3_method/kdv_capacity_map.png}
+\caption{KdV}
+\end{subfigure}
+
+\caption{
+Effective approximation capacity induced by the adaptive decomposition for the
+benchmark PDEs. Trees are constructed using the $M$-term procedure with a
+budget of $M=20$ experts, where each expert is an MLP with 3 hidden layers of
+20 neurons. The heatmaps show the ratio between the number of active
+parameters and the volume of the corresponding leaf region. The KdV and KS
+experiments employ time-marching with $4$ and $10$ windows, respectively.
+}
+\label{fig:capacity_maps}
+\end{figure}
+
+\textbf{[TODO: Update with actual capcity maps.]}
+
+\vspace{0.5em}
+
+\subsection{Expert Training}
+\label{sec:expert_training}
+
+Rather than training the experts through the global loss terms, we exploit a
+core MoE idea and let each expert solve a localized, and therefore easier,
+problem on its own subdomain. Following the interface treatment
+of~\cite{luo2025pdd}, each local problem is closed by taking the values on the
+shared interfaces from the converged root. The predictions of $u_0$ are
+recorded on the interior faces of the leaf regions and serve as boundary data
+for the local problems. Concretely, for each leaf $j$ we minimize a local
+objective
+\begin{equation}
+\mathcal{L}_j
+= \lambda_r\,\mathcal{L}^{\mathrm{res}}_j
++ \lambda_{ic}\,\mathcal{L}^{\mathrm{ic}}_j
++ \lambda_{bc}\,\mathcal{L}^{\mathrm{bc}}_j
++ \lambda_{\Gamma}\,\mathcal{L}^{\Gamma}_j,
+\label{eq:leaf_local_loss}
+\end{equation}
+where $\mathcal{L}^{\mathrm{res}}_j$ enforces the PDE residual on collocation
+points inside $\Omega_j$, and $\mathcal{L}^{\mathrm{ic}}_j$,
+$\mathcal{L}^{\mathrm{bc}}_j$ enforce the true initial and boundary conditions
+on the parts of $\partial\Omega_j$ that coincide with the physical boundary of
+$\Omega$. The interface term $\mathcal{L}^{\Gamma}_j$ acts on the interior
+faces $\Gamma_j$ that $\Omega_j$ shares with its neighbors. Let
+$X^{\Gamma}_j$ denote the set of sample points on $\Gamma_j$. The loss ties
+the local solution to the frozen root prediction $u_0$:
+\begin{equation}
+\mathcal{L}^{\Gamma}_j
+= \frac{1}{|X^{\Gamma}_j|}
+\sum_{(x,t)\in X^{\Gamma}_j}
+\bigl\| u_j(x,t) - u_0(x,t) \bigr\|^2 .
+\label{eq:interface_loss}
+\end{equation}
+In this way every expert learns a well-posed local PDE whose boundary data on
+the interior interfaces is supplied by the root, so the leaves can be trained
+independently, and in parallel, while remaining mutually consistent.
+
+\noindent When model size is not a concern, one may set
+$\mathcal{A}_{\mathrm{exp}} = \mathcal{A}_{\mathrm{base}}$ and initialize each
+expert by copying the weights of the root, so that at initialization every
+expert reproduces the root prediction on its region. This warm start reduces
+expert training time. The experts are trained with the same scheme as the root
+(Section~\ref{sec:root_training}). The loss
+weights $\lambda_r$, $\lambda_{ic}$, and $\lambda_{bc}$ are kept from the root
+training, and the interface weight is set to $\lambda_{\Gamma} = 1$. Examples of interface training samples for inner domain experts are shown in
+Figure~\ref{fig:local_expert_training}.
+
+\vspace{0.5em}
+
+\begin{figure}[H]
+\centering
+
+\begin{subfigure}{0.4\textwidth}
+\centering
+\includegraphics[width=\textwidth]
+{images/section3_method/local_expert_training_schrodinger.png}
+\caption{Schrödinger}
+\end{subfigure}
+\hfill
+\begin{subfigure}{0.4\textwidth}
+\centering
+\includegraphics[width=\textwidth]
+{images/section3_method/local_expert_training_allen_cahn.png}
+\caption{Allen--Cahn}
+\end{subfigure}
+
+\vspace{0.5em}
+
+\begin{subfigure}{0.4\textwidth}
+\centering
+\includegraphics[width=\textwidth]
+{images/section3_method/local_expert_training_burgers.png}
+\caption{Burgers}
+\end{subfigure}
+\hfill
+\begin{subfigure}{0.4\textwidth}
+\centering
+\includegraphics[width=\textwidth]
+{images/section3_method/local_expert_training_kdv.png}
+\caption{KdV}
+\end{subfigure}
+
+\vspace{0.5em}
+
+\caption{
+Examples of interface training samples for inner-domain experts, carrying
+boundary data from the root prediction $u_0$.
+}
+\label{fig:local_expert_training}
+\end{figure}
+
+\subsection{Smooth Blending and Global Fine-Tuning}
 \label{sec:smoothstep_windows}
 
-Let $\Omega \subset \mathbb{R}^d$ denote the computational domain, and let
+The trained leaf experts are combined into a single global approximation
+through smooth, compactly supported window functions. Let
+$\Omega \subset \mathbb{R}^d\times[0,T]$ denote the computational domain, and let
 $\{\Omega_i\}_{i=0}^{k}$ be the set of regions obtained from the hierarchical
 decision tree decomposition, where each region is an axis-aligned hypercube
 \[
-\Omega_i = [a_{i,1}, b_{i,1}] \times \cdots \times [a_{i,d}, b_{i,d}].
+\Omega_i = [a_{i,1}, b_{i,1}] \times \cdots \times [a_{i,d+1}, b_{i,d+1}].
 \]
-Each region $\Omega_i$ is associated with a neural network expert $u_i(x,t)$.
 
-\noindent To smoothly blend the contributions of different experts while ensuring
-compatibility with the PDE's differential order, we define compactly supported
-window functions with configurable smoothness. Let $N$ denote the smoothness
-order, chosen such that $N$ is at least the highest order of any partial
-derivative appearing in the PDE (e.g., $N \geq 2$ for Burgers or Allen--Cahn,
-$N \geq 3$ for KdV, $N \geq 4$ for KS). Since the domain decomposition
-operates over all dimensions including time, no dimension receives special
-treatment and the window must be sufficiently smooth for all derivatives.
+\noindent To smoothly blend the contributions of different experts while
+ensuring compatibility with the PDE's differential order, we define compactly
+supported window functions with configurable smoothness. Let $N$ denote the
+smoothness order, chosen such that $N$ is at least the highest order of any
+partial derivative appearing in the PDE (e.g., $N \geq 2$ for Burgers or
+Allen--Cahn, $N \geq 3$ for KdV, $N \geq 4$ for KS). Since the domain
+decomposition operates over all dimensions including time, no dimension
+receives special treatment and the window must be sufficiently smooth for all
+derivatives.
 
-\noindent We first define the smoothstep polynomial $S_N : [0,1] \to [0,1]$, which
-satisfies $S_N(0) = 0$, $S_N(1) = 1$, and $S_N^{(k)}(0) = S_N^{(k)}(1) = 0$
-for $k = 1, \ldots, N$:
+\noindent We first define the smoothstep polynomial $S_N : [0,1] \to [0,1]$,
+which satisfies $S_N(0) = 0$, $S_N(1) = 1$, and
+$S_N^{(k)}(0) = S_N^{(k)}(1) = 0$ for $k = 1, \ldots, N$:
 \begin{align}
 S_1(t) &= 3t^2 - 2t^3 \quad \text{($C^1$)} \\
 S_2(t) &= 6t^5 - 15t^4 + 10t^3 \quad \text{($C^2$)} \\
@@ -212,28 +349,28 @@ S_N(s) & \text{if } 0 < s < 1 \\
 \end{cases}
 \end{equation}
 
-\noindent For region $\Omega_i$ with bounds $[a_{i,j}, b_{i,j}]$ along dimension $j$,
-let $\delta_{i,j} = \alpha (b_{i,j} - a_{i,j})$ denote the collar (transition)
-half-width, where $\alpha > 0$ is a configurable fraction (typically $\alpha = 0.2$).
-The one-dimensional window along dimension $j$ is:
+\noindent For region $\Omega_i$ with bounds $[a_{i,j}, b_{i,j}]$ along
+dimension $j$, let $\delta_{i,j} = \alpha (b_{i,j} - a_{i,j})$ denote the
+collar (transition) half-width, where $\alpha > 0$ is a configurable fraction
+(typically $\alpha = 0.2$). The one dimensional window along dimension $j$ is:
 \begin{equation}
 \omega_{i,j}(x_j) = \rho_N\!\left(\frac{x_j - (a_{i,j} - \delta_{i,j})}{\delta_{i,j}}\right) \cdot \rho_N\!\left(\frac{(b_{i,j} + \delta_{i,j}) - x_j}{\delta_{i,j}}\right)
 \label{eq:window_1d}
 \end{equation}
 
-\noindent This produces a \emph{flat-top} window: $\omega_{i,j}(x_j) = 1$ for $x_j \in [a_{i,j}, b_{i,j}]$,
-smooth $C^N$ ramps in the collars $[a_{i,j} - \delta_{i,j}, a_{i,j}]$ and
-$[b_{i,j}, b_{i,j} + \delta_{i,j}]$, and \emph{exactly zero} outside
+\noindent This produces a flat-top window: $\omega_{i,j}(x_j) = 1$ for
+$x_j \in [a_{i,j}, b_{i,j}]$, smooth $C^N$ ramps in the collars
+$[a_{i,j} - \delta_{i,j}, a_{i,j}]$ and $[b_{i,j}, b_{i,j} + \delta_{i,j}]$,
+and exactly zero outside
 $[a_{i,j} - \delta_{i,j}, b_{i,j} + \delta_{i,j}]$.
 
-\noindent The region indicator function is the tensor product over all dimensions:
+\noindent The region indicator function is therefore the tensor product of the
+one dimensional windows over all dimensions:
 \begin{equation}
-\Psi_{\Omega_i}(X) = \prod_{j=1}^{d} \omega_{i,j}(x_j)
+\Psi_{\Omega_i}(X) = \prod_{j=1}^{d} \omega_{i,j}(x_j),
+\qquad X = (x_1,\ldots,x_d),
 \label{eq:smoothstep_windows}
 \end{equation}
-
-\noindent The expert associated with the root node (corresponding to the entire domain)
-has a constant indicator $\Psi_{\Omega_0}(X) = 1$ everywhere.
 
 \begin{figure}[H]
 \centering
@@ -252,201 +389,48 @@ has a constant indicator $\Psi_{\Omega_0}(X) = 1$ everywhere.
 
 \caption{
 Compact smoothstep window functions ($C^2$, collar fraction $\alpha = 0.2$) for a
-representative domain decomposition. Each window is exactly $1$ inside its region,
-transitions smoothly to $0$ across the collar, and is exactly $0$ outside it.
-\emph{Left:} one-dimensional slices for several regions, showing the flat-top
-response and smooth collar transitions. \emph{Right:} two-dimensional indicator
+representative domain decomposition. Left: one dimensional slices for several regions, showing the flat-top
+response and smooth collar transitions. Right: two dimensional indicator
 heatmaps $\Psi_{\Omega_i}(X)$, illustrating the compact support and smooth blending
 collars.
 }
 \label{fig:window_demo}
 \end{figure}
 
-\vspace{0.5em}
-
-\subsection{Global Composition and Expert Training}
-\label{sec:variants}
-
-The hierarchical decomposition and its associated region indicator functions
-$\Psi_{\Omega_i}$ define a structured collection of local experts, but they do not
-by themselves prescribe how the experts should be combined into a single global
-approximation, nor how they should be trained. Many creative possibilities arise
-once such a structure is available, and the MoE literature offers
-useful guidance on how to
-exploit it. Below we
-outline a spectrum of composition strategies of increasing sophistication and then
-describe, in detail, the non-additive leaf formulation adopted for the experiments
-reported in this paper. Throughout, the tree closure always retains both the
-ancestors and the siblings of the selected nodes, so the accepted regions form a
-complete binary tree in which every point of the domain is covered.\\
-{\bf === Assaf: Should the methods we don't use be be moved to the future work / discussion?}\\
-\subsubsection{Additive composition - AToE (Adaptive Tree of Experts).}
-The most direct strategy treats each expert as an additive residual correction on
-top of the converged root. The root expert contributes with coefficient
-exactly one, and every other expert adds a weighted correction:
-\begin{equation}
-u_\theta(x,t) = u_0(x,t) + \sum_{\ell=1}^{L} \sum_{i:\,\text{level}(i)=\ell}
-w_i(x,t)\, u_i(x,t)
-\label{eq:global_atoe}
-\end{equation}
-where the per-level weights form a partition of unity over the experts at that
-level,
-\begin{equation}
-w_i(X) = \frac{\Psi_{\Omega_i}(X)}{\sum_{k:\,\text{level}(k)=\ell(i)} \Psi_{\Omega_k}(X)}.
-\label{eq:normalization_atoe}
-\end{equation}
-In the additive setting one may alternatively choose not to retain the siblings
-and adopt a different, base-aware POU that folds the root into the
-normalization, so that any region left without a dedicated expert is carried by
-the base.
-Because the correction is additive and organized by level, this variant naturally
-admits a coarse-to-fine schedule in which one level of experts is trained at a
-time with the previous levels frozen, stopping the refinement once the target
-accuracy is reached; alternatively, one may normalize the indicators over the
-whole tree and train all experts jointly in a single stage. Such composition and
-training choices are exactly the kind explored in the MoE literature.
-\\
-{\bf === Assaf: Should the methods we don't use be be moved to the future work / discussion?}\\
-\subsubsection{Hierarchical activation propagation - ANT (Adaptive Neural Tree).}
-A more expressive strategy lets information flow along the tree. Instead of the
-raw coordinates, each expert receives the last hidden layer activation
-$A_{\mathrm{parent}(i)}$ of its parent and returns both a prediction and an
-activation for its own children:
-\begin{equation}
-u_i\!\left(A_{\mathrm{parent}(i)}(x,t)\right)
-= \left( u_i^{*}(x,t),\; A_i(x,t) \right).
-\label{eq:ant_activation}
-\end{equation}
-The global solution is the POU combination over the leaves
-$\mathcal{L}$,
-\begin{equation}
-u_\theta(x,t) = \sum_{j \in \mathcal{L}}
-\tilde{\Psi}_{\Omega_j}(x,t)\, u_j^{*}(x,t),
-\label{eq:global_ant}
-\end{equation}
-with the leaf normalization
-\begin{equation}
-\tilde{\Psi}_{\Omega_i}(X) = \frac{\Psi_{\Omega_i}(X)}{\sum_{j \in \mathcal{L}} \Psi_{\Omega_j}(X)}.
-\label{eq:normalization_ant}
-\end{equation}
-By propagating activations down the tree, deeper regions are effectively
-represented by deeper, composed networks. The non-smooth, complex regions that
-attract additional refinement are therefore modeled by more expressive functions,
-while smoother regions remain shallow. This ties model capacity to local
-complexity. As in the additive case, one may also train the tree level by level:
-at each stage the current leaves act as the outputs, the levels that have finished
-training are frozen, and the next level of experts is grown on top of them.
-
-\subsubsection{Non-additive leaf composition (AToE-Leaves).}
-The formulation we adopt in this paper is non-additive and uses only the leaves of
-the tree. Once the leaf experts are spawned the root retires from the blend, and
-the global solution is the POU combination of the leaves alone:
+\noindent Given the indicators, the global solution of AToE is the
+partition of unity (POU) combination over the set of leaves $\mathcal{L}$ of
+the trimmed tree:
 \begin{equation}
 u_\theta(x,t) =
 \sum_{j \in \mathcal{L}}
 \tilde{\Psi}_{\Omega_j}(x,t)\, u_j(x,t),
-\label{eq:global_atoe_leaves}
+\label{eq:global_atoe}
 \end{equation}
-with
+with the leaf normalization
 \begin{equation}
-\tilde{\Psi}_{\Omega_i}(X) = \frac{\Psi_{\Omega_i}(X)}{\sum_{j \in \mathcal{L}} \Psi_{\Omega_j}(X)},
-\label{eq:normalization_leaves}
+\tilde{\Psi}_{\Omega_i}(X) = \frac{\Psi_{\Omega_i}(X)}{\sum_{j \in \mathcal{L}} \Psi_{\Omega_j}(X)}.
+\label{eq:normalization_atoe}
 \end{equation}
-where $\mathcal{L}$ is the complete set of leaves.
-
-\noindent Rather than training the experts through the global loss terms, we
-exploit a core MoE idea and let each expert solve a localized, and therefore
-easier, problem on its own subdomain. Following the interface treatment
-of~\cite{luo2025pdd}, each local problem is closed by taking the values on the shared
-interfaces from the converged root. Concretely, for each leaf $j$ we minimize a
-local objective
-\begin{equation}
-\mathcal{L}_j
-= \lambda_r\,\mathcal{L}^{\mathrm{res}}_j
-+ \lambda_{ic}\,\mathcal{L}^{\mathrm{ic}}_j
-+ \lambda_{bc}\,\mathcal{L}^{\mathrm{bc}}_j
-+ \lambda_{\Gamma}\,\mathcal{L}^{\Gamma}_j,
-\label{eq:leaf_local_loss}
-\end{equation}
-where $\mathcal{L}^{\mathrm{res}}_j$ enforces the PDE residual on collocation
-points inside $\Omega_j$, and $\mathcal{L}^{\mathrm{ic}}_j$,
-$\mathcal{L}^{\mathrm{bc}}_j$ enforce the true initial and boundary conditions on
-the parts of $\partial\Omega_j$ that coincide with the physical boundary of
-$\Omega$. The interface term $\mathcal{L}^{\Gamma}_j$ acts on the interior faces
-$\Gamma_j$ that $\Omega_j$ shares with its neighbors and ties the local solution to
-the frozen root prediction $u_0$:
-\begin{equation}
-\mathcal{L}^{\Gamma}_j
-= \frac{1}{|X^{\Gamma}_j|}
-\sum_{(x,t)\in X^{\Gamma}_j}
-\bigl\| u_j(x,t) - u_0(x,t) \bigr\|^2 .
-\label{eq:interface_loss}
-\end{equation}
-In this way every expert learns a well-posed local PDE whose boundary data on the
-interior interfaces is supplied by the root, so the leaves can be trained
-independently while remaining mutually consistent.
-
-\noindent Finally, the trained leaves are assembled through the POU blend
-\eqref{eq:global_atoe_leaves} and the full composition is jointly fine tuned under
-the global PDE loss. This last stage reconciles the independently trained
-experts in the collar zones where neighboring windows overlap, producing a single,
-globally consistent solution.
+Once the leaf experts are spawned the root retires from the blend, it is used
+only for the tree construction and the interface data, and the composition is
+carried by the leaves alone. Example normalized blending weights are shown in
+Figure~\ref{fig:normalization_weights}.
 
 \begin{figure}[H]
 \centering
-\includegraphics[
-    width=0.9\textwidth,
-    trim={0cm 8cm 0cm 1cm},
-    clip]{images/section3_method/atoe_variants}
-\caption{Visualization of the AToE, AToE-Leaves, and ANT formulations.}
-\label{fig:atoe_variants}
-\end{figure}
-
-\vspace{0.5em}
-
-\begin{figure}[H]
-\centering
-
-\begin{subfigure}[c]{0.48\textwidth}
-    \centering
-    \includegraphics[width=\textwidth]
-    {images/section3_method/soft_weights_atoe.png}
-\end{subfigure}
-\hfill
-\begin{subfigure}[c]{0.48\textwidth}
-    \centering
-    \includegraphics[width=\textwidth]
-    {images/section3_method/soft_weights_atoe-leaves.png}
-\end{subfigure}
-
+\includegraphics[width=0.6\textwidth]
+{images/section3_method/soft_weights_atoe-leaves.png}
 \caption{
-Example normalized blending weights for the two normalization strategies. dashed rectangles indicate expert region bounds.
-\emph{Left (AToE):} the base model retains a uniform contribution
-($\Psi_0$ constant across the domain) while experts add localized corrections,
-each level normalized against a background of $1$ to allow partial coverage.
-\emph{Right (AToE-Leaves):} the base is excluded and the leaf experts form a
-POU over the domain, each covering its region with smooth transitions in the
-collar zones.
+Example normalized blending weights for the AToE leaf composition. Dashed
+rectangles indicate expert region bounds. The leaf experts form a POU over the
+domain, each covering its region with smooth transitions in the collar zones.
 }
 \label{fig:normalization_weights}
 \end{figure}
 
-\subsection{Training and Implementation Details}
-
-The training procedure follows standard PINN optimization, with several enhancements
-to improve convergence and stability. In particular, we incorporate:
-
-\begin{itemize}
-    \item Adaptive sampling strategies~\cite{wu2023rad}.
-    \item Causal training for time-dependent problems~\cite{wang2022causal}.
-    \item Adaptive loss weighting (e.g., LRA)~\cite{wang2021lra}.
-    \item Fourier feature embeddings~\cite{tancik2020fourier}.
-    \item Weight factorization techniques~\cite{wang2021weightfactorization}.
-    \item Second-stage optimizers (e.g., L-BFGS, SSBroyden)~\cite{kiyani2025optimizer}.
-    \item Double precision arithmetic.
-    \item Expert initialization techniques: parent weight copying for hidden
-    layers with variant specific output layer handling (zeroed for AToE additive
-    residuals, copied for AToE-Leaves/ANT POU continuity).
-\end{itemize}
-
-\textbf{[TODO: Clarify which techniques are used in final experiments]}
+\noindent Finally, the full composition \eqref{eq:global_atoe} is jointly fine
+tuned under the global PDE loss. This last stage reconciles the independently
+trained experts in the collar zones where neighboring windows overlap,
+producing a single, globally consistent solution. The fine tuning stage
+applies the same training scheme as in Section~\ref{sec:root_training}, with a
+single change: the Adam learning rate is decreased to $10^{-4}$.
