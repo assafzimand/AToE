@@ -52,7 +52,7 @@ Scope: the "cleanest run" configuration (no causal / LRA / FF / RWF / adaptive-s
 
 ## C — Potential bugs / metric issues / paper–pipeline mismatches
 
-> **Status (2026-07-09):** C1–C9 addressed (C1: pairing extended to all periodic problems; C3: KdV only — TM is only used for KdV/KS; C8: log/docstring phrasing separates the M-term budget from expert counts; C9: `eval_blending_mode` flag added per eval epoch — the mixed-regime curve itself is intended). C10–C15 deliberately left open for now.
+> **Status (2026-07-09):** C1–C9 addressed (C1: pairing extended to all periodic problems; C3: KdV only — TM is only used for KdV/KS; C8: log/docstring phrasing separates the M-term budget from expert counts; C9: `eval_blending_mode` flag added per eval epoch — the mixed-regime curve itself is intended). C10–C14 addressed in `docs/3_method_updated.tex` on the `AToE` branch (C10/C11: resampling + early stopping stated in every training stage; C12: §Expert Training rewritten for the redesigned closure — inflated regions, u₀ face guides with derivative matching, exact IC/BC on the composition, interface anneal, per-leaf normalization, with FBPINN/XPINN/Schwarz/APINN citations; C13: KdV `num_windows` 5→4 in the YAML; C14: Ψ product over d+1). C15 skipped — already fixed in code by B9, not paper-relevant.
 
 ### Real bugs
 

@@ -27,10 +27,8 @@ its stages is described in detail in the subsections that follow.
 \Require PDE problem, architectures $\mathcal{A}_{\mathrm{base}}$, $\mathcal{A}_{\mathrm{exp}}$, budget $M$
 \State Train a vanilla PINN $u_0$ with $\mathcal{A}_{\mathrm{base}}$ to convergence
 \State Build a decision tree from $u_0$; trim to an $M$-term complete binary tree
-\State Record $u_0$ on the leaf interfaces
-\ForAll{leaf regions $\Omega_j$ \textbf{in parallel}}
-    \State Train an expert $u_j$ with $\mathcal{A}_{\mathrm{exp}}$ on $\Omega_j$, with interface data from $u_0$
-\EndFor
+\State Record $u_0$ (values and normal derivatives) on the faces of the inflated leaf regions $\tilde\Omega_j$
+\State Train the experts $u_j$ with $\mathcal{A}_{\mathrm{exp}}$, each on its region $\tilde\Omega_j$ with the recorded $u_0$ data as face guides, while the true IC/BC are enforced on the blended composition
 \State Blend the experts via smoothstep POU (partition of unity) weights
 \State Fine tune the blended composition under the global loss
 \Ensure Global approximate solution $u_\theta$
@@ -52,7 +50,13 @@ the initial condition for the next. Training consists of 5k Adam iterations
 with learning rate $10^{-3}$, followed by 40k SSBroyden iterations. Both
 stages use full batch training with 10k residual points and 256 points each
 for the initial and boundary conditions, and all computations are performed in
-double precision, as suggested in~\cite{kiyani2025optimizer}.
+double precision, as suggested in~\cite{kiyani2025optimizer}. The residual
+collocation points are resampled every 500 iterations, during the
+quasi-Newton stage as well, to prevent the full-batch optimizer from
+overfitting the collocation set~\cite{kiyani2025optimizer}, and training
+stops early once the loss has converged (no relative improvement over
+several consecutive resampling intervals). The same resampling and early
+stopping scheme is applied to every training stage in this work.
 
 \vspace{0.5em}
 
@@ -219,50 +223,115 @@ experiments employ time-marching with $4$ and $10$ windows, respectively.
 \subsection{Expert Training}
 \label{sec:expert_training}
 
+% NEW BIB KEYS NEEDED: moseley2023fbpinn (FBPINNs, Moseley et al., ACOM 2023 /
+% arXiv:2107.07871), jagtap2020xpinns (XPINNs, Jagtap & Karniadakis, CiCP 2020),
+% snyder2023schwarz (DD-based coupling of PINNs via the Schwarz alternating
+% method, arXiv:2311.00224), hu2023apinn (Augmented PINNs, Hu et al., EAAI 2023).
+
 Rather than training the experts through the global loss terms, we exploit a
 core MoE idea and let each expert solve a localized, and therefore easier,
-problem on its own subdomain. Following the interface treatment
-of~\cite{luo2025pdd}, each local problem is closed by taking the values on the
-shared interfaces from the converged root. The predictions of $u_0$ are
-recorded on the interior faces of the leaf regions and serve as boundary data
-for the local problems. Concretely, for each leaf $j$ we minimize a local
-objective
+problem on its own subdomain, guided by the converged root, in the spirit
+of the interface treatment of~\cite{luo2025pdd}.
+
+\noindent\textbf{Training regions.} Each leaf expert is trained on the
+\emph{inflated} region
 \begin{equation}
-\mathcal{L}_j
-= \lambda_r\,\mathcal{L}^{\mathrm{res}}_j
-+ \lambda_{ic}\,\mathcal{L}^{\mathrm{ic}}_j
-+ \lambda_{bc}\,\mathcal{L}^{\mathrm{bc}}_j
-+ \lambda_{\Gamma}\,\mathcal{L}^{\Gamma}_j,
+\tilde\Omega_j = \Bigl(\,\prod_{i=1}^{d+1}
+[\,a_{j,i} - \delta_{j,i},\; b_{j,i} + \delta_{j,i}\,]\Bigr) \cap \Omega,
+\qquad \delta_{j,i} = \alpha\,(b_{j,i} - a_{j,i}),
+\label{eq:inflated_region}
+\end{equation}
+i.e.\ its leaf region enlarged by the collar of its blending window
+(Section~\ref{sec:smoothstep_windows}) and clipped to the domain. This is
+exactly the support of the window $\Psi_{\Omega_j}$, so every expert is
+trained on the entire set where the final composition evaluates it, in the
+manner of the overlapping subdomains of FBPINN~\cite{moseley2023fbpinn}. As
+in~\cite{moseley2023fbpinn}, the inputs of each expert are affinely
+normalized from $\tilde\Omega_j$ to $[-1,1]^{d+1}$ before its MLP, which
+conditions the small networks well even for deep leaves whose coordinate
+ranges are tiny fractions of the domain.
+
+\noindent\textbf{Face guides from the root.} The predictions of $u_0$ are
+recorded on the outer faces of $\tilde\Omega_j$ and serve as \emph{guide}
+data for the local problems: values on the lower temporal face
+$\Gamma^{t}_j$, and values together with the spatial normal derivative on
+the two spatial faces $\Gamma^{x}_j$ whenever the global boundary
+conditions of the problem constrain both $u$ and $u_x$ (e.g.\ periodic
+problems); derivative interface conditions of this kind follow the XPINN
+treatment~\cite{jagtap2020xpinns}. Faces that fall on the physical boundary
+of $\Omega$ or on $t{=}0$ receive the same $u_0$ guides and no special
+treatment. With $X^{\Gamma t}_j$, $X^{\Gamma x}_j$ the sample sets on the
+faces and $C$ the number of solution components,
+\begin{align}
+\mathcal{L}^{\Gamma t}_j
+&= \frac{1}{|X^{\Gamma t}_j|}\sum_{(x,t)\in X^{\Gamma t}_j}
+\bigl\| u_j(x,t) - u_0(x,t) \bigr\|^2,
+\label{eq:interface_loss}\\
+\mathcal{L}^{\Gamma x}_j
+&= \frac{1}{|X^{\Gamma x}_j|}\sum_{(x,t)\in X^{\Gamma x}_j}
+\bigl\| u_j(x,t) - u_0(x,t) \bigr\|^2,
+\qquad
+\mathcal{L}^{\Gamma x'}_j
+= \frac{1}{C\,|X^{\Gamma x}_j|}\sum_{c=1}^{C}\sum_{(x,t)\in X^{\Gamma x}_j}
+\bigl( \partial_x u_{j,c} - \partial_x u_{0,c} \bigr)^2 .
+\label{eq:interface_deriv_loss}
+\end{align}
+
+\noindent\textbf{Exact constraints on the composition.} The true initial and
+boundary conditions are not imposed per expert; they are enforced once, on
+the blended composition $u_\theta$ of
+Eq.~\eqref{eq:global_atoe} --- the object that is actually evaluated and
+reported --- using the standard global loss terms of
+Section~\ref{sec:background}. The full expert-training objective is
+\begin{equation}
+\mathcal{L}
+= \sum_{j\in\mathcal{L}}
+\Bigl[
+\lambda_r\,\mathcal{L}^{\mathrm{res}}_j
++ s(e)\,\bigl(
+\lambda_{ic}\,\mathcal{L}^{\Gamma t}_j
++ \lambda_{bc}\,(\mathcal{L}^{\Gamma x}_j + \mathcal{L}^{\Gamma x'}_j)
+\bigr)
+\Bigr]
++ \lambda_{ic}\,\mathcal{L}^{\mathrm{ic}}(u_\theta)
++ \lambda_{bc}\,\mathcal{L}^{\mathrm{bc}}(u_\theta),
 \label{eq:leaf_local_loss}
 \end{equation}
-where $\mathcal{L}^{\mathrm{res}}_j$ enforces the PDE residual on collocation
-points inside $\Omega_j$, and $\mathcal{L}^{\mathrm{ic}}_j$,
-$\mathcal{L}^{\mathrm{bc}}_j$ enforce the true initial and boundary conditions
-on the parts of $\partial\Omega_j$ that coincide with the physical boundary of
-$\Omega$. The interface term $\mathcal{L}^{\Gamma}_j$ acts on the interior
-faces $\Gamma_j$ that $\Omega_j$ shares with its neighbors. Let
-$X^{\Gamma}_j$ denote the set of sample points on $\Gamma_j$. The loss ties
-the local solution to the frozen root prediction $u_0$:
+where $\mathcal{L}^{\mathrm{res}}_j$ enforces the PDE residual on
+collocation points inside $\tilde\Omega_j$ (collocation points in a collar
+shared by several windows contribute to each covering expert). This mixed
+enforcement --- weak $u_0$ guides on the subdomain faces, exact constraints
+on the composed model --- follows the Schwarz-type couplings of PINNs
+in~\cite{snyder2023schwarz}. The per-expert terms are separable, so the
+experts solve mutually consistent local problems tied together only by the
+shared frozen root and by the composition terms.
+
+\noindent\textbf{Interface annealing.} Since the guide targets inherit the
+root's error, keeping them at full weight would pin the experts to the
+accuracy of $u_0$. The guide terms are therefore scaled by an optional
+linear anneal
 \begin{equation}
-\mathcal{L}^{\Gamma}_j
-= \frac{1}{|X^{\Gamma}_j|}
-\sum_{(x,t)\in X^{\Gamma}_j}
-\bigl\| u_j(x,t) - u_0(x,t) \bigr\|^2 .
-\label{eq:interface_loss}
+s(e) = 1 - w\,\frac{e - e_0}{E}, \qquad w \in [0,1],
+\label{eq:interface_anneal}
 \end{equation}
-In this way every expert learns a well-posed local PDE whose boundary data on
-the interior interfaces is supplied by the root, so the leaves can be trained
-independently, and in parallel, while remaining mutually consistent.
+where $e$ is the current iteration, $e_0$ the start and $E$ the budget of
+the expert-training stage; $w=0$ (the default) keeps the guides fixed,
+while $w>0$ lets the experts progressively detach from the root as their
+own residual improves, consistent with penalty-annealing practice in
+domain-decomposed PINNs~\cite{hu2023apinn}. The exact composition terms are
+never annealed.
 
 \noindent When model size is not a concern, one may set
 $\mathcal{A}_{\mathrm{exp}} = \mathcal{A}_{\mathrm{base}}$ and initialize each
-expert by copying the weights of the root, so that at initialization every
-expert reproduces the root prediction on its region. This warm start reduces
-expert training time. The experts are trained with the same scheme as the root
-(Section~\ref{sec:root_training}). The loss
-weights $\lambda_r$, $\lambda_{ic}$, and $\lambda_{bc}$ are kept from the root
-training, and the interface weight is set to $\lambda_{\Gamma} = 1$. Examples of interface training samples for inner domain experts are shown in
-Figure~\ref{fig:local_expert_training}.
+expert by copying the weights of the root (with the per-expert input
+normalization disabled), so that at initialization every expert reproduces
+the root prediction on its region; this warm start reduces expert training
+time. The experts are trained with the same scheme as the root
+(Section~\ref{sec:root_training}), including the collocation resampling and
+early stopping described there. The loss weights $\lambda_r$,
+$\lambda_{ic}$, and $\lambda_{bc}$ are kept from the root training.
+Examples of face-guide training samples for inner domain experts are shown
+in Figure~\ref{fig:local_expert_training}.
 
 \vspace{0.5em}
 
@@ -302,8 +371,9 @@ Figure~\ref{fig:local_expert_training}.
 \vspace{0.5em}
 
 \caption{
-Examples of interface training samples for inner-domain experts, carrying
-boundary data from the root prediction $u_0$.
+Examples of face-guide training samples for inner-domain experts, carrying
+value (and, on spatial faces, derivative) data from the root prediction
+$u_0$ on the faces of the inflated regions $\tilde\Omega_j$.
 }
 \label{fig:local_expert_training}
 \end{figure}
@@ -365,10 +435,10 @@ and exactly zero outside
 $[a_{i,j} - \delta_{i,j}, b_{i,j} + \delta_{i,j}]$.
 
 \noindent The region indicator function is therefore the tensor product of the
-one dimensional windows over all dimensions:
+one dimensional windows over all dimensions, time included:
 \begin{equation}
-\Psi_{\Omega_i}(X) = \prod_{j=1}^{d} \omega_{i,j}(x_j),
-\qquad X = (x_1,\ldots,x_d),
+\Psi_{\Omega_i}(X) = \prod_{j=1}^{d+1} \omega_{i,j}(x_j),
+\qquad X = (x_1,\ldots,x_d,t),
 \label{eq:smoothstep_windows}
 \end{equation}
 
@@ -432,5 +502,7 @@ domain, each covering its region with smooth transitions in the collar zones.
 tuned under the global PDE loss. This last stage reconciles the independently
 trained experts in the collar zones where neighboring windows overlap,
 producing a single, globally consistent solution. The fine tuning stage
-applies the same training scheme as in Section~\ref{sec:root_training}, with a
-single change: the Adam learning rate is decreased to $10^{-4}$.
+applies the same training scheme as in Section~\ref{sec:root_training} ---
+including the collocation resampling every 500 iterations and the early
+stopping on convergence --- with a single change: the Adam learning rate is
+decreased to $10^{-4}$.
