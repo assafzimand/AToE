@@ -366,6 +366,7 @@ base_config:
     expert_type: mlp
     blending_mode: soft
     sigma_fraction: 0.2
+    per_leaf_normalization: true
     tree_max_depth: 15
     tree_min_samples_leaf: 50
     enable_timing: false
@@ -374,6 +375,7 @@ base_config:
     epsilon_node_acceptance: 0.00
     split_icbc:
       enabled: true
+      interface_decrease_weight: 0.0
     initial_train:
       epochs: 45000
       optimizer_1: adam
@@ -395,6 +397,7 @@ base_config:
       lr_decay_steps: 1000
       lr_warmup_steps: 0
       l2sp_lambda: 0.0
+      collar_data_ratio: 0.0
 experiments:
 # - name: burgers
 #   problem: burgers1d

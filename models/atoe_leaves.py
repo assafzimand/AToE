@@ -22,7 +22,8 @@ from models.fc_model import FCNet
 from models.network_factory import create_network
 from adaptive.indicators import (
     RegionDescriptor,
-    BatchedIndicators
+    BatchedIndicators,
+    inflated_bounds,
 )
 from utils.logging_config import get_logger
 
@@ -49,6 +50,15 @@ class AToELeaves(nn.Module):
         self.max_experts = adaptive_config['max_experts']
         self.sigma_fraction = adaptive_config['sigma_fraction']
         self.expert_type = adaptive_config['expert_type']
+
+        # D1: per-leaf input normalization — each expert's inputs are
+        # affinely mapped from its inflated training box (region + window
+        # collar, clipped to the domain; the same box whose faces carry the
+        # interface data) to [-1, 1]^(d+1).
+        self.per_leaf_normalization = adaptive_config.get(
+            'per_leaf_normalization', True)
+        self._norm_lo = None  # (K, D) inflated-box lower bounds
+        self._norm_hi = None  # (K, D) inflated-box upper bounds
         
         # Blending mode: 'soft' (PoU) or 'hard' (step functions, mean on shared faces)
         self.blending_mode = adaptive_config.get('blending_mode', 'soft')
@@ -113,11 +123,12 @@ class AToELeaves(nn.Module):
         """Forward pass for a single leaf expert. No PoU.
 
         Returns the raw expert output u_j for use in per-expert split loss.
-        AToE-Leaves experts take raw (x,t) coordinates directly.
+        Inputs are raw (x,t) coordinates; per-leaf normalization (D1) is
+        applied inside when enabled.
         """
         if expert_idx == -1:
             return self.base_model(inputs)
-        return self.experts[expert_idx](inputs)
+        return self._expert_forward(expert_idx, inputs)
 
     def get_regions_at_depth(self, depth: int, before_epoch: int = None) -> List[RegionDescriptor]:
         result = []
@@ -255,6 +266,65 @@ class AToELeaves(nn.Module):
             window_type=self.window_type,
             window_smoothness_order=self.window_smoothness_order
         )
+        self._rebuild_expert_norm_boxes()
+
+    def _rebuild_expert_norm_boxes(self) -> None:
+        """Build the (K, D) per-expert normalization boxes (D1).
+
+        The box is the region inflated by its window collar and clipped to
+        the domain — identical (same helper) to the D2 training box whose
+        outer edge carries the interface faces, so the expert's inputs span
+        exactly [-1, 1] over the data it trains on.
+        """
+        if not self.regions:
+            self._norm_lo = None
+            self._norm_hi = None
+            return
+        db = self.get_domain_bounds()
+        g_lo, g_hi = db['lower'], db['upper']
+        device = next(self.base_model.parameters()).device
+        dtype = torch.get_default_dtype()
+        los, his = [], []
+        for r in self.regions:
+            lo, hi = inflated_bounds(r, self.sigma_fraction, g_lo, g_hi)
+            los.append(lo)
+            his.append(hi)
+        self._norm_lo = torch.tensor(los, dtype=dtype, device=device)
+        self._norm_hi = torch.tensor(his, dtype=dtype, device=device)
+
+    def log_expert_norm_boxes(self) -> None:
+        """Log each expert's normalization box next to its hard region.
+
+        Called once by the orchestrator after spawning completes (and on
+        checkpoint load) so the smoke tests can verify the D1 boxes match
+        the D2 interface boxes.
+        """
+        if not self.per_leaf_normalization or self._norm_lo is None:
+            logger.info("  [Norm] per-leaf input normalization DISABLED")
+            return
+        for i, r in enumerate(self.regions):
+            lo = [round(v, 6) for v in self._norm_lo[i].tolist()]
+            hi = [round(v, 6) for v in self._norm_hi[i].tolist()]
+            logger.info(f"  [Norm] expert={i} region={r.bounds_lower}->"
+                        f"{r.bounds_upper} norm_box={lo}->{hi}")
+
+    def _expert_forward(self, expert_idx: int,
+                        inputs: torch.Tensor) -> torch.Tensor:
+        """Forward one expert, applying its input normalization (D1).
+
+        The affine map stays in the autograd graph, so PDE derivatives
+        taken w.r.t. the raw (x, t) leaves pick up the chain rule
+        automatically.
+        """
+        if self.per_leaf_normalization and self._norm_lo is not None:
+            if (self._norm_lo.device != inputs.device
+                    or self._norm_lo.dtype != inputs.dtype):
+                self._norm_lo = self._norm_lo.to(inputs.device, inputs.dtype)
+                self._norm_hi = self._norm_hi.to(inputs.device, inputs.dtype)
+            lo = self._norm_lo[expert_idx]
+            hi = self._norm_hi[expert_idx]
+            inputs = 2.0 * (inputs - lo) / (hi - lo) - 1.0
+        return self.experts[expert_idx](inputs)
 
     def spawn_expert(self, region: RegionDescriptor, copy_from_idx: Optional[int] = None) -> int:
         expert_idx = len(self.experts)
@@ -332,9 +402,9 @@ class AToELeaves(nn.Module):
                 continue
             w = psi_norm[:, col:col + 1]  # (N, 1)
             if n_sup == N:
-                out = out + w * self.experts[i](inputs)
+                out = out + w * self._expert_forward(i, inputs)
             else:
-                u = self.experts[i](inputs[support])
+                u = self._expert_forward(i, inputs[support])
                 out = out.index_add(0, support, w[support] * u)
         return out
 
@@ -376,9 +446,9 @@ class AToELeaves(nn.Module):
                 continue
             w = hard_norm[:, col:col + 1]  # (N, 1)
             if n_sup == N:
-                out = out + w * self.experts[i](inputs)
+                out = out + w * self._expert_forward(i, inputs)
             else:
-                u = self.experts[i](inputs[support])
+                u = self._expert_forward(i, inputs[support])
                 out = out.index_add(0, support, w[support] * u)
         return out
 
@@ -428,7 +498,7 @@ class AToELeaves(nn.Module):
         u_total = torch.zeros(N, output_dim, device=device, dtype=inputs.dtype)
 
         for local_idx, expert_idx in enumerate(leaf_list):
-            u_k = self.experts[expert_idx](inputs)
+            u_k = self._expert_forward(expert_idx, inputs)
             result[f'expert_{expert_idx}'] = u_k
             result['masks'][f'expert_{expert_idx}'] = psi_leaves[:, local_idx:local_idx+1]
             result['weights_normalized'][f'expert_{expert_idx}'] = psi_norm[:, local_idx:local_idx+1]
@@ -473,6 +543,8 @@ class AToELeaves(nn.Module):
             'activation': self.activation,
             'adaptive_config': self.adaptive_config,
             'leaf_indices': sorted(self.leaf_indices),
+            'per_leaf_normalization': self.per_leaf_normalization,
+            'sigma_fraction': self.sigma_fraction,
         }
 
     def load_state_dict_extended(self, state_dict: Dict):
@@ -531,7 +603,15 @@ class AToELeaves(nn.Module):
         if 'leaf_indices' in state_dict:
             self.leaf_indices = set(state_dict['leaf_indices'])
 
+        # D1: honor the checkpoint's normalization setting (the experts were
+        # trained under it) and its collar fraction for the box rebuild.
+        if 'per_leaf_normalization' in state_dict:
+            self.per_leaf_normalization = state_dict['per_leaf_normalization']
+        if 'sigma_fraction' in state_dict:
+            self.sigma_fraction = state_dict['sigma_fraction']
+
         self.sync_batched_indicators()
+        self.log_expert_norm_boxes()
 
     @staticmethod
     def _infer_architecture_from_state_dict(state_dict: Dict) -> List[int]:
@@ -576,6 +656,24 @@ class AToELeaves(nn.Module):
                 logger.info(f"    psi_leaf[{leaf_idx}] ({bounds}): "
                       f"min={psi_i.min():.4f}, max={psi_i.max():.4f}, "
                       f"mean={psi_i.mean():.4f}, active%={active_pct:.1f}%")
+
+            # D1 diagnostic: normalized-input range each leaf actually sees
+            # on its support — expected within [-1, 1].
+            if self.per_leaf_normalization and self._norm_lo is not None:
+                for i, leaf_idx in enumerate(leaf_list):
+                    m = psi_leaves[:, i] > 0
+                    if not m.any():
+                        continue
+                    lo = self._norm_lo[leaf_idx].to(sample_inputs.device,
+                                                    sample_inputs.dtype)
+                    hi = self._norm_hi[leaf_idx].to(sample_inputs.device,
+                                                    sample_inputs.dtype)
+                    z = 2.0 * (sample_inputs[m] - lo) / (hi - lo) - 1.0
+                    logger.info(
+                        f"    [Norm] leaf {leaf_idx}: normalized input "
+                        f"range [{z.min().item():.3f}, {z.max().item():.3f}]"
+                        f" over {int(m.sum())} support points "
+                        f"(expect within [-1, 1])")
             
             # Check normalization (this is the potential bug!)
             psi_sum = psi_leaves.sum(dim=1)

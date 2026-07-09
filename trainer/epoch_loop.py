@@ -170,6 +170,14 @@ def _train_segment(
     _lra_updated_epoch = -1
     _native_fallback_logged = False  # log the native-grid fallback once per segment
 
+    # D6: collar-focused residual resampling — active only in the fine-tune
+    # segment of an adaptive run with spawned experts.
+    _collar_ratio = 0.0
+    if (segment_name == 'fine_tune' and is_adaptive
+            and getattr(model, 'num_experts', 0) > 0):
+        _collar_ratio = float(((adaptive_cfg or {}).get('fine_tune', {})
+                               or {}).get('collar_data_ratio', 0.0) or 0.0)
+
     _n_train_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     _switch_str = (f" -> {optimizer_2_name.upper()}@{switch_epoch}"
                    if optimizer_2_name is not None else "")
@@ -202,6 +210,14 @@ def _train_segment(
         # FIRST evaluation only (line-search re-evaluations don't record).
         if hasattr(loss_fn, '_record_next'):
             loss_fn._record_next = True
+
+        # D7: interface-weight anneal — lambda_Gamma decays linearly from
+        # 1.0 to (1 - w) over this segment's epoch budget.
+        if getattr(loss_fn, '_interface_anneal_w', 0.0) > 0:
+            _aw = loss_fn._interface_anneal_w
+            _prog = min(1.0, max(0.0, (epoch - segment_start_epoch)
+                                 / max(1, epoch_budget)))
+            loss_fn._interface_scale = 1.0 - _aw * _prog
 
         # Enable residual caching for adaptive sampling if needed
         # Cache THIS epoch's residuals for NEXT epoch's resampling
@@ -329,10 +345,13 @@ def _train_segment(
                     run_dir=run_dir,
                     epoch=epoch,
                     causal_state=causal_state,
+                    collar_ratio=_collar_ratio,
+                    model=model,
                 )
                 metrics['resample_events'].append({
                     'epoch': epoch,
-                    'action': 'resampled',
+                    'action': ('collar_resampled' if _collar_ratio > 0
+                               else 'resampled'),
                     'optimizer': current_optimizer_name
                 })
                 metrics['optimizer_snapshots'].append({
@@ -763,10 +782,10 @@ def _train_segment(
                                    "rel-L2/inf-norm cannot be computed.")
                     _native_fallback_logged = True
 
-            # The metric uses the model's CURRENT blending_mode (composed
-            # forward): the configured mode normally, but hard indicators
-            # during split segments (set by _run_split_segment) so the rel-L2
-            # curve reflects what is actually being trained.
+            # The metric uses the model's configured blending_mode (composed
+            # forward) in every segment — split segments included (D2:
+            # experts train on their windows' full support, so the blended
+            # POU is the honest metric throughout).
 
             # ── Loss-component snapshot on the plain training set ──
             # During split segments ctx.train_data holds the split schema, so
@@ -802,6 +821,17 @@ def _train_segment(
             else:
                 _blend = None
             metrics.setdefault('eval_blending_mode', []).append(_blend)
+
+            # D7: interface-anneal scale at this eval (None outside split
+            # segments), aligned with 'epochs' like eval_blending_mode.
+            _if_scale = (getattr(loss_fn, '_interface_scale', None)
+                         if getattr(ctx, '_split_context', None) is not None
+                         else None)
+            metrics.setdefault('interface_scale', []).append(_if_scale)
+            if (_if_scale is not None
+                    and getattr(loss_fn, '_interface_anneal_w', 0.0) > 0):
+                logger.info(f"  [InterfaceAnneal] epoch={epoch} "
+                            f"scale={_if_scale:.4f}")
 
             # ── Term-wise loss components (from the same eval pass) ──
             metrics['loss_components']['epochs'].append(epoch)
@@ -1166,8 +1196,8 @@ def _reconcile_segment_best(model, optimizer, optimizer_name: str,
 
     Either way the invariant holds: in-memory model == the segment's best ==
     ``best_model_<segment>.pt`` (there is no separate final checkpoint).
-    The comparison uses the model's CURRENT blending mode (hard indicators
-    during split segments), i.e. like-with-like within the segment.
+    The comparison uses the model's configured blending mode in every
+    segment (split segments included — D2 reporting).
 
     Returns:
         (rel_l2, inf_norm) of the reconciled model on the solver grid.

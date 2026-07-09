@@ -190,6 +190,9 @@ def train_orchestrator(ctx: TrainingContext) -> None:
                                   node_to_expert, node_tree_depth)
         total += spawned
     logger.info(f"[FullTree] Spawning complete. {total} leaves spawned.")
+    # D1: log each expert's input-normalization box (== its D2 training box)
+    if hasattr(model, 'log_expert_norm_boxes'):
+        model.log_expert_norm_boxes()
 
     _after_spawn = _check_output_continuity(ctx, "after_spawn")
     _log_continuity_diff(_before_spawn, _after_spawn)
@@ -248,6 +251,20 @@ def train_orchestrator(ctx: TrainingContext) -> None:
 
             ctx.loss_fn = _l2sp_loss
             logger.info(f"[L2-SP] Anchoring enabled with lambda={l2sp_lambda}")
+
+        # D6: collar-focused sampling — force one resample at segment start
+        # so the ratio is effective from the first fine-tune epoch (the
+        # periodic resample path applies it from then on).
+        _collar_ratio = float(fine_tune_cfg.get('collar_data_ratio', 0.0)
+                              or 0.0)
+        if _collar_ratio > 0 and getattr(model, 'num_experts', 0) > 0:
+            logger.info(f"[FineTune] Initial collar-focused resample "
+                        f"(collar_data_ratio={_collar_ratio})")
+            ctx.train_data = resample_residual_inplace(
+                ctx.train_data, cfg, ctx.device,
+                resample_seed=ctx.base_seed + ctx.epoch,
+                collar_ratio=_collar_ratio, model=model,
+            )
 
         ft_cfg = dict(cfg)
         ft_cfg.update(fine_tune_cfg)

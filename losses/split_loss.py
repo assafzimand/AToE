@@ -23,16 +23,17 @@ import importlib
 from typing import Dict, Callable
 from adaptive.subdomain_data import (
     KIND_RESIDUAL, KIND_IC_TRUE, KIND_INTERFACE, KIND_INTERFACE_BC, KIND_BC_TRUE,
-    KIND_CONTINUITY,
+    KIND_CONTINUITY, PERIODIC_PROBLEMS,
 )
 from utils.logging_config import get_logger
 
 logger = get_logger(__name__)
 
-# Problems whose GLOBAL loss enforces periodic BCs by pairing the two spatial
-# boundaries (value + d/dx per output component). The split loss mirrors that
-# with cross-expert pairing; all other problems use Dirichlet matching.
-_PERIODIC_PROBLEMS = frozenset({'allen_cahn', 'kdv', 'ks', 'schrodinger'})
+# Single source of truth for the periodic-problem set lives in
+# adaptive.subdomain_data (the data builder mints the matching targets).
+# Periodic problems get cross-expert boundary pairing AND d/dx interface
+# matching against the root (D3); others use value-only Dirichlet matching.
+_PERIODIC_PROBLEMS = PERIODIC_PROBLEMS
 
 
 def build_split_loss(
@@ -93,12 +94,16 @@ def build_split_loss(
         x = batch['x']
         t = batch['t']
         h_gt = batch['h_gt']
+        h_x_gt = batch.get('h_x_gt', None)  # D3 interface d/dx targets
         expert_ids = batch['expert_id']
         kinds = batch['kind']
         bc_face_ids = batch.get('bc_face_id', None)
         cont_neighbors = batch.get('cont_neighbor', None)
         cont_dims = batch.get('cont_dim', None)
         device = x.device
+        # D7: interface-weight anneal scale (updated per epoch by the
+        # trainer when interface_decrease_weight > 0; 1.0 otherwise).
+        interface_scale = split_loss_fn._interface_scale
 
         # Per-expert history is recorded once per epoch (the trainer arms
         # _record_next at each epoch start). Recording every closure call
@@ -134,6 +139,8 @@ def build_split_loss(
                 w_res, w_ic, w_bc, is_periodic,
                 device,
                 residual_loss=residual_losses.get(eidx),
+                h_x_gt=h_x_gt[emask] if h_x_gt is not None else None,
+                interface_scale=interface_scale,
             )
             total_loss = total_loss + comps['total']
             if record_now:
@@ -184,6 +191,10 @@ def build_split_loss(
     split_loss_fn._residual_cache = residual_cache
     split_loss_fn._cache_residuals = False  # trainer sets True when a plot is due
     split_loss_fn._record_next = True  # trainer re-arms once per epoch
+    # D7: interface-weight anneal — the trainer sets _interface_anneal_w
+    # from config and updates _interface_scale each epoch.
+    split_loss_fn._interface_scale = 1.0
+    split_loss_fn._interface_anneal_w = 0.0
     return split_loss_fn
 
 
@@ -260,13 +271,20 @@ def _compute_expert_loss(
     model, expert_idx, x, t, h_gt, kinds,
     w_res, w_ic, w_bc, is_periodic, device,
     residual_loss=None,
+    h_x_gt=None,
+    interface_scale=1.0,
 ):
     """Per-expert local loss (no PoU). Residual is supplied precomputed.
 
-    Every face term (IC / interfaces / Dirichlet BC) is a plain MSE against
-    fixed targets, so the expert is forwarded ONCE over the union of its
-    face points and the per-kind means are sliced from that single output
-    (previously 3-4 separate small forwards per expert per loss call).
+    Value-only face terms (IC / t-interfaces / Dirichlet BC) share ONE
+    stacked forward with per-kind means sliced from its output. For
+    periodic problems the x-interface rows instead get a grad-enabled pass
+    (D3): value MSE plus 'interface_bc_deriv' — d(u_j)/dx matched to the
+    root's d(u_0)/dx targets (``h_x_gt``), mimicking the u/u_x structure of
+    the global periodic BC.
+
+    ``interface_scale`` (D7) multiplies the interface terms only; true
+    IC/BC terms keep their full weight.
     """
     z = torch.tensor(0.0, device=device)
     comps = {
@@ -274,8 +292,13 @@ def _compute_expert_loss(
         'ic': z.clone(),
         'interface_ic': z.clone(),
         'interface_bc': z.clone(),
+        'interface_bc_deriv': z.clone(),
         'bc': z.clone(),
     }
+
+    # x-interfaces of periodic problems need input gradients (deriv
+    # matching) — handled in a separate grad-enabled pass below.
+    deriv_interfaces = is_periodic and h_x_gt is not None
 
     # Kinds handled by the single stacked face forward. For periodic
     # problems the bc_true points are instead consumed by the batch-level
@@ -284,8 +307,9 @@ def _compute_expert_loss(
     face_kinds = [
         ('ic', KIND_IC_TRUE),
         ('interface_ic', KIND_INTERFACE),
-        ('interface_bc', KIND_INTERFACE_BC),
     ]
+    if not deriv_interfaces:
+        face_kinds.append(('interface_bc', KIND_INTERFACE_BC))
     if not is_periodic:
         face_kinds.append(('bc', KIND_BC_TRUE))
 
@@ -303,10 +327,36 @@ def _compute_expert_loss(
             if kmask.any():
                 comps[key] = torch.mean(se_face[kmask])
 
+    # ── D3: x-interfaces with value + d/dx matching (periodic problems) ──
+    if deriv_interfaces:
+        ifm_bc = (kinds == KIND_INTERFACE_BC)
+        if ifm_bc.any():
+            x_if = x[ifm_bc].clone().detach().requires_grad_(True)
+            t_if = t[ifm_bc].clone().detach()
+            u_if = model.forward_single_expert(
+                expert_idx, torch.cat([x_if, t_if], dim=1))
+            comps['interface_bc'] = torch.mean((u_if - h_gt[ifm_bc]) ** 2)
+            n_out = u_if.shape[1]
+            d_loss = torch.tensor(0.0, device=device)
+            for c in range(n_out):
+                g = torch.autograd.grad(
+                    u_if[:, c].sum(), x_if,
+                    create_graph=True, retain_graph=True,
+                )[0][:, 0]
+                d_loss = d_loss + torch.mean(
+                    (g - h_x_gt[ifm_bc][:, c]) ** 2)
+            # Mean over output components (matches the value term's
+            # mean-over-all-elements convention).
+            comps['interface_bc_deriv'] = d_loss / n_out
+
     comps['total'] = (
         w_res * comps['residual']
-        + w_ic * (comps['ic'] + comps['interface_ic'])
-        + w_bc * (comps['interface_bc'] + comps['bc'])
+        + w_ic * comps['ic']
+        + w_bc * comps['bc']
+        + interface_scale * (
+            w_ic * comps['interface_ic']
+            + w_bc * (comps['interface_bc'] + comps['interface_bc_deriv'])
+        )
     )
     return comps
 
@@ -438,7 +488,8 @@ def _record(history, expert_idx, comps):
         history[expert_idx] = {
             k: [] for k in [
                 'residual', 'ic', 'interface_ic',
-                'interface_bc', 'bc', 'total', 'continuity',
+                'interface_bc', 'interface_bc_deriv',
+                'bc', 'total', 'continuity',
             ]
         }
     for k in history[expert_idx]:
@@ -455,7 +506,8 @@ def _record_continuity(history, expert_idx, cont_val):
         history[expert_idx] = {
             k: [] for k in [
                 'residual', 'ic', 'interface_ic',
-                'interface_bc', 'bc', 'total', 'continuity',
+                'interface_bc', 'interface_bc_deriv',
+                'bc', 'total', 'continuity',
             ]
         }
     # Append to continuity; if list is shorter, pad with 0

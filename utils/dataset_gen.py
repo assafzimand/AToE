@@ -554,6 +554,79 @@ def regenerate_training_data(
     }
 
 
+def sample_collar_residual_points(
+    model,
+    config: Dict,
+    device: torch.device,
+    n_points: int,
+    max_rounds: int = 20,
+):
+    """Sample residual points inside collar overlaps (D6).
+
+    Rejection sampling: uniform candidates are kept where >= 2 leaf windows
+    are simultaneously active (soft masks > 0 via the model's
+    BatchedIndicators) — the zones the global fine-tune must reconcile.
+    Underfill after ``max_rounds`` is topped up with uniform points.
+
+    Returns:
+        (x, t, n_collar, rounds) — n_collar counts the points that are
+        genuinely in collars (the rest are uniform top-up).
+    """
+    problem = config['problem']
+    pc = config[problem]
+    spatial_dim = pc['spatial_dim']
+    spatial_domain = pc['spatial_domain']
+    t_min, t_max = pc['temporal_domain']
+
+    if (getattr(model, 'blending_mode', None) != 'soft'
+            or not getattr(model, 'leaf_indices', None)
+            or -1 in model.leaf_indices):
+        logger.warning("  [Resample-Collar] model has no soft leaf windows "
+                       "— falling back to uniform sampling.")
+        x_u = torch.zeros(n_points, spatial_dim, device=device)
+        for d in range(spatial_dim):
+            lo, hi = spatial_domain[d]
+            x_u[:, d] = torch.rand(n_points, device=device) * (hi - lo) + lo
+        t_u = torch.rand(n_points, 1, device=device) * (t_max - t_min) + t_min
+        return x_u, t_u, 0, 0
+
+    leaf_list = sorted(model.leaf_indices)
+    xs, ts = [], []
+    n_have = 0
+    rounds = 0
+    while n_have < n_points and rounds < max_rounds:
+        rounds += 1
+        n_draw = max(4 * (n_points - n_have), 1024)
+        x_c = torch.zeros(n_draw, spatial_dim, device=device)
+        for d in range(spatial_dim):
+            lo, hi = spatial_domain[d]
+            x_c[:, d] = torch.rand(n_draw, device=device) * (hi - lo) + lo
+        t_c = torch.rand(n_draw, 1, device=device) * (t_max - t_min) + t_min
+        with torch.no_grad():
+            _, psi = model.batched_indicators(torch.cat([x_c, t_c], dim=1))
+        active = (psi[:, leaf_list] > 0).sum(dim=1)
+        keep = active >= 2
+        n_keep = min(int(keep.sum()), n_points - n_have)
+        if n_keep > 0:
+            idx = torch.nonzero(keep, as_tuple=True)[0][:n_keep]
+            xs.append(x_c[idx])
+            ts.append(t_c[idx])
+            n_have += n_keep
+
+    n_collar = n_have
+    if n_have < n_points:  # top up with uniform points
+        n_fill = n_points - n_have
+        x_u = torch.zeros(n_fill, spatial_dim, device=device)
+        for d in range(spatial_dim):
+            lo, hi = spatial_domain[d]
+            x_u[:, d] = torch.rand(n_fill, device=device) * (hi - lo) + lo
+        t_u = torch.rand(n_fill, 1, device=device) * (t_max - t_min) + t_min
+        xs.append(x_u)
+        ts.append(t_u)
+
+    return torch.cat(xs, dim=0), torch.cat(ts, dim=0), n_collar, rounds
+
+
 def sample_residual_points(
     config: Dict,
     device: torch.device,
@@ -562,8 +635,14 @@ def sample_residual_points(
     run_dir=None,
     epoch=None,
     causal_state: dict = None,
+    collar_ratio: float = 0.0,
+    model=None,
 ):
     """Sample n_res residual (x, t) pairs.
+
+    ``collar_ratio`` > 0 (with ``model`` supplied) draws that fraction of
+    the points from collar overlaps (D6, fine-tune only); mutually
+    exclusive with adaptive sampling, which takes precedence.
 
     Returns:
         Tuple (x_res, t_res) each of shape (n_res, spatial_dim/1).
@@ -588,6 +667,33 @@ def sample_residual_points(
     x_res = torch.zeros(n_res, spatial_dim, device=device)
     t_res = torch.zeros(n_res, 1, device=device)
     idx = 0
+
+    # D6: collar-focused sampling (fine-tune). Adaptive sampling takes
+    # precedence when both are enabled.
+    if collar_ratio > 0 and model is not None and not as_enabled:
+        n_collar_target = int(n_res * collar_ratio)
+        n_uniform = n_res - n_collar_target
+        for d in range(spatial_dim):
+            lo, hi = spatial_domain[d]
+            x_res[idx:idx + n_uniform, d] = (
+                torch.rand(n_uniform, device=device) * (hi - lo) + lo)
+        t_res[idx:idx + n_uniform, 0] = (
+            torch.rand(n_uniform, device=device) * (t_max - t_min) + t_min)
+        idx += n_uniform
+        x_col, t_col, n_collar, rounds = sample_collar_residual_points(
+            model, config, device, n_collar_target)
+        x_res[idx:idx + n_collar_target] = x_col
+        t_res[idx:idx + n_collar_target] = t_col
+        logger.info(
+            f"  [Resample-Collar] ratio={collar_ratio}: {n_collar} collar "
+            f"+ {n_uniform + (n_collar_target - n_collar)} uniform points "
+            f"(rejection rounds={rounds}, topped up="
+            f"{n_collar_target - n_collar}) — see adaptive_sampling/"
+            f"resample_epoch_*.png for the spatial distribution")
+        return x_res, t_res
+    if collar_ratio > 0 and as_enabled:
+        logger.warning("  [Resample-Collar] adaptive sampling is enabled — "
+                       "it takes precedence; collar_data_ratio ignored.")
 
     if as_enabled:
         n_adaptive = int(n_res * as_ratio)
@@ -625,12 +731,16 @@ def resample_residual_inplace(
     run_dir=None,
     epoch=None,
     causal_state: dict = None,
+    collar_ratio: float = 0.0,
+    model=None,
 ) -> Dict:
     """Update only the residual rows in train_data with freshly sampled points.
 
     IC/BC coordinates and their h_gt values are left untouched.  This is the
     cheap per-epoch resample path; the full regenerate_training_data() is still
     used on initial build and after tree spawning.
+
+    ``collar_ratio`` / ``model``: D6 collar-focused sampling (fine-tune).
 
     Returns train_data (modified in-place) for convenience.
     """
@@ -639,7 +749,8 @@ def resample_residual_inplace(
     torch.manual_seed(resample_seed)
     x_res, t_res = sample_residual_points(
         config, device, n_res, cached_residuals,
-        run_dir, epoch, causal_state)
+        run_dir, epoch, causal_state,
+        collar_ratio=collar_ratio, model=model)
     train_data['x'][res_mask] = x_res
     train_data['t'][res_mask] = t_res
     return train_data

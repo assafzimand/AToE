@@ -99,7 +99,7 @@ def _run_split_segment(
         static=split_static,
     )
 
-    _log_subdomain_summary(new_expert_indices, regions_list, split_data)
+    _log_subdomain_summary(new_expert_indices, regions_list, split_data, cfg)
 
     # Freeze/trainable confirmation
     trainable = [n for n, p in model.named_parameters()
@@ -125,6 +125,20 @@ def _run_split_segment(
         model, cfg, orig_loss_fn=orig_loss_fn,
     )
 
+    # D7: interface-weight anneal — lambda_Gamma scales linearly from 1.0
+    # to (1 - w) over this segment's epoch budget (0 = disabled). The epoch
+    # loop updates split_loss._interface_scale each epoch.
+    _anneal_w = float((ctx.adaptive_cfg.get('split_icbc', {}) or {}).get(
+        'interface_decrease_weight', 0.0) or 0.0)
+    split_loss._interface_anneal_w = _anneal_w
+    if _anneal_w > 0:
+        logger.info(f"[InterfaceAnneal] enabled: w={_anneal_w}, "
+                    f"lambda_Gamma 1.0 -> {1.0 - _anneal_w:.3g} over "
+                    f"{epoch_budget} epochs")
+    else:
+        logger.info("[InterfaceAnneal] disabled "
+                    "(interface_decrease_weight=0)")
+
     # Swap to split data/loss
     ctx.loss_fn = split_loss
     ctx.train_data = split_data
@@ -140,24 +154,17 @@ def _run_split_segment(
         'static': split_static,  # cached faces + targets; resample redraws residuals only
     }
 
-    # During split training each expert learns its OWN region (hard ownership
-    # + interface losses), so the composed forward used by eval rel-L2 and by
-    # pred_after_<segment>.png must use HARD indicators to reflect what is
-    # actually being trained. Restored to the configured blending after the
-    # segment (fine-tune / inference use the configured mode).
-    orig_blending = getattr(model, 'blending_mode', None)
-    if orig_blending is not None and orig_blending != 'hard':
-        model.blending_mode = 'hard'
-        logger.info("[SplitLoss] Eval/plots use HARD indicators for this "
-                    f"segment (configured '{orig_blending}' restored after).")
+    # D2 reporting: experts train on their inflated boxes (region + collar),
+    # exactly the support of their blending windows, so eval rel-L2, best-
+    # checkpoint selection, and pred_after_<segment>.png all use the blended
+    # POU composition — the metric curve matches the final model throughout.
+    logger.info("[SplitLoss] Eval/plots use the blended "
+                f"'{getattr(model, 'blending_mode', 'soft')}' PoU "
+                "composition (D2 reporting).")
 
-    try:
-        res = _train_segment(ctx, segment_name, epoch_budget, segment_cfg,
-                             lr_override=lr_override,
-                             min_epochs_override=min_epochs_override)
-    finally:
-        if orig_blending is not None:
-            model.blending_mode = orig_blending
+    res = _train_segment(ctx, segment_name, epoch_budget, segment_cfg,
+                         lr_override=lr_override,
+                         min_epochs_override=min_epochs_override)
 
     # Save per-expert loss history into metrics
     peh = getattr(split_loss, '_per_expert_history', {})
@@ -209,23 +216,57 @@ def _run_split_segment(
     return res
 
 
-def _log_subdomain_summary(new_expert_indices, regions, split_data):
-    """Log per-expert point summaries for the subdomain dataset."""
+def _log_subdomain_summary(new_expert_indices, regions, split_data, cfg):
+    """Log per-expert point summaries for the subdomain dataset.
+
+    Includes the D2 verifiability info: each expert's inflated training box
+    next to its hard region, and how many of its residual points landed in
+    the hard box vs the collar.
+    """
+    from adaptive.indicators import inflated_bounds
+    from adaptive.subdomain_data import _domain_box, KIND_RESIDUAL
+
     expert_ids = split_data['expert_id']
     kinds = split_data['kind']
     cont_neighbors = split_data.get('cont_neighbor', None)
+
+    problem = cfg['problem']
+    pc = cfg[problem]
+    spatial_dim = pc['spatial_dim']
+    sigma_fraction = cfg['adaptive_pinn']['sigma_fraction']
+    g_lo, g_hi = _domain_box(pc)
 
     for eidx in new_expert_indices:
         emask = (expert_ids == eidx)
         n_total = emask.sum().item()
         region = regions[eidx]
+        infl_bl, infl_bu = inflated_bounds(region, sigma_fraction, g_lo, g_hi)
         counts = {}
         for k_val, k_name in KIND_NAMES.items():
             counts[k_name] = ((kinds[emask] == k_val).sum().item() if n_total > 0 else 0)
+
+        # Residual split: inside the hard region vs in the collar (D2)
+        rmask = emask & (kinds == KIND_RESIDUAL)
+        n_hard = 0
+        if rmask.any():
+            xr = split_data['x'][rmask]
+            tr = split_data['t'][rmask]
+            in_hard = torch.ones(xr.shape[0], dtype=torch.bool,
+                                 device=xr.device)
+            for d in range(spatial_dim):
+                in_hard &= ((xr[:, d] >= region.bounds_lower[d])
+                            & (xr[:, d] <= region.bounds_upper[d]))
+            in_hard &= ((tr[:, 0] >= region.bounds_lower[spatial_dim])
+                        & (tr[:, 0] <= region.bounds_upper[spatial_dim]))
+            n_hard = int(in_hard.sum())
+        n_collar = counts.get('residual', 0) - n_hard
+
+        _fmt = lambda v: [round(x, 6) for x in v]
         logger.info(
             f"[SplitData] expert={eidx} depth={region.depth} parent={region.parent_idx} "
-            f"bounds=[{region.bounds_lower}..{region.bounds_upper}] "
-            f"total={n_total} {counts}"
+            f"hard=[{region.bounds_lower}..{region.bounds_upper}] "
+            f"train_box=[{_fmt(infl_bl)}..{_fmt(infl_bu)}] "
+            f"total={n_total} residual(hard={n_hard}, collar={n_collar}) {counts}"
         )
         if counts.get('residual', 0) == 0:
             logger.warning(f"[SplitData] expert={eidx} has 0 residual points!")

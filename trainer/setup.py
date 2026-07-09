@@ -453,9 +453,9 @@ def _create_split_dataloader(
     batch_size: int,
     shuffle: bool,
 ) -> DataLoader:
-    """Create DataLoader for split-loss subdomain data (expert_id + kind + bc_face_id + continuity schema)."""
+    """Create DataLoader for split-loss subdomain data (expert_id + kind + bc_face_id + h_x_gt + continuity schema)."""
     dataset = TensorDataset(
-        data['x'], data['t'], data['h_gt'],
+        data['x'], data['t'], data['h_gt'], data['h_x_gt'],
         data['expert_id'], data['kind'], data['bc_face_id'],
         data['cont_neighbor'], data['cont_dim'],
     )
@@ -465,11 +465,12 @@ def _create_split_dataloader(
             'x': torch.stack([b[0] for b in batch_list]),
             't': torch.stack([b[1] for b in batch_list]),
             'h_gt': torch.stack([b[2] for b in batch_list]),
-            'expert_id': torch.stack([b[3] for b in batch_list]),
-            'kind': torch.stack([b[4] for b in batch_list]),
-            'bc_face_id': torch.stack([b[5] for b in batch_list]),
-            'cont_neighbor': torch.stack([b[6] for b in batch_list]),
-            'cont_dim': torch.stack([b[7] for b in batch_list]),
+            'h_x_gt': torch.stack([b[3] for b in batch_list]),
+            'expert_id': torch.stack([b[4] for b in batch_list]),
+            'kind': torch.stack([b[5] for b in batch_list]),
+            'bc_face_id': torch.stack([b[6] for b in batch_list]),
+            'cont_neighbor': torch.stack([b[7] for b in batch_list]),
+            'cont_dim': torch.stack([b[8] for b in batch_list]),
         }
 
     return DataLoader(
@@ -1124,6 +1125,20 @@ def _setup_training(
     else:
         logger.info(f"  Resampling: disabled")
     
+    # AToE design knobs (D1 / D7 / D6)
+    if is_adaptive:
+        _pln = adaptive_cfg.get('per_leaf_normalization', True)
+        logger.info(f"  Per-leaf input normalization: "
+                    f"{'enabled' if _pln else 'disabled'}")
+        _idw = float((adaptive_cfg.get('split_icbc', {}) or {}).get(
+            'interface_decrease_weight', 0.0) or 0.0)
+        logger.info("  Interface-weight anneal: "
+                    + (f"enabled (w={_idw})" if _idw > 0 else "disabled"))
+        _cdr = float((adaptive_cfg.get('fine_tune', {}) or {}).get(
+            'collar_data_ratio', 0.0) or 0.0)
+        logger.info("  Fine-tune collar sampling: "
+                    + (f"enabled (ratio={_cdr})" if _cdr > 0 else "disabled"))
+
     # Optimizer schedule
     opt1_name = cfg['optimizer_1']
     opt2_name = cfg.get('optimizer_2', 'null')

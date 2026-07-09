@@ -81,6 +81,28 @@ def compact_ramp(s: torch.Tensor, N: int) -> torch.Tensor:
     return smoothstep_N(s_clamped, N)
 
 
+def inflated_bounds(region, sigma_fraction: float,
+                    global_lo: List[float], global_hi: List[float]):
+    """Expert TRAINING box: the hard region inflated by its window collar,
+    clipped to the domain box.
+
+    Per dim: delta = sigma_fraction * (b - a) — exactly the smoothstep
+    window's collar half-width (see BatchedIndicators.all_delta) — so the
+    inflated box equals the window's support, intersected with the domain.
+    The faces of this box carry the interface data (D2) and the same box
+    defines the expert's input normalization (D1), keeping the two aligned.
+
+    Returns:
+        (lower, upper) lists of length n_dims (spatial dims + time).
+    """
+    lo, hi = [], []
+    for d, (a, b) in enumerate(zip(region.bounds_lower, region.bounds_upper)):
+        delta = sigma_fraction * (b - a)
+        lo.append(max(a - delta, global_lo[d]))
+        hi.append(min(b + delta, global_hi[d]))
+    return lo, hi
+
+
 @dataclass
 class RegionDescriptor:
     """Describes an axis-aligned rectangular region in the domain.
