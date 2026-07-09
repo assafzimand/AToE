@@ -937,13 +937,18 @@ def _setup_training(
 
     best_rel_l2 = float('inf')
     best_checkpoint_path = None
-    # Patience is counted in EPOCHS on the TRAIN loss (checked every epoch);
-    # patience_evals is accepted as a legacy alias interpreted as
-    # (patience_evals * eval_every) epochs.
+    # Patience counts consecutive RESAMPLE INTERVALS in which the train loss
+    # failed to improve by patience_rel_delta (start-vs-end of each interval,
+    # where the point set is fixed and losses are comparable). Preferred key:
+    # patience_intervals. Legacy patience_epochs / patience_evals configs are
+    # converted to an equivalent interval count in the epoch loop.
+    patience_intervals = cfg.get('patience_intervals')
     if 'patience_epochs' in cfg:
         patience_epochs = cfg['patience_epochs']
-    else:
+    elif 'patience_evals' in cfg:
         patience_epochs = cfg['patience_evals'] * max(1, cfg['eval_every'])
+    else:
+        patience_epochs = 0
     min_epochs = cfg['min_epochs']
     # Relative-improvement threshold for the plateau test: an eval only counts as
     # an improvement if it beats the anchored best by at least this fraction.
@@ -1123,9 +1128,16 @@ def _setup_training(
         logger.info(f"  Optimizer: {opt1_name}")
     
     # Early stopping
-    if patience_epochs > 0:
-        logger.info(f"  Early stopping: enabled (patience={patience_epochs} epochs "
-                    f"on train loss, min_epochs={min_epochs})")
+    _pat_active = (patience_intervals if patience_intervals is not None
+                   else patience_epochs)
+    if _pat_active and _pat_active > 0:
+        if patience_intervals is not None:
+            logger.info(f"  Early stopping: enabled ({patience_intervals} consecutive "
+                        f"flat resample intervals on train loss, min_epochs={min_epochs})")
+        else:
+            logger.info(f"  Early stopping: enabled (legacy patience_epochs="
+                        f"{patience_epochs} — converted to resample intervals, "
+                        f"min_epochs={min_epochs})")
     else:
         logger.info(f"  Early stopping: disabled")
     
@@ -1183,6 +1195,7 @@ def _setup_training(
         best_rel_l2=best_rel_l2,
         best_checkpoint_path=best_checkpoint_path,
         patience_epochs=patience_epochs,
+        patience_intervals=patience_intervals,
         min_epochs=min_epochs,
         patience_rel_delta=patience_rel_delta,
         lra_weights=lra_weights,

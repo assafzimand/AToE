@@ -82,7 +82,12 @@ class TrainingContext:
     metrics: Dict = field(default_factory=dict)
     best_rel_l2: float = float('inf')
     best_checkpoint_path: Any = None
-    patience_epochs: int = 0  # train-loss plateau window, counted in epochs
+    # Patience: consecutive resample intervals without a patience_rel_delta
+    # train-loss improvement (start-vs-end within each interval). The legacy
+    # patience_epochs value is converted to intervals in the epoch loop when
+    # patience_intervals is None.
+    patience_intervals: Any = None
+    patience_epochs: int = 0
     min_epochs: int = 0
     patience_rel_delta: float = 0.0
 

@@ -143,15 +143,31 @@ def _train_segment(
         lr_scheduler = _create_lr_scheduler(optimizer, seg_cfg, total_steps_estimate)
 
     step_count = 0
-    best_patience_train_loss = float('inf')
-    epochs_without_improvement = 0
+    # ── Interval-based patience on the TRAIN loss ──
+    # The loss is compared at the START vs END of each resample interval:
+    # the point set is fixed within an interval, so the two values are
+    # directly comparable (across a resample the loss jumps discontinuously
+    # and a running-best comparison is meaningless). patience_intervals
+    # consecutive intervals without a patience_rel_delta improvement trip
+    # the plateau action. A legacy patience_epochs config is converted to
+    # an equivalent interval count.
+    patience_interval_len = resample_every if resample_every > 0 else 500
+    if ctx.patience_intervals is not None:
+        patience_intervals = ctx.patience_intervals
+    elif patience_epochs > 0:
+        patience_intervals = max(1, round(patience_epochs / patience_interval_len))
+    else:
+        patience_intervals = 0  # disabled
+    flat_intervals = 0
+    _interval_anchor_loss = None
+    _interval_start_epoch = None
+    _prev_train_loss = None
     # optimizer_1 is watched from the segment start; reset to switch_epoch at the switch.
     patience_start_epoch = segment_start_epoch
     _nan_detected = False
     _stopped_early = False
     _stop_reason = 'budget'
     _lra_updated_epoch = -1
-    _resample_skip_logged = False  # log the LBFGS/SSBroyden skip once per segment
     _native_fallback_logged = False  # log the native-grid fallback once per segment
 
     _n_train_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -225,12 +241,22 @@ def _train_segment(
             if _will_cache_split:
                 _split_loss_fn._residual_cache.clear()
 
-        # Resample training data periodically (in-memory, no disk I/O)
-        # Skip resampling during L-BFGS/SSBroyden (they need stable loss landscape)
-        allow_resample_optimizer = current_optimizer_name not in ('LBFGS', 'SSBroyden')
+        # Resample training data periodically (in-memory, no disk I/O).
+        # The cadence applies to ALL optimizers, full-batch quasi-Newton
+        # included: the SSBroyden-for-PINNs literature refreshes the sampled
+        # points every ~500 iterations DURING BFGS/SSBroyden training and
+        # warm-starts the optimizer across the refresh (Urbán et al. JCP
+        # 2025: "We refresh the randomly sampled training points every 500
+        # iterations ... avoiding overfitting"; the Kiyani et al. 2025
+        # official code carries hess_inv across RAD resamples). Keeping the
+        # points fixed lets full-batch optimizers memorize the collocation
+        # set (train residual → 1e-15 while the solver-grid residual stalls
+        # orders of magnitude higher and rel-L2 drifts up).
+        _resampled_this_epoch = False
         _split_ctx = getattr(ctx, '_split_context', None)
-        if resample_every > 0 and epoch > 1 and (epoch - 1) % resample_every == 0 and allow_resample_optimizer:
+        if resample_every > 0 and epoch > 1 and (epoch - 1) % resample_every == 0:
             resample_seed = base_seed + epoch
+            _resampled_this_epoch = True
             if _split_ctx is not None:
                 logger.info(f"  [Resample-Split] Redrawing residual interiors at epoch {epoch}")
                 # Static faces + interface targets are cached for the segment;
@@ -246,6 +272,13 @@ def _train_segment(
                 train_loader = _create_split_dataloader(
                     train_data, cfg['batch_size'], shuffle=True)
                 ctx.train_loader = train_loader
+                # Restore the full-batch default-device context when a
+                # quasi-Newton optimizer is active (the loader rebuild above
+                # needs the CPU default; SSBroyden/LBFGS state allocation
+                # needs the training device — see _set_default_torch_device).
+                _set_default_torch_device(
+                    device,
+                    full_batch=current_optimizer_name in ('LBFGS', 'SSBroyden'))
                 metrics['resample_events'].append({
                     'epoch': epoch, 'action': 'split_resampled',
                     'optimizer': current_optimizer_name,
@@ -302,18 +335,6 @@ def _train_segment(
                     'event': 'resample',
                     **_get_optimizer_snapshot(optimizer, lr_scheduler, step_count),
                 })
-        elif resample_every > 0 and epoch > 1 and (epoch - 1) % resample_every == 0 and not allow_resample_optimizer:
-            # Log when resampling is skipped due to optimizer (once per segment)
-            if not _resample_skip_logged:
-                _resample_skip_logged = True
-                logger.info(f"  [Resample] Skipping resampling during {current_optimizer_name} (loss landscape stability required)")
-            # Save skip event to metrics
-            metrics['resample_events'].append({
-                'epoch': epoch,
-                'action': 'skipped',
-                'optimizer': current_optimizer_name,
-                'reason': 'optimizer_stability'
-            })
 
         # Train phase
         model.train()
@@ -620,8 +641,10 @@ def _train_segment(
                 optimizer_2_name, model, seg_cfg)
             lr_scheduler = None  # optimizer_2 uses its own LR / line search
             # Reset patience at the switch; optimizer_2 gets a fresh grace window.
-            epochs_without_improvement = 0
-            best_patience_train_loss = float('inf')
+            flat_intervals = 0
+            _interval_anchor_loss = None
+            _interval_start_epoch = None
+            _prev_train_loss = None
             patience_start_epoch = switch_epoch
             metrics['optimizer_events'].append({
                 'epoch': epoch,
@@ -981,51 +1004,68 @@ def _train_segment(
                            train_loss, rel_l2, cfg, metrics)
             _best_epoch = epoch
 
-        # Patience-based early stopping on TRAIN loss, counted in epochs
-        # (checked every epoch — train loss exists every epoch, unlike the
-        # eval metrics). Active for BOTH optimizers: on an optimizer_1
-        # plateau we fast-forward to the switch epoch (so the existing switch
-        # handler fires and optimizer_2 keeps its full budget) rather than
-        # stopping; an optimizer_2 (or no-switch) plateau stops the segment.
-        # The relative min-delta means a loss creeping down by a negligible
-        # amount still counts as "no improvement".
-        if (patience_epochs > 0 and math.isfinite(train_loss)
-                and epoch >= patience_start_epoch):
-            if train_loss < best_patience_train_loss * (1.0 - patience_rel_delta):
-                best_patience_train_loss = train_loss
-                epochs_without_improvement = 0
-            else:
-                epochs_without_improvement += 1
-            # seg_min_epochs is a grace period measured within the active window.
-            if (epoch - patience_start_epoch >= seg_min_epochs
-                    and epochs_without_improvement >= patience_epochs):
-                _in_optimizer_1 = (optimizer_2_name is not None
-                                   and epoch < switch_epoch)
-                if _in_optimizer_1 and switch_epoch < total_epochs:
-                    # Fast-forward to the switch; preserves optimizer_2's budget.
-                    logger.info(f"\n  [Patience] optimizer_1 plateau "
-                          f">{patience_rel_delta:.1%} for "
-                          f"{epochs_without_improvement} epochs at epoch {epoch}; "
-                          f"fast-forwarding to switch epoch {switch_epoch}.")
-                    metrics['plateau_events'].append({
-                        'epoch': epoch,
-                        'action': 'optimizer_1_fast_forward',
-                        'switch_epoch': switch_epoch,
-                    })
-                    epoch = switch_epoch - 1
-                    ctx.epoch = epoch
-                    epochs_without_improvement = 0
-                    best_patience_train_loss = float('inf')
-                    continue
-                else:
-                    logger.info(f"\n  [EarlyStop] No train loss improvement "
-                          f">{patience_rel_delta:.1%} for "
-                          f"{epochs_without_improvement} epochs "
-                          f"(best={best_patience_train_loss:.6e}). "
-                          f"Stopping segment at epoch {epoch}.")
-                    _stopped_early = True
-                    _stop_reason = 'early_stop'
-                    break
+        # Interval-based patience on the TRAIN loss (see the init block for
+        # the rationale). Interval boundaries align with resample events so
+        # anchor and end loss are always measured on the SAME point set;
+        # with resampling off, synthetic patience_interval_len windows are
+        # used. Active for BOTH optimizers: on an optimizer_1 plateau we
+        # fast-forward to the switch epoch (so the existing switch handler
+        # fires and optimizer_2 keeps its full budget) rather than stopping;
+        # an optimizer_2 (or no-switch) plateau stops the segment.
+        if patience_intervals > 0 and epoch >= patience_start_epoch:
+            _boundary = (_interval_start_epoch is None
+                         or _resampled_this_epoch
+                         or epoch - _interval_start_epoch >= patience_interval_len)
+            if _boundary:
+                # Close the finished interval: its last loss (previous epoch,
+                # same point set as the anchor) vs its anchor.
+                if (_interval_anchor_loss is not None
+                        and _prev_train_loss is not None
+                        and math.isfinite(_prev_train_loss)):
+                    if _prev_train_loss < _interval_anchor_loss * (1.0 - patience_rel_delta):
+                        flat_intervals = 0
+                    else:
+                        flat_intervals += 1
+                # Open the next interval, anchored at THIS epoch's loss
+                # (computed on the fresh point set when a resample occurred).
+                _interval_anchor_loss = (train_loss if math.isfinite(train_loss)
+                                         else None)
+                _interval_start_epoch = epoch
+
+                # seg_min_epochs is a grace period measured within the active window.
+                if (epoch - patience_start_epoch >= seg_min_epochs
+                        and flat_intervals >= patience_intervals):
+                    _in_optimizer_1 = (optimizer_2_name is not None
+                                       and epoch < switch_epoch)
+                    if _in_optimizer_1 and switch_epoch < total_epochs:
+                        # Fast-forward to the switch; preserves optimizer_2's budget.
+                        logger.info(f"\n  [Patience] optimizer_1 plateau: "
+                              f"{flat_intervals} consecutive {patience_interval_len}-epoch "
+                              f"intervals without >{patience_rel_delta:.1%} train-loss "
+                              f"improvement at epoch {epoch}; "
+                              f"fast-forwarding to switch epoch {switch_epoch}.")
+                        metrics['plateau_events'].append({
+                            'epoch': epoch,
+                            'action': 'optimizer_1_fast_forward',
+                            'switch_epoch': switch_epoch,
+                        })
+                        epoch = switch_epoch - 1
+                        ctx.epoch = epoch
+                        flat_intervals = 0
+                        _interval_anchor_loss = None
+                        _interval_start_epoch = None
+                        _prev_train_loss = None
+                        continue
+                    else:
+                        logger.info(f"\n  [EarlyStop] {flat_intervals} consecutive "
+                              f"{patience_interval_len}-epoch intervals without "
+                              f">{patience_rel_delta:.1%} train-loss improvement. "
+                              f"Stopping segment at epoch {epoch} "
+                              f"(train_loss={train_loss:.6e}).")
+                        _stopped_early = True
+                        _stop_reason = 'early_stop'
+                        break
+        _prev_train_loss = train_loss
 
     # ── Reconcile the segment's best with the end-of-segment weights ──
     # After this, the in-memory model == best_model_<segment>.pt == the
