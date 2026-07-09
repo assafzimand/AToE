@@ -23,6 +23,38 @@ $ipInput = Read-Host "Enter EC2 Public IP (or press Enter to keep current)"
 if ($ipInput) { $Ec2Ip = $ipInput }
 Write-Host ""
 
+# PDFs are never downloaded (huge, and every plot also exists as .png).
+# Checkpoints (.pt) are optional - they are by far the largest files.
+$ckptInput = Read-Host "Download checkpoints (.pt files)? They can be multiple GB each [y/N]"
+$excludePatterns = @('*.pdf')
+if ($ckptInput -notmatch '^[Yy]') {
+    $excludePatterns += '*.pt'
+    Write-Host "  Skipping .pdf and .pt files" -ForegroundColor Gray
+} else {
+    Write-Host "  Skipping .pdf files (checkpoints included)" -ForegroundColor Gray
+}
+Write-Host ""
+
+# Downloads a remote folder as a tar stream over ssh, honoring exclude patterns.
+# scp -r cannot exclude files, and PowerShell pipes corrupt binary data, so the
+# ssh | tar pipeline runs inside cmd.exe (raw byte pipe). tar.exe ships with Windows.
+function Download-RemoteFolder {
+    param(
+        [string]$RemoteParent,  # remote dir containing the folder
+        [string]$FolderName,    # folder to download, relative to RemoteParent
+        [string]$Destination    # local target dir (must exist)
+    )
+    $excludeArgs = ($excludePatterns | ForEach-Object { "--exclude='$_'" }) -join ' '
+    $remoteCmd = "cd $RemoteParent && tar cf - $excludeArgs '$FolderName'"
+    $cmdLine = "ssh -i `"$PemPath`" ubuntu@$Ec2Ip `"$remoteCmd`" | tar -xvf - -C `"$Destination`""
+    $batchFile = Join-Path $env:TEMP "atoe_download_$PID.cmd"
+    "@echo off`r`n$cmdLine" | Set-Content -Path $batchFile -Encoding ASCII
+    & cmd.exe /c $batchFile
+    $exitCode = $LASTEXITCODE
+    Remove-Item $batchFile -Force -ErrorAction SilentlyContinue
+    return ($exitCode -eq 0)
+}
+
 if (-not (Test-Path $PemPath)) {
     Write-Error "PEM file not found at '$PemPath'. Edit PemPath in this script or pass it as a parameter."
     exit 1
@@ -120,15 +152,12 @@ if ($onlyPlanFile) {
             # Download each model folder
             foreach ($folder in $modelFolderList) {
                 $folder = $folder.TrimEnd('/')
-                $modelRemotePath = "$RemoteRoot/$folder"
-                $scpCmd = "scp -i `"$PemPath`" -r ubuntu@${Ec2Ip}:`"$modelRemotePath`" `"$LocalTarget`""
-                
+
                 Write-Host "Downloading: $folder" -ForegroundColor Yellow
-                try {
-                    Invoke-Expression $scpCmd
+                if (Download-RemoteFolder -RemoteParent $RemoteRoot -FolderName $folder -Destination $LocalTarget) {
                     Write-Host "  Done." -ForegroundColor Green
-                } catch {
-                    Write-Host "  Failed: $_" -ForegroundColor Red
+                } else {
+                    Write-Host "  Failed (tar/ssh exit code non-zero)." -ForegroundColor Red
                 }
             }
             
@@ -165,17 +194,12 @@ Write-Host ""
 # Ensure destination directory exists locally
 New-Item -ItemType Directory -Force -Path $LocalTarget | Out-Null
 
-$scpCmd = "scp -i `"$PemPath`" -r ubuntu@${Ec2Ip}:`"$remotePath`" `"$LocalTarget`""
-
-Write-Host "Running:" -ForegroundColor Yellow
-Write-Host "  $scpCmd"
+Write-Host "Downloading (excluding: $($excludePatterns -join ', ')) ..." -ForegroundColor Yellow
 Write-Host ""
 
-try {
-    Invoke-Expression $scpCmd
+if (Download-RemoteFolder -RemoteParent $ExperimentsRoot -FolderName $lastFolder -Destination $LocalTarget) {
     Write-Host ""
     Write-Host "Download complete." -ForegroundColor Green
-}
-catch {
-    Write-Error "scp failed: $_"
+} else {
+    Write-Error "Download failed (tar/ssh exit code non-zero)."
 }
