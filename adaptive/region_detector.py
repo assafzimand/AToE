@@ -56,20 +56,28 @@ class RegionDetector:
         n_estimators: int = 100,
         max_depth: int = 10,
         min_samples_leaf: int = 50,
-        domain_bounds: Optional[Dict[str, List[float]]] = None
+        domain_bounds: Dict[str, List[float]] = None
     ):
         """
         Args:
             n_estimators: Number of trees in the forest
             max_depth: Maximum depth of each tree
             min_samples_leaf: Minimum samples required in a leaf node
-            domain_bounds: {'lower': [x_min, t_min], 'upper': [x_max, t_max]}
+            domain_bounds: REQUIRED. The true domain box,
+                {'lower': [x_min, t_min], 'upper': [x_max, t_max]}. Region
+                boxes recurse sklearn split thresholds down from it; they
+                are never inferred from the sampled points.
         """
+        if domain_bounds is None:
+            raise ValueError(
+                "RegionDetector requires explicit domain_bounds; region "
+                "boxes recurse sklearn thresholds down from the true domain "
+                "and must not be inferred from data.")
         self.n_estimators = n_estimators
         self.max_depth = max_depth
         self.min_samples_leaf = min_samples_leaf
         self.domain_bounds = domain_bounds
-        
+
         self.rf: Optional[RandomForestRegressor] = None
     
     def fit(
@@ -91,11 +99,6 @@ class RegionDetector:
         if y.ndim > 1 and y.shape[1] == 1:
             y = y.ravel()
 
-        self.domain_bounds = {
-            'lower': X.min(axis=0).tolist(),
-            'upper': X.max(axis=0).tolist()
-        }
-        
         self.rf = RandomForestRegressor(
             n_estimators=self.n_estimators,
             max_depth=self.max_depth,

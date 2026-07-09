@@ -163,9 +163,14 @@ def build_symmetric_grid_data(eval_data, domain_bounds, resolution=200):
 
 def fit_and_get_all_nodes(
     X, y, max_depth, min_samples_leaf, M, variable_for_node_accept,
+    domain_bounds,
     epsilon_node_acceptance=0.0,
 ):
     """Fit tree, prune, return visualization + reconstruction data.
+
+    ``domain_bounds`` is the TRUE domain box ({'lower': [...], 'upper':
+    [...]}); region boxes recurse sklearn thresholds down from it and are
+    never inferred from the sampled points.
 
     Returns:
         node_dicts: list of dicts for ALL non-root nodes (for plots)
@@ -181,6 +186,7 @@ def fit_and_get_all_nodes(
         n_estimators=1,
         max_depth=max_depth,
         min_samples_leaf=min_samples_leaf,
+        domain_bounds=domain_bounds,
     )
 
     accepted_nodes, depth_stats = detector.fit_full_tree_and_prune(
@@ -534,34 +540,21 @@ def process_problem_with_time_marching(
         
         print(f"    Window data: {len(X_win)} samples")
         
-        # Get actual data t-range (differs from window bounds due to discrete sampling)
-        data_t_min = X_win[:, -1].min()
-        data_t_max = X_win[:, -1].max()
-        
-        # Fit tree for this window
+        # Fit tree for this window: the root box IS the exact window box
+        # (domain in space, [win_t_start, win_t_end] in time) — bounds are
+        # never derived from the sampled points.
+        win_bounds = {
+            'lower': list(domain_bounds['lower'][:-1]) + [win_t_start],
+            'upper': list(domain_bounds['upper'][:-1]) + [win_t_end],
+        }
         try:
             (node_dicts, accepted_ids,
              bfs_accepted, children_left) = fit_and_get_all_nodes(
                 X_win, y_win, max_depth, min_samples_leaf, win_M, variable_for_node_accept,
+                domain_bounds=win_bounds,
                 epsilon_node_acceptance=epsilon_node_acceptance,
             )
-            
-            # Extend node bounds to exact window boundaries (fixes visualization gaps)
-            # Tree derives bounds from data, but we want nodes to align with window edges
-            # Sklearn bounds are always at-or-within data range, so use <= / >= to catch edge nodes
-            for nd in node_dicts:
-                # If node's lower t-bound is at data minimum, extend to window start
-                if nd['bounds_lower'][-1] <= data_t_min:
-                    nd['bounds_lower'][-1] = win_t_start
-                # If node's upper t-bound is at data maximum, extend to window end
-                if nd['bounds_upper'][-1] >= data_t_max:
-                    nd['bounds_upper'][-1] = win_t_end
-            for nd in bfs_accepted:
-                if nd['bounds_lower'][-1] <= data_t_min:
-                    nd['bounds_lower'][-1] = win_t_start
-                if nd['bounds_upper'][-1] >= data_t_max:
-                    nd['bounds_upper'][-1] = win_t_end
-            
+
             # Tag nodes with window index for later reference
             for nd in node_dicts:
                 nd['window_idx'] = win_idx
@@ -707,6 +700,7 @@ def process_problem(
     (node_dicts, accepted_ids,
      bfs_accepted, children_left) = fit_and_get_all_nodes(
         X, y, max_depth, msl, M, variable_for_node_accept,
+        domain_bounds=domain_bounds,
         epsilon_node_acceptance=epsilon_node_acceptance,
     )
 
