@@ -307,15 +307,36 @@ class AToELeaves(nn.Module):
 
         u(x,t) = Σ_{j ∈ leaves} ψ̃_j · u_j
         where ψ̃_j = ψ_j / Σ_{k ∈ leaves} ψ_k
-        
+
+        Each expert is evaluated ONLY on the points inside its (compact)
+        window support instead of on all N inputs. This is exact: the
+        smoothstep window is identically 0 outside its support with C^N
+        vanishing derivatives (N >= PDE order), so skipped points contribute
+        0 to the blend and to every derivative the residual needs.
+
         Note: base-only case is handled in forward() before calling this.
         """
         leaf_list = sorted(self.leaf_indices)
         _, psi_experts = self.batched_indicators(inputs)  # (N, K)
         psi_leaves = psi_experts[:, leaf_list]  # (N, L)
         psi_norm = psi_leaves / psi_leaves.sum(dim=1, keepdim=True)
-        u_leaves = torch.stack([self.experts[i](inputs) for i in leaf_list], dim=1)
-        return (psi_norm.unsqueeze(-1) * u_leaves).sum(dim=1)
+
+        N = inputs.shape[0]
+        out = torch.zeros(N, self.output_dim,
+                          device=inputs.device, dtype=inputs.dtype)
+        for col, i in enumerate(leaf_list):
+            support = torch.nonzero(psi_leaves[:, col] > 0,
+                                    as_tuple=True)[0]
+            n_sup = support.numel()
+            if n_sup == 0:
+                continue
+            w = psi_norm[:, col:col + 1]  # (N, 1)
+            if n_sup == N:
+                out = out + w * self.experts[i](inputs)
+            else:
+                u = self.experts[i](inputs[support])
+                out = out.index_add(0, support, w[support] * u)
+        return out
 
     def _forward_hard_only_leaves(self, inputs: torch.Tensor) -> torch.Tensor:
         """
@@ -323,25 +344,43 @@ class AToELeaves(nn.Module):
 
         u(x,t) = Σ_{j ∈ leaves} (hard_j / Z) · u_j
         where Z = Σ_{k ∈ leaves} hard_k
-        
+
         The normalization is over LEAVES ONLY (root is never in the denominator).
         In the interior of leaf j, only its mask is 1, so Z=1 and weight=1.
         On a face shared by two leaves, both masks are 1, so Z=2 and each gets weight=1/2.
-        
+
+        As in the soft path, each expert is evaluated only on the points
+        inside its own region (mask support) — exact, since its weight is 0
+        everywhere else.
+
         Note: base-only case is handled in forward() before calling this.
         """
         leaf_list = sorted(self.leaf_indices)
         hard_masks = self.batched_indicators.compute_hard_masks_only(inputs)  # (N, K)
         hard_leaves = hard_masks[:, leaf_list]  # (N, L)
-        
+
         # Normalize: Z = sum of hard masks over leaves (NOT including root)
         Z = hard_leaves.sum(dim=1, keepdim=True)  # (N, 1)
         # Guard against Z=0 (shouldn't happen if leaves tile the domain)
         Z = Z.clamp(min=1e-8)
         hard_norm = hard_leaves / Z  # (N, L)
-        
-        u_leaves = torch.stack([self.experts[i](inputs) for i in leaf_list], dim=1)  # (N, L, out_dim)
-        return (hard_norm.unsqueeze(-1) * u_leaves).sum(dim=1)
+
+        N = inputs.shape[0]
+        out = torch.zeros(N, self.output_dim,
+                          device=inputs.device, dtype=inputs.dtype)
+        for col, i in enumerate(leaf_list):
+            support = torch.nonzero(hard_leaves[:, col] > 0,
+                                    as_tuple=True)[0]
+            n_sup = support.numel()
+            if n_sup == 0:
+                continue
+            w = hard_norm[:, col:col + 1]  # (N, 1)
+            if n_sup == N:
+                out = out + w * self.experts[i](inputs)
+            else:
+                u = self.experts[i](inputs[support])
+                out = out.index_add(0, support, w[support] * u)
+        return out
 
     def forward_decomposed(self, inputs: torch.Tensor) -> Dict[str, torch.Tensor]:
         """

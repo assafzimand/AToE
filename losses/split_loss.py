@@ -15,6 +15,7 @@ Total loss = SUM over experts of:
 where interface faces inherit the IC or BC weight by face type.
 """
 
+import logging
 import torch
 import importlib
 from typing import Dict, Callable
@@ -89,6 +90,14 @@ def build_split_loss(
         cont_dims = batch.get('cont_dim', None)
         device = x.device
 
+        # Per-expert history is recorded once per epoch (the trainer arms
+        # _record_next at each epoch start). Recording every closure call
+        # cost ~7*K GPU syncs per evaluation and polluted the curves with
+        # line-search evaluations.
+        record_now = split_loss_fn._record_next
+        if record_now:
+            split_loss_fn._record_next = False
+
         unique_experts = expert_ids.unique().tolist()
         total_loss = torch.tensor(0.0, device=device)
         all_comps = {}
@@ -117,7 +126,8 @@ def build_split_loss(
                 residual_loss=residual_losses.get(eidx),
             )
             total_loss = total_loss + comps['total']
-            _record(per_expert_history, eidx, comps)
+            if record_now:
+                _record(per_expert_history, eidx, comps)
             if return_components:
                 all_comps[eidx] = comps
 
@@ -127,7 +137,9 @@ def build_split_loss(
                 model, x, t, expert_ids, kinds,
                 bc_face_ids, deriv_fn, device,
             )
-            if bc_loss_contrib.item() > 0:
+            # .item() here would force a GPU sync on every loss call just
+            # for a debug log — only pay it when DEBUG logging is on.
+            if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(
                     f"[SplitLoss] Periodic BC contrib: "
                     f"{bc_loss_contrib.item():.6e}"
@@ -143,15 +155,16 @@ def build_split_loss(
                 cont_neighbors, cont_dims, deriv_fn,
                 pde_params, device, problem,
             )
-            if cont_loss.item() > 0:
+            if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(
                     f"[SplitLoss] Continuity contrib: "
                     f"{cont_loss.item():.6e}"
                 )
             total_loss = total_loss + w_cont * cont_loss
-            # Record continuity per expert
-            for eidx, cont_val in cont_per_expert.items():
-                _record_continuity(per_expert_history, eidx, cont_val)
+            # Record continuity per expert (same per-epoch cadence)
+            if record_now:
+                for eidx, cont_val in cont_per_expert.items():
+                    _record_continuity(per_expert_history, eidx, cont_val)
 
         if return_components:
             return all_comps
@@ -160,6 +173,7 @@ def build_split_loss(
     split_loss_fn._per_expert_history = per_expert_history
     split_loss_fn._residual_cache = residual_cache
     split_loss_fn._cache_residuals = False  # trainer sets True when a plot is due
+    split_loss_fn._record_next = True  # trainer re-arms once per epoch
     return split_loss_fn
 
 
@@ -237,7 +251,13 @@ def _compute_expert_loss(
     w_res, w_ic, w_bc, is_allen_cahn, device,
     residual_loss=None,
 ):
-    """Per-expert local loss (no PoU). Residual is supplied precomputed."""
+    """Per-expert local loss (no PoU). Residual is supplied precomputed.
+
+    Every face term (IC / interfaces / Dirichlet BC) is a plain MSE against
+    fixed targets, so the expert is forwarded ONCE over the union of its
+    face points and the per-kind means are sliced from that single output
+    (previously 3-4 separate small forwards per expert per loss call).
+    """
     z = torch.tensor(0.0, device=device)
     comps = {
         'residual': residual_loss if residual_loss is not None else z.clone(),
@@ -247,57 +267,29 @@ def _compute_expert_loss(
         'bc': z.clone(),
     }
 
-    # ── IC true (real t=0) ──
-    ic_mask = (kinds == KIND_IC_TRUE)
-    if ic_mask.sum() > 0:
-        xt_ic = torch.cat(
-            [x[ic_mask], t[ic_mask]], dim=1
-        )
-        u_ic = model.forward_single_expert(
-            expert_idx, xt_ic
-        )
-        comps['ic'] = torch.mean(
-            (u_ic - h_gt[ic_mask]) ** 2
-        )
+    # Kinds handled by the single stacked face forward. Allen-Cahn's bc_true
+    # points are instead consumed by the batch-level periodic pairing.
+    face_kinds = [
+        ('ic', KIND_IC_TRUE),
+        ('interface_ic', KIND_INTERFACE),
+        ('interface_bc', KIND_INTERFACE_BC),
+    ]
+    if not is_allen_cahn:
+        face_kinds.append(('bc', KIND_BC_TRUE))
 
-    # ── Interface IC (t-face interior boundary → w_ic) ──
-    ifm_ic = (kinds == KIND_INTERFACE)
-    if ifm_ic.sum() > 0:
-        xt_if = torch.cat(
-            [x[ifm_ic], t[ifm_ic]], dim=1
-        )
-        u_if = model.forward_single_expert(
-            expert_idx, xt_if
-        )
-        comps['interface_ic'] = torch.mean(
-            (u_if - h_gt[ifm_ic]) ** 2
-        )
+    face_mask = torch.zeros_like(kinds, dtype=torch.bool)
+    for _, kval in face_kinds:
+        face_mask |= (kinds == kval)
 
-    # ── Interface BC (x-face interior boundary → w_bc) ──
-    ifm_bc = (kinds == KIND_INTERFACE_BC)
-    if ifm_bc.sum() > 0:
-        xt_if_bc = torch.cat(
-            [x[ifm_bc], t[ifm_bc]], dim=1
-        )
-        u_if_bc = model.forward_single_expert(
-            expert_idx, xt_if_bc
-        )
-        comps['interface_bc'] = torch.mean(
-            (u_if_bc - h_gt[ifm_bc]) ** 2
-        )
-
-    # ── BC true: Dirichlet (Allen-Cahn instead uses batch-level periodic pairing) ──
-    bc_mask = (kinds == KIND_BC_TRUE)
-    if (not is_allen_cahn) and bc_mask.sum() > 0:
-        xt_bc = torch.cat(
-            [x[bc_mask], t[bc_mask]], dim=1
-        )
-        u_bc = model.forward_single_expert(
-            expert_idx, xt_bc
-        )
-        comps['bc'] = torch.mean(
-            (u_bc - h_gt[bc_mask]) ** 2
-        )
+    if face_mask.any():
+        xt_face = torch.cat([x[face_mask], t[face_mask]], dim=1)
+        u_face = model.forward_single_expert(expert_idx, xt_face)
+        se_face = (u_face - h_gt[face_mask]) ** 2
+        kinds_face = kinds[face_mask]
+        for key, kval in face_kinds:
+            kmask = (kinds_face == kval)
+            if kmask.any():
+                comps[key] = torch.mean(se_face[kmask])
 
     comps['total'] = (
         w_res * comps['residual']

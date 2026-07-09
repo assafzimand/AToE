@@ -198,6 +198,11 @@ def _train_segment(
         ctx.epoch = epoch  # keep ctx in sync for the orchestrator's emergency save
         timer.start_epoch(epoch, num_experts=model.num_experts if (is_adaptive and hasattr(model, 'num_experts')) else 0)
 
+        # Arm the split loss's per-expert history recording for this epoch's
+        # FIRST evaluation only (line-search re-evaluations don't record).
+        if hasattr(loss_fn, '_record_next'):
+            loss_fn._record_next = True
+
         # Enable residual caching for adaptive sampling if needed
         # Cache THIS epoch's residuals for NEXT epoch's resampling
         # (adaptive_sampling_enabled already set from problem_cfg above)
@@ -344,8 +349,16 @@ def _train_segment(
         _ks_loss_module._nan_ctx[0] = f"epoch {epoch}"
 
         if current_optimizer_name in ('Adam', 'SOAP'):
-            # Adam/SOAP: Mini-batch training (GPU parallelized)
-            for batch in train_loader:
+            # Adam/SOAP: Mini-batch training (GPU parallelized).
+            # When a single batch covers the whole dataset (the configured
+            # full-batch regime), skip the DataLoader: its collate re-stacks
+            # every row into fresh tensors each epoch (~N tiny GPU ops) just
+            # to reproduce train_data. Order is irrelevant for one batch.
+            _seg_batch_size = seg_cfg.get('batch_size', cfg['batch_size'])
+            _epoch_batches = ((train_data,)
+                              if _seg_batch_size >= train_data['x'].shape[0]
+                              else train_loader)
+            for batch in _epoch_batches:
                 optimizer.zero_grad()
                 timer.start('train.loss_fn')
                 loss = loss_fn(model, batch)

@@ -211,9 +211,14 @@ def train_orchestrator(ctx: TrainingContext) -> None:
     fine_tune_cfg = ctx.adaptive_cfg.get('fine_tune', None)
     if fine_tune_cfg:
         blending = model.blending_mode if hasattr(model, 'blending_mode') else 'soft'
-        logger.info("[FineTune] Unfreezing ALL params for final joint fine-tune.")
+        # The base is retired from the leaves-only composition, so it gets no
+        # gradient during fine-tune; training 'leaves' (not 'all') keeps the
+        # dead base params out of the optimizer — with SSBroyden's dense
+        # matrix that is a ~(P_total/P_leaves)^2 memory/compute saving.
+        logger.info("[FineTune] Unfreezing LEAF experts for final joint fine-tune "
+                    "(base retired from composition).")
         logger.info(f"[FineTune] Using composed loss with blending_mode='{blending}' (matches inference)")
-        _set_trainable(model, 'all')
+        _set_trainable(model, 'leaves')
 
         # Ensure split_context is cleared so eval uses configured blending_mode
         ctx._split_context = None

@@ -568,6 +568,9 @@ def _save_checkpoint(
     # (reconciliation and resume restore weights only; optimizers are
     # rebuilt per segment), and SSBroyden's dense Hessian approximation
     # alone is n_params^2 floats (multi-GB per save).
+    # The metrics dict is also not stored: nothing reads it back from a
+    # checkpoint (metrics.json is the record), and embedding it re-pickles
+    # every per-epoch curve + per-node tree diagnostics on each best-save.
     checkpoint = {
         'epoch': epoch,
         'model_state_dict': model.state_dict(),
@@ -575,7 +578,6 @@ def _save_checkpoint(
         'train_loss': train_loss,
         'rel_l2': rel_l2,
         'config': cfg_to_save,
-        'metrics': metrics
     }
     
     # For adaptive models, also save extended state

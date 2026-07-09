@@ -405,14 +405,18 @@ class BatchedIndicators:
             self._initialized = False
             return
         
-        # Stack all bounds into (K, D) tensors
+        # Stack all bounds into (K, D) tensors. Use the default dtype so
+        # float64 runs keep the exact float64 bounds (a float32 round-trip
+        # shifts region faces by ~1e-8*scale relative to the bounds used to
+        # assign split-training points).
+        _dtype = torch.get_default_dtype()
         self.all_lower = torch.stack([
-            torch.tensor(r.bounds_lower, dtype=torch.float32, device=device)
+            torch.tensor(r.bounds_lower, dtype=_dtype, device=device)
             for r in regions
         ])  # (K, D)
-        
+
         self.all_upper = torch.stack([
-            torch.tensor(r.bounds_upper, dtype=torch.float32, device=device)
+            torch.tensor(r.bounds_upper, dtype=_dtype, device=device)
             for r in regions
         ])  # (K, D)
         

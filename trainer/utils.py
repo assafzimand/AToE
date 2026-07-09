@@ -45,6 +45,13 @@ def compute_infinity_norm_error(
     return torch.max(torch.abs(diff))
 
 
+# Memo for the flattened solver-grid eval tensors: the solver already
+# memoizes its solution, but xt/gt were rebuilt numpy->torch on every eval
+# call (every eval_every epochs + twice per segment reconcile). Keyed by
+# (problem, temporal window, device, dtype); a few MB per entry.
+_grid_eval_cache: Dict = {}
+
+
 def compute_native_grid_metrics(
     model: torch.nn.Module,
     cfg: Dict,
@@ -67,35 +74,48 @@ def compute_native_grid_metrics(
     import importlib
 
     problem = cfg['problem']
-    try:
-        solver = importlib.import_module(f'solvers.{problem}_solver')
-        x_grid, t_grid, h_sol = solver._get_solution_cached(cfg)
-    except Exception:
-        return None
-
-    t0, t1 = cfg[problem]['temporal_domain']
-    t_mask = (t_grid >= t0 - 1e-12) & (t_grid <= t1 + 1e-12)
-    t_grid = np.asarray(t_grid)[t_mask]
-    h_sol = np.asarray(h_sol)[t_mask]  # (nt, nx), complex for schrodinger
-
-    # Flatten grid to (N, 2) inputs and (N, output_dim) ground truth
-    T, X = np.meshgrid(t_grid, np.asarray(x_grid), indexing='ij')
-    xt = np.column_stack([X.ravel(), T.ravel()])
-    if np.iscomplexobj(h_sol):
-        gt = np.column_stack([h_sol.real.ravel(), h_sol.imag.ravel()])
-    else:
-        gt = h_sol.reshape(-1, 1)
-
     dtype = next(model.parameters()).dtype
+    t0, t1 = cfg[problem]['temporal_domain']
+    cache_key = (problem, float(t0), float(t1), str(device), dtype)
+
+    cached = _grid_eval_cache.get(cache_key)
+    if cached is None:
+        try:
+            solver = importlib.import_module(f'solvers.{problem}_solver')
+            x_grid, t_grid, h_sol = solver._get_solution_cached(cfg)
+        except Exception:
+            return None
+
+        t_mask = (t_grid >= t0 - 1e-12) & (t_grid <= t1 + 1e-12)
+        t_grid = np.asarray(t_grid)[t_mask]
+        h_sol = np.asarray(h_sol)[t_mask]  # (nt, nx), complex for schrodinger
+
+        # Flatten grid to (N, 2) inputs and (N, output_dim) ground truth
+        T, X = np.meshgrid(t_grid, np.asarray(x_grid), indexing='ij')
+        xt = np.column_stack([X.ravel(), T.ravel()])
+        if np.iscomplexobj(h_sol):
+            gt = np.column_stack([h_sol.real.ravel(), h_sol.imag.ravel()])
+        else:
+            gt = h_sol.reshape(-1, 1)
+
+        cached = {
+            'xt': torch.tensor(xt, dtype=dtype, device=device),
+            'gt': torch.tensor(gt, dtype=dtype, device=device),
+            'grid_shape': (len(t_grid), len(x_grid)),
+        }
+        _grid_eval_cache[cache_key] = cached
+
+    xt_t = cached['xt']
+    gt_t = cached['gt']
     was_training = model.training
     model.eval()
     total_diff_sq = 0.0
     total_gt_sq = 0.0
     inf_norm = 0.0
     with torch.no_grad():
-        for start in range(0, xt.shape[0], chunk_size):
-            xb = torch.tensor(xt[start:start + chunk_size], dtype=dtype, device=device)
-            gb = torch.tensor(gt[start:start + chunk_size], dtype=dtype, device=device)
+        for start in range(0, xt_t.shape[0], chunk_size):
+            xb = xt_t[start:start + chunk_size]
+            gb = gt_t[start:start + chunk_size]
             pred = model(xb)
             diff = pred - gb
             total_diff_sq += (diff ** 2).sum().item()
@@ -108,8 +128,8 @@ def compute_native_grid_metrics(
     return {
         'rel_l2': rel_l2,
         'inf_norm': inf_norm,
-        'n_points': xt.shape[0],
-        'grid_shape': (len(t_grid), len(x_grid)),
+        'n_points': xt_t.shape[0],
+        'grid_shape': cached['grid_shape'],
     }
 
 
