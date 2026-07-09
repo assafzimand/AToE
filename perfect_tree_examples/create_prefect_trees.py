@@ -499,12 +499,10 @@ def process_problem_with_time_marching(
         print(f"  Skipping {problem}: only 2D (x,t) domains supported.")
         return None
 
-    # Fit on a symmetric regular grid (eval points only supply GT values)
-    n_eval = eval_data['x'].shape[0]
+    # Fit on a symmetric regular grid (eval points only supply GT values).
+    # min_samples_leaf is a LITERAL minimum number of grid samples per leaf
+    # (matching the pipeline's tree construction) — no rescaling.
     X_full, y_full = build_symmetric_grid_data(eval_data, domain_bounds)
-    min_samples_leaf = max(
-        min_samples_leaf,
-        int(round(min_samples_leaf * len(X_full) / max(n_eval, 1))))
     print(f"  Full data: X={X_full.shape}, y={y_full.shape if hasattr(y_full, 'shape') else '?'}, "
           f"min_samples_leaf={min_samples_leaf}")
 
@@ -686,20 +684,16 @@ def process_problem(
             f"only 2D (x,t) domains supported.")
         return None
 
-    # Fit on a symmetric regular grid (eval points only supply GT values)
-    n_eval = eval_data['x'].shape[0]
+    # Fit on a symmetric regular grid (eval points only supply GT values).
+    # min_samples_leaf is a LITERAL minimum number of grid samples per leaf
+    # (matching the pipeline's tree construction) — no rescaling.
     X, y = build_symmetric_grid_data(eval_data, domain_bounds)
-    msl = max(min_samples_leaf,
-              int(round(min_samples_leaf * len(X) / max(n_eval, 1))))
-    if msl != min_samples_leaf:
-        print(f"  min_samples_leaf scaled {min_samples_leaf} -> {msl} "
-              f"for {len(X)} grid points")
     print(f"  Data: X={X.shape}, y="
           f"{y.shape if hasattr(y, 'shape') else '?'}")
 
     (node_dicts, accepted_ids,
      bfs_accepted, children_left) = fit_and_get_all_nodes(
-        X, y, max_depth, msl, M, variable_for_node_accept,
+        X, y, max_depth, min_samples_leaf, M, variable_for_node_accept,
         domain_bounds=domain_bounds,
         epsilon_node_acceptance=epsilon_node_acceptance,
     )
@@ -707,7 +701,7 @@ def process_problem(
     # -- Build tree data for unified JSON --
     tree_data = build_problem_tree_data(
         problem, domain_bounds,
-        max_depth, msl, M,
+        max_depth, min_samples_leaf, M,
         bfs_accepted, node_dicts,
         epsilon_node_acceptance=epsilon_node_acceptance,
     )

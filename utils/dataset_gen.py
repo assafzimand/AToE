@@ -57,13 +57,16 @@ def calculate_dataset_sizes(config: Dict) -> Dict[str, int]:
     if n_boundary_train is None:
         n_boundary_train = int(round(n_residual_train * sampling['boundary_train_ratio']))
     # Calculate other sizes from ratios
+    # The eval sizes are used only by the standalone tree/analysis scripts
+    # (the pipeline has no eval dataset); eval_train_ratio is optional.
+    _eval_ratio = sampling.get('eval_train_ratio', 0.25)
     sizes = {
         'n_residual_train': n_residual_train,
         'n_initial_train': n_initial_train,
         'n_boundary_train': n_boundary_train,
-        'n_residual_eval': int(round(n_residual_train * sampling['eval_train_ratio'])),
-        'n_initial_eval': int(round(n_initial_train * sampling['eval_train_ratio'])),
-        'n_boundary_eval': int(round(n_boundary_train * sampling['eval_train_ratio'])),
+        'n_residual_eval': int(round(n_residual_train * _eval_ratio)),
+        'n_initial_eval': int(round(n_initial_train * _eval_ratio)),
+        'n_boundary_eval': int(round(n_boundary_train * _eval_ratio)),
     }
     
     # Print calculated values

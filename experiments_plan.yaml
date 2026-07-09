@@ -1,14 +1,14 @@
-experiment_name: burgers_allen-cahn_schrodinger_M10
+experiment_name: allen_cahn_M8
 base_config:
-  problem: burgers1d
+  problem: allen_cahn
   model: AToELeaves
   activation: tanh
   precision: float64
   epochs: 45000
   batch_size: 99999
   min_epochs: 1
-  eval_every: 1000
-  patience_epochs: 5000
+  eval_every: 500
+  patience_intervals: 10
   patience_rel_delta: 0.001
   optimizer_1: adam
   optimizer_2: ssbroyden
@@ -265,7 +265,7 @@ base_config:
       scale: 2.0
       periodic: false
     init:
-      hidden: parent_weights
+      hidden: default
       output: default
       ls_use_bias: false
     lra:
@@ -355,8 +355,7 @@ base_config:
     sample_volume_ratio: 35
     n_initial_train: 256
     n_boundary_train: 256
-    eval_train_ratio: 0.5
-    resample_every_epochs: 100
+    resample_every_epochs: 500
     plot_samples_every: 1000
   adaptive_pinn:
     enabled: true
@@ -371,8 +370,8 @@ base_config:
     tree_min_samples_leaf: 50
     enable_timing: false
     enable_gradient_diagnostics: false
-    M_experts_num: 20
-    epsilon_node_acceptance: 0.02
+    M_experts_num: 8
+    epsilon_node_acceptance: 0.00
     split_icbc:
       enabled: true
     initial_train:
@@ -397,22 +396,22 @@ base_config:
       lr_warmup_steps: 0
       l2sp_lambda: 0.0
 experiments:
-- name: burgers
-  problem: burgers1d
-  model: AToELeaves
-  base_architecture:
-  - 2
-  - 60
-  - 60
-  - 60
-  - 60
-  - 1
-  experts_architecture:
-  - 2
-  - 20
-  - 20
-  - 20
-  - 1
+# - name: burgers
+#   problem: burgers1d
+#   model: AToELeaves
+#   base_architecture:
+#   - 2
+#   - 60
+#   - 60
+#   - 60
+#   - 60
+#   - 1
+#   experts_architecture:
+#   - 2
+#   - 20
+#   - 20
+#   - 20
+#   - 1
 - name: allen_cahn
   problem: allen_cahn
   model: AToELeaves
@@ -429,19 +428,19 @@ experiments:
   - 20
   - 20
   - 1
-- name: schrodinger
-  problem: schrodinger
-  model: AToELeaves
-  base_architecture:
-  - 2
-  - 60
-  - 60
-  - 60
-  - 60
-  - 2
-  experts_architecture:
-  - 2
-  - 20
-  - 20
-  - 20
-  - 2
+# - name: schrodinger
+#   problem: schrodinger
+#   model: AToELeaves
+#   base_architecture:
+#   - 2
+#   - 60
+#   - 60
+#   - 60
+#   - 60
+#   - 2
+#   experts_architecture:
+#   - 2
+#   - 20
+#   - 20
+#   - 20
+#   - 2

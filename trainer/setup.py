@@ -564,11 +564,14 @@ def _save_checkpoint(
         tm['prev_model'] = None
         cfg_to_save['_time_marching_window'] = tm
 
+    # Optimizer STATE is intentionally not stored: nothing reloads it
+    # (reconciliation and resume restore weights only; optimizers are
+    # rebuilt per segment), and SSBroyden's dense Hessian approximation
+    # alone is n_params^2 floats (multi-GB per save).
     checkpoint = {
         'epoch': epoch,
         'model_state_dict': model.state_dict(),
         'optimizer': optimizer_name,
-        'optimizer_state_dict': optimizer.state_dict(),
         'train_loss': train_loss,
         'rel_l2': rel_l2,
         'config': cfg_to_save,

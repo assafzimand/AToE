@@ -345,17 +345,6 @@ def _build_tree_once(ctx: TrainingContext, retain_siblings: bool) -> Dict:
     else:
         fit_inputs = torch.cat([train_data['x'], train_data['t']], dim=1)
 
-    # Keep points-per-leaf comparable to the sample size tree_min_samples_leaf
-    # was tuned for (a quarter of the training set — the former eval size).
-    n_fit = fit_inputs.shape[0]
-    _ref_ratio = ctx.cfg.get('sampling', {}).get('eval_train_ratio', 0.25)
-    n_ref = max(1, int(round(train_data['x'].shape[0] * _ref_ratio)))
-    base_msl = region_detector.min_samples_leaf
-    msl_eff = max(base_msl, int(round(base_msl * n_fit / n_ref)))
-    if msl_eff != base_msl:
-        logger.info(f"  [Tree] min_samples_leaf scaled {base_msl} -> {msl_eff} "
-                    f"for {n_fit} grid points")
-
     model.eval()
     with torch.no_grad():
         if torch.cuda.is_available():
@@ -371,19 +360,18 @@ def _build_tree_once(ctx: TrainingContext, retain_siblings: bool) -> Dict:
     logger.info(f"\n[Tree] Computing M-term tree (retain_siblings={retain_siblings}) — "
           f"closure: {closure_desc}")
     epsilon_node_acceptance = adaptive_cfg.get('epsilon_node_acceptance', 0.0)
+    # tree_min_samples_leaf is a LITERAL minimum number of fit-grid samples
+    # per leaf (the tree is fit on the symmetric grid above) — no rescaling.
     logger.info(f"  [M-term Tree] Fitting full tree (max_depth={region_detector.max_depth}, "
-          f"min_samples_leaf={msl_eff}), selecting top M={M} "
+          f"min_samples_leaf={region_detector.min_samples_leaf} of {fit_inputs.shape[0]} "
+          f"grid points), selecting top M={M} "
           f"(eps={epsilon_node_acceptance})...")
-    region_detector.min_samples_leaf = msl_eff
-    try:
-        accepted_nodes, prune_depth_stats = region_detector.fit_full_tree_and_prune(
-            X=X_eval, y=y_eval, M=M,
-            variable_for_node_accept=variable_for_node_accept,
-            verbose=True, retain_siblings=retain_siblings,
-            epsilon_node_acceptance=epsilon_node_acceptance,
-        )
-    finally:
-        region_detector.min_samples_leaf = base_msl
+    accepted_nodes, prune_depth_stats = region_detector.fit_full_tree_and_prune(
+        X=X_eval, y=y_eval, M=M,
+        variable_for_node_accept=variable_for_node_accept,
+        verbose=True, retain_siblings=retain_siblings,
+        epsilon_node_acceptance=epsilon_node_acceptance,
+    )
 
     tree = region_detector.rf.estimators_[0].tree_
     children_left = tree.children_left
