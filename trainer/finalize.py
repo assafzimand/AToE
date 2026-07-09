@@ -53,7 +53,6 @@ def _finalize_training(ctx: TrainingContext) -> Path:
     cfg = ctx.cfg
     device = ctx.device
     run_dir = ctx.run_dir
-    eval_data = ctx.eval_data
     metrics = ctx.metrics
     timer = ctx.timer
     checkpoint_dir = ctx.checkpoint_dir
@@ -62,10 +61,9 @@ def _finalize_training(ctx: TrainingContext) -> Path:
     epochs = ctx.epochs
     total_epochs = ctx.total_epochs
     train_loss = ctx.train_loss
-    eval_loss = ctx.eval_loss
-    eval_rel_l2 = ctx.eval_rel_l2
-    eval_inf_norm = ctx.eval_inf_norm
-    best_eval_loss = ctx.best_eval_loss
+    rel_l2 = ctx.rel_l2
+    inf_norm = ctx.inf_norm
+    best_rel_l2 = ctx.best_rel_l2
     best_checkpoint_path = ctx.best_checkpoint_path
     switch_epoch = ctx.switch_epoch
     optimizer_2_name = ctx.optimizer_2_name
@@ -112,10 +110,10 @@ def _finalize_training(ctx: TrainingContext) -> Path:
     # Save final model
     final_checkpoint_path = checkpoint_dir / "final_model.pt"
     _save_checkpoint(final_checkpoint_path, model, optimizer, current_optimizer_name, total_epochs,
-                    train_loss, eval_loss, cfg, metrics)
+                    train_loss, rel_l2, cfg, metrics)
 
     logger.info(f"\nTraining completed in {time.time() - start_time:.1f}s")
-    logger.info(f"  Best eval loss: {best_eval_loss:.6e}")
+    logger.info(f"  Best rel-L2 (solver grid): {best_rel_l2:.6e}")
     logger.info(f"  Best checkpoint: {best_checkpoint_path}")
     logger.info(f"  Final checkpoint: {final_checkpoint_path}")
 
@@ -282,11 +280,9 @@ def _finalize_training(ctx: TrainingContext) -> Path:
         f.write(f"Learning rate: {cfg['lr']}\n")
         f.write(f"Device: {device}\n\n")
         f.write(f"Final train loss: {train_loss:.6e}\n")
-        f.write(f"Final eval loss: {eval_loss:.6e}\n" if eval_loss is not None else "Final eval loss: N/A\n")
-        f.write(f"Final eval rel-L2 (solver grid): {eval_rel_l2:.6e}\n" if eval_rel_l2 is not None else "Final eval rel-L2 (solver grid): N/A\n")
-        f.write(f"Final dense-grid rel-L2: {dense_rel_l2:.6e}\n" if dense_rel_l2 is not None else "Final dense-grid rel-L2: N/A\n")
-        f.write(f"Final eval inf-norm: {eval_inf_norm:.6e}\n" if eval_inf_norm is not None else "Final eval inf-norm: N/A\n")
-        f.write(f"Best eval loss: {best_eval_loss:.6e}\n\n")
+        f.write(f"Final rel-L2 (solver grid): {dense_rel_l2:.6e}\n" if dense_rel_l2 is not None else "Final rel-L2 (solver grid): N/A\n")
+        f.write(f"Final inf-norm (solver grid): {inf_norm:.6e}\n" if inf_norm is not None else "Final inf-norm (solver grid): N/A\n")
+        f.write(f"Best rel-L2 (solver grid): {best_rel_l2:.6e}\n\n")
         f.write(f"Best checkpoint: {best_checkpoint_path}\n")
         f.write(f"Final checkpoint: {final_checkpoint_path}\n")
     logger.info(f"  Summary saved to {summary_path}")
@@ -306,8 +302,7 @@ def _finalize_training(ctx: TrainingContext) -> Path:
         from utils.problem_specific import get_visualization_module
         viz_module = get_visualization_module(cfg['problem'])
         visualize_evaluation = viz_module[1]  # Second element is visualize_evaluation
-        eval_data_path = Path("datasets") / cfg['problem'] / "eval_data.pt"
-        visualize_evaluation(model, str(eval_data_path), run_dir, cfg)
+        visualize_evaluation(model, run_dir, cfg)
     except ValueError as e:
         logger.info(f"  (No custom evaluation visualization for {cfg['problem']})")
         logger.info(f"  ValueError details: {e}")

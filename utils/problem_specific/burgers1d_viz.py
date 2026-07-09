@@ -60,8 +60,7 @@ def visualize_dataset(data_dict: Dict, save_dir: Path, config: Dict, split_name:
     print(f"  {split_name.capitalize()} dataset visualization saved to {save_path}")
 
 
-def visualize_evaluation(model: torch.nn.Module, eval_data_path: str,
-                         save_dir: Path, config: Dict):
+def visualize_evaluation(model: torch.nn.Module, save_dir: Path, config: Dict):
     from utils.problem_specific.generic_viz import plot_predictions_and_error_maps
     plot_predictions_and_error_maps(
         model, save_dir, config,

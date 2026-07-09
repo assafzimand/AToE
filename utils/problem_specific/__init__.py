@@ -27,7 +27,7 @@ def get_visualization_module(problem_name: str):
         # For problems without a dedicated viz module, use the generic evaluator.
         from .generic_viz import plot_predictions_and_error_maps
 
-        def _generic_visualize_evaluation(model, eval_data_path, save_dir, config):
+        def _generic_visualize_evaluation(model, save_dir, config):
             problem = config.get('problem', 'problem')
             plot_predictions_and_error_maps(
                 model, save_dir, config,

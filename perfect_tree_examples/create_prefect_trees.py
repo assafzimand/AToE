@@ -33,7 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from adaptive.region_detector import RegionDetector  # noqa: E402
 from adaptive.visualization import prepare_ground_truth_grid  # noqa: E402
 from utils.dataset_gen import calculate_dataset_sizes  # noqa: E402
-from utils.plot_io import save_png_and_pdf  # noqa: E402
+from utils.plot_io import save_png  # noqa: E402
 from trainer.time_marching import compute_m_per_window  # noqa: E402
 
 
@@ -631,7 +631,7 @@ def process_problem_with_time_marching(
 
     plt.tight_layout()
 
-    out_path = save_png_and_pdf(
+    out_path = save_png(
         output_dir / (
             f'perfect_tree_{problem}_W{num_windows}_{m_distribution}'
             f'_M{global_M}_acc{n_accepted}.png'),
@@ -746,7 +746,7 @@ def process_problem(
 
     plt.tight_layout()
 
-    out_path = save_png_and_pdf(
+    out_path = save_png(
         output_dir / (
             f'perfect_tree_{problem}_depth{max_depth}'
             f'_M{M}_acc{n_accepted}.png'),

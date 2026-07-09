@@ -79,9 +79,6 @@ def calculate_dataset_sizes(config: Dict) -> Dict[str, int]:
     logger.info(f"    n_residual_train: {sizes['n_residual_train']:,}")
     logger.info(f"    n_initial_train:  {sizes['n_initial_train']:,}")
     logger.info(f"    n_boundary_train: {sizes['n_boundary_train']:,}")
-    logger.info(f"    n_residual_eval:  {sizes['n_residual_eval']:,}")
-    logger.info(f"    n_initial_eval:   {sizes['n_initial_eval']:,}")
-    logger.info(f"    n_boundary_eval:  {sizes['n_boundary_eval']:,}")
     logger.info(f"{'='*60}\n")
     
     return sizes
@@ -89,7 +86,10 @@ def calculate_dataset_sizes(config: Dict) -> Dict[str, int]:
 
 def generate_and_save_datasets(config: Dict) -> None:
     """
-    Generate training and evaluation datasets if they don't exist.
+    Generate the training dataset if it doesn't exist.
+
+    There is no eval dataset — all metrics are computed on the ground-truth
+    solver's native grid.
 
     Args:
         config: Configuration dictionary containing problem name,
@@ -107,7 +107,6 @@ def generate_and_save_datasets(config: Dict) -> None:
     dataset_dir.mkdir(parents=True, exist_ok=True)
 
     train_path = dataset_dir / "training_data.pt"
-    eval_path = dataset_dir / "eval_data.pt"
 
     # Dynamically import the solver for the problem
     solver_module = importlib.import_module(f"solvers.{problem}_solver")
@@ -143,38 +142,6 @@ def generate_and_save_datasets(config: Dict) -> None:
             pass  # No custom visualization for this problem
     else:
         logger.info(f"Training data already exists: {train_path}")
-
-    # Generate evaluation data if missing
-    if not eval_path.exists():
-        logger.info(f"Generating evaluation data for {problem}...")
-        eval_data = solver_module.generate_dataset(
-            n_residual=sizes['n_residual_eval'],
-            n_ic=sizes['n_initial_eval'],
-            n_bc=sizes['n_boundary_eval'],
-            device=device,
-            config=config
-        )
-        torch.save(eval_data, eval_path)
-        logger.info(f"  Saved to {eval_path}")
-
-        # Create visualizations
-        plot_path = dataset_dir / "eval_data_visualization.png"
-        title = f"{problem} - Evaluation Data"
-        plot_dataset(eval_data, str(plot_path), title=title)
-
-        stats_path = dataset_dir / "eval_data_statistics.png"
-        plot_dataset_statistics(eval_data, str(stats_path))
-        
-        # Problem-specific visualization
-        try:
-            from utils.problem_specific import get_visualization_module
-            viz_funcs = get_visualization_module(problem)
-            visualize_dataset = viz_funcs[0]
-            visualize_dataset(eval_data, dataset_dir, config, 'evaluation')
-        except ValueError:
-            pass  # No custom visualization for this problem
-    else:
-        logger.info(f"Evaluation data already exists: {eval_path}")
 
 
 def _analytic_ic(problem: str, x: torch.Tensor, pc: Dict) -> torch.Tensor:

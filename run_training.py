@@ -177,20 +177,18 @@ def main():
     if not eval_only:
         logger.info("3. Training mode")
 
-        # Ensure datasets exist
+        # Ensure the training dataset exists (all metrics come from the
+        # ground-truth solver's native grid — no eval dataset)
         logger.info("4. Checking datasets...")
         dataset_dir = Path("datasets") / problem
         train_data_path = dataset_dir / "training_data.pt"
-        eval_data_path = dataset_dir / "eval_data.pt"
 
-        if not train_data_path.exists() or not eval_data_path.exists():
-            logger.info("  Datasets not found. Generating...")
+        if not train_data_path.exists():
+            logger.info("  Training dataset not found. Generating...")
             from utils.dataset_gen import generate_and_save_datasets
             generate_and_save_datasets(config)
         else:
-            logger.info(f"  Datasets found:")
-            logger.info(f"    Train: {train_data_path}")
-            logger.info(f"    Eval: {eval_data_path}")
+            logger.info(f"  Training dataset found: {train_data_path}")
 
         # Time-marching: separate models trained per temporal window
         tm_cfg = config.get(problem, {}).get('time_marching', {})
@@ -252,7 +250,6 @@ def main():
                 model=model,
                 loss_fn=loss_fn,
                 train_data_path=str(train_data_path),
-                eval_data_path=str(eval_data_path),
                 cfg=config,
                 run_dir=run_dir
             )
@@ -280,18 +277,12 @@ def main():
             model = model.double()
         _load_checkpoint_into_model(model, checkpoint_path, architecture, is_adaptive, logger)
 
-        eval_data_path = Path("datasets") / problem / "eval_data.pt"
-        if not eval_data_path.exists():
-            logger.info("  Eval data not found. Generating...")
-            from utils.dataset_gen import generate_and_save_datasets
-            generate_and_save_datasets(config)
-
         logger.info("Generating problem-specific evaluation visualizations...")
         try:
             from utils.problem_specific import get_visualization_module
             viz_module = get_visualization_module(problem)
             visualize_evaluation = viz_module[1]
-            visualize_evaluation(model, str(eval_data_path), run_dir, config)
+            visualize_evaluation(model, run_dir, config)
         except ValueError:
             logger.info(f"  (No custom evaluation visualization for {problem})")
         except Exception as e:

@@ -16,6 +16,7 @@ import importlib
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
+from matplotlib.colors import LogNorm
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -73,7 +74,7 @@ def plot_predictions_and_error_maps(
     Paper-ready: no suptitle; run metadata belongs in the filename/caption.
     If ``filename`` contains the placeholder ``{relL2}``, it is substituted
     with the computed rel-L2 (e.g. ``pred_final_{relL2}.png`` →
-    ``pred_final_2.41e-03.png``). Saved as PNG + PDF.
+    ``pred_final_2.41e-03.png``). Saved as PNG.
 
     The model is evaluated on the solver's native solution grid (restricted
     to the config's temporal domain, so time-marching windows are scored on
@@ -182,12 +183,24 @@ def plot_predictions_and_error_maps(
         axes[d, 1].set_title(f'{prefix}Prediction', fontsize=14)
         fig.colorbar(im1, ax=axes[d, :2], pad=0.01)
 
-        # Error (own scale, scientific ticks)
-        im2 = axes[d, 2].pcolormesh(X, T, err, shading='auto', cmap='Reds')
+        # Error panel: LOG color scale. A linear autoscaled map is dominated
+        # by localized spikes (thin shock/interface lines, boundary strips):
+        # with max/typical error ratios of 50-1000x, the bulk renders blank
+        # white. Log scale shows the full error structure; the reported
+        # rel-L2 numbers are untouched (this is display-only). The window is
+        # capped at 5 decades below the max so noise-floor pixels don't
+        # stretch the scale.
+        err_max = float(err.max())
+        if err_max > 0:
+            err_pos = err[err > 0]
+            err_vmin = max(float(err_pos.min()), err_max * 1e-5)
+            im2 = axes[d, 2].pcolormesh(
+                X, T, np.maximum(err, err_vmin), shading='auto', cmap='Reds',
+                norm=LogNorm(vmin=err_vmin, vmax=err_max))
+        else:
+            im2 = axes[d, 2].pcolormesh(X, T, err, shading='auto', cmap='Reds')
         axes[d, 2].set_title(f'{prefix}Absolute error', fontsize=14)
-        cb2 = fig.colorbar(im2, ax=axes[d, 2], pad=0.01)
-        cb2.formatter.set_powerlimits((-2, 2))
-        cb2.update_ticks()
+        fig.colorbar(im2, ax=axes[d, 2], pad=0.01)
 
         for c in range(3):
             axes[d, c].set_xlabel('x', fontsize=13)
@@ -196,8 +209,8 @@ def plot_predictions_and_error_maps(
 
     if '{relL2}' in filename:
         filename = filename.replace('{relL2}', f'{rel_l2:.2e}')
-    from utils.plot_io import save_png_and_pdf
-    save_path = save_png_and_pdf(Path(save_dir) / filename, fig=fig)
+    from utils.plot_io import save_png
+    save_path = save_png(Path(save_dir) / filename, fig=fig)
     plt.close(fig)
     print(f"  Predictions & error maps saved to {save_path} "
           f"(rel-L2 = {rel_l2:.3e})")

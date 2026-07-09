@@ -19,7 +19,7 @@ from trainer.plotting import (
     plot_training_curves,
     plot_per_expert_curves,
 )
-from trainer.utils import compute_infinity_norm_error
+from trainer.utils import compute_infinity_norm_error, compute_native_grid_metrics
 from trainer.timing import EpochTimer
 from trainer.training_context import TrainingContext, SegmentResult
 from models.atoe_leaves import AToELeaves
@@ -49,7 +49,6 @@ def train(
     model: nn.Module,
     loss_fn: Callable,
     train_data_path: str,
-    eval_data_path: str,
     cfg: Dict,
     run_dir: Path
 ) -> Path:
@@ -61,18 +60,20 @@ def train(
       2. ``train_orchestrator`` — per-variant segment + staged-spawning driver.
       3. ``_finalize_training`` — checkpoints, plots, metrics, summary.
 
+    All rel-L2 / inf-norm metrics come from the ground-truth solver's native
+    grid — there is no eval dataset.
+
     Args:
         model: Neural network model
         loss_fn: Loss function (model, batch) -> scalar
         train_data_path: Path to training_data.pt
-        eval_data_path: Path to eval_data.pt
         cfg: Configuration dictionary
         run_dir: Output directory for this run
 
     Returns:
         Path to best checkpoint (or None on NaN divergence)
     """
-    ctx = _setup_training(model, loss_fn, train_data_path, eval_data_path, cfg, run_dir)
+    ctx = _setup_training(model, loss_fn, train_data_path, cfg, run_dir)
     train_orchestrator(ctx)
     return _finalize_training(ctx)
 
@@ -144,21 +145,19 @@ def train_orchestrator(ctx: TrainingContext) -> None:
 
     # ── Root rel-L2 baseline for the training-curve reference line ──
     # base_model holds the root (loaded or Phase-1 trained), no experts yet.
-    # The plot only draws the baseline when the root was LOADED (an in-session
-    # root phase is already visible in the curve itself).
+    # Computed on the solver's NATIVE grid — the same metric as the training
+    # curve, the plot filenames and the comparison reports. The plot only
+    # draws the baseline when the root was LOADED (an in-session root phase
+    # is already visible in the curve itself).
     ctx.metrics['root_loaded_from_checkpoint'] = (
         ctx.pretrained_base_checkpoint is not None)
     try:
         _root_net = getattr(model, 'base_model', model)
-        if ctx.eval_data is not None:
-            model.eval()
-            with torch.no_grad():
-                _ev = ctx.eval_data
-                _pred = _root_net(torch.cat([_ev['x'], _ev['t']], dim=1))
-                _num = torch.sqrt(((_pred - _ev['h_gt']) ** 2).sum())
-                _den = torch.sqrt((_ev['h_gt'] ** 2).sum()) + 1e-10
-                ctx.metrics['root_rel_l2'] = (_num / _den).item()
-            logger.info(f"[Orchestrator] Root rel-L2 = "
+        _root_metrics = compute_native_grid_metrics(_root_net, cfg, ctx.device)
+        if _root_metrics is not None:
+            ctx.metrics['root_rel_l2'] = _root_metrics['rel_l2']
+            ctx.metrics['root_inf_norm'] = _root_metrics['inf_norm']
+            logger.info(f"[Orchestrator] Root rel-L2 (grid) = "
                         f"{ctx.metrics['root_rel_l2']:.6e} (training-curve baseline)")
     except Exception as _e:
         logger.info(f"[Orchestrator] Could not compute root rel-L2: {_e}")
@@ -319,19 +318,19 @@ def _build_tree_once(ctx: TrainingContext, retain_siblings: bool) -> Dict:
     the tree maps needed to select levels and link parent experts.
     """
     model = ctx.model
-    eval_data = ctx.eval_data
+    train_data = ctx.train_data
     region_detector = ctx.region_detector
     adaptive_cfg = ctx.adaptive_cfg
     variable_for_node_accept = ctx.variable_for_node_accept
     M = adaptive_cfg['M_experts_num']
 
     # ── Tree-fitting sample: symmetric regular grid over the domain ──
-    # Random eval points put sklearn's split candidates (sample midpoints) at
+    # Random points put sklearn's split candidates (sample midpoints) at
     # asymmetric, draw-dependent locations. A regular grid keeps candidate
     # splits symmetric under the domain's reflections and makes the tree
-    # independent of the eval draw; eval_data stays metric-only.
+    # independent of any point draw.
     problem_cfg = ctx.problem_cfg or {}
-    tmpl = eval_data['x']
+    tmpl = train_data['x']
     if problem_cfg.get('spatial_dim') == 1:
         grid_res = 200  # 200x200 = 40k points, one cheap forward pass
         x_min, x_max = problem_cfg['spatial_domain'][0]
@@ -341,18 +340,18 @@ def _build_tree_once(ctx: TrainingContext, retain_siblings: bool) -> Dict:
         gt = torch.linspace(t_min, t_max, grid_res,
                             device=tmpl.device, dtype=tmpl.dtype)
         XX, TT = torch.meshgrid(gx, gt, indexing='ij')
-        eval_inputs = torch.stack([XX.reshape(-1), TT.reshape(-1)], dim=1)
-        logger.info(f"  [Tree] Fitting on symmetric {grid_res}x{grid_res} grid "
-                    f"(eval_data used for metrics only)")
+        fit_inputs = torch.stack([XX.reshape(-1), TT.reshape(-1)], dim=1)
+        logger.info(f"  [Tree] Fitting on symmetric {grid_res}x{grid_res} grid")
     else:
-        eval_inputs = torch.cat([eval_data['x'], eval_data['t']], dim=1)
+        fit_inputs = torch.cat([train_data['x'], train_data['t']], dim=1)
 
-    # Keep points-per-leaf comparable to what tree_min_samples_leaf was tuned
-    # for on the eval sample size.
-    n_fit = eval_inputs.shape[0]
-    n_eval = eval_data['x'].shape[0]
+    # Keep points-per-leaf comparable to the sample size tree_min_samples_leaf
+    # was tuned for (a quarter of the training set — the former eval size).
+    n_fit = fit_inputs.shape[0]
+    _ref_ratio = ctx.cfg.get('sampling', {}).get('eval_train_ratio', 0.25)
+    n_ref = max(1, int(round(train_data['x'].shape[0] * _ref_ratio)))
     base_msl = region_detector.min_samples_leaf
-    msl_eff = max(base_msl, int(round(base_msl * n_fit / max(n_eval, 1))))
+    msl_eff = max(base_msl, int(round(base_msl * n_fit / n_ref)))
     if msl_eff != base_msl:
         logger.info(f"  [Tree] min_samples_leaf scaled {base_msl} -> {msl_eff} "
                     f"for {n_fit} grid points")
@@ -361,10 +360,10 @@ def _build_tree_once(ctx: TrainingContext, retain_siblings: bool) -> Dict:
     with torch.no_grad():
         if torch.cuda.is_available():
             torch.cuda.synchronize()
-        u_pred = model(eval_inputs)
+        u_pred = model(fit_inputs)
         if torch.cuda.is_available():
             torch.cuda.synchronize()
-    X_eval = eval_inputs.cpu().numpy()
+    X_eval = fit_inputs.cpu().numpy()
     y_eval = u_pred.cpu().numpy()
 
     closure_desc = ("ancestors-only" if not retain_siblings
@@ -639,14 +638,14 @@ def _check_output_continuity(ctx: TrainingContext, label: str = "spawn") -> Dict
     Returns dict with output statistics that can be compared.
     """
     model = ctx.model
-    eval_data = ctx.eval_data
-    
-    if eval_data is None:
+    sample_data = ctx.plain_train_data
+
+    if sample_data is None:
         return {}
-    
+
     try:
         with torch.no_grad():
-            sample_inputs = torch.cat([eval_data['x'][:200], eval_data['t'][:200]], dim=1)
+            sample_inputs = torch.cat([sample_data['x'][:200], sample_data['t'][:200]], dim=1)
             output = model(sample_inputs)
             
             stats = {

@@ -253,9 +253,13 @@ def _create_optimizer_by_name(name: str, model: nn.Module, cfg: Dict) -> Tuple[t
         return _create_adam_optimizer(model, cfg), 'Adam'
 
 
-def _debug_print_model_state(model: nn.Module, segment_name: str, 
-                             eval_data: Dict = None) -> None:
-    """Print comprehensive model state at segment start for debugging."""
+def _debug_print_model_state(model: nn.Module, segment_name: str,
+                             sample_data: Dict = None) -> None:
+    """Print comprehensive model state at segment start for debugging.
+
+    ``sample_data`` is any dict with 'x'/'t' tensors (e.g. the training set);
+    a few of its points probe the composition's output magnitudes.
+    """
     logger.info(f"\n[DEBUG] Model state at start of segment '{segment_name}':")
     logger.info(f"  Model type: {type(model).__name__}")
     
@@ -303,18 +307,18 @@ def _debug_print_model_state(model: nn.Module, segment_name: str,
         logger.info(f"  Leaf indices: {sorted(model.leaf_indices)}")
 
     # Call model-specific debug_composition if available and has experts
-    if hasattr(model, 'debug_composition') and len(experts) > 0 and eval_data is not None:
+    if hasattr(model, 'debug_composition') and len(experts) > 0 and sample_data is not None:
         try:
-            sample_inputs = torch.cat([eval_data['x'][:100], eval_data['t'][:100]], dim=1)
+            sample_inputs = torch.cat([sample_data['x'][:100], sample_data['t'][:100]], dim=1)
             model.debug_composition(sample_inputs)
         except Exception as e:
             logger.info(f"  [DEBUG] debug_composition failed: {e}")
-    
+
     # ── Per-expert output magnitude (shows contribution magnitudes) ──
-    if eval_data is not None and hasattr(model, 'forward_decomposed'):
+    if sample_data is not None and hasattr(model, 'forward_decomposed'):
         try:
             with torch.no_grad():
-                sample_inputs = torch.cat([eval_data['x'][:200], eval_data['t'][:200]], dim=1)
+                sample_inputs = torch.cat([sample_data['x'][:200], sample_data['t'][:200]], dim=1)
                 decomp = model.forward_decomposed(sample_inputs)
                 
                 # Log base output magnitude
@@ -540,11 +544,15 @@ def _save_checkpoint(
     optimizer_name: str,
     epoch: int,
     train_loss: float,
-    eval_loss: float,
+    rel_l2: float,
     cfg: Dict,
     metrics: Dict
 ) -> None:
-    """Save model checkpoint with full information."""
+    """Save model checkpoint with full information.
+
+    ``rel_l2`` is the solver-grid rel-L2 at save time (may be None before the
+    first evaluation).
+    """
     # In time-marching mode, cfg['_time_marching_window'] carries a transient
     # 'prev_model' reference that must not be serialized into the checkpoint
     # (time_marching.py manages it in memory).
@@ -562,7 +570,7 @@ def _save_checkpoint(
         'optimizer': optimizer_name,
         'optimizer_state_dict': optimizer.state_dict(),
         'train_loss': train_loss,
-        'eval_loss': eval_loss,
+        'rel_l2': rel_l2,
         'config': cfg_to_save,
         'metrics': metrics
     }
@@ -675,13 +683,15 @@ def _setup_training(
     model: nn.Module,
     loss_fn: Callable,
     train_data_path: str,
-    eval_data_path: str,
     cfg: Dict,
     run_dir: Path
 ) -> TrainingContext:
     """Phase 1 of :func:`train`: build datasets, optimizer, metrics, adaptive state.
 
-    Behavior-preserving extraction of the original setup block (no logic changes).
+    There is no eval dataset: all rel-L2 / inf-norm metrics are computed on
+    the ground-truth solver's native grid, which also supplies the GT heatmap
+    background for plots.
+
     Returns a :class:`TrainingContext` carrying all state into the loop + finalize.
     """
     logger.info("\n" + "=" * 60)
@@ -741,47 +751,43 @@ def _setup_training(
             logger.info(f"Model device: {next(model.parameters()).device}")
         logger.info(f"{'='*80}\n")
 
-    # Load datasets
+    # Load dataset (training points only; metrics come from the solver grid)
     logger.info(f"\nLoading datasets...")
     train_data = torch.load(train_data_path)
-    eval_data = torch.load(eval_data_path)
 
     # Move data to device
     train_data = _move_batch_to_device(train_data, device)
-    eval_data = _move_batch_to_device(eval_data, device)
 
     # Cast data to configured precision (float32 or float64)
     precision = cfg.get('precision', 'float32')
     target_dtype = torch.float64 if precision == 'float64' else torch.float32
     train_data = _cast_data_to_dtype(train_data, target_dtype)
-    eval_data = _cast_data_to_dtype(eval_data, target_dtype)
 
-    # Filter train and eval data by window temporal bounds if time marching is enabled
+    # Filter train data by window temporal bounds if time marching is enabled
     time_marching_window = cfg.get('_time_marching_window', {})
     if time_marching_window.get('enabled', False):
         t_start = time_marching_window['t_start']
         t_end = time_marching_window['t_end']
         window_idx = time_marching_window['idx']
-        
+
         # IMPORTANT: For windows 1+, override IC BEFORE filtering
         # This updates IC t values from t=0 to t=window.t_start, so they survive filtering
         train_data = _override_ic_for_time_marching(train_data, cfg, device)
-        eval_data = _override_ic_for_time_marching(eval_data, cfg, device)
-        
+
         # --- Filter TRAINING data ---
         t_train = train_data['t'].squeeze()
         train_mask = (t_train >= t_start) & (t_train < t_end)
         # Handle edge case: last window should include t_end
         if t_train.max() <= t_end:
             train_mask = train_mask | (t_train == t_end)
-        
+
         n_train_original = train_data['x'].shape[0]
         n_train_filtered = train_mask.sum().item()
-        
+
         logger.info(f"  [Time Marching] Filtering train data for window {window_idx}: "
               f"t in [{t_start:.4f}, {t_end:.4f}]")
         logger.info(f"  [Time Marching] Train data: {n_train_original} → {n_train_filtered} points")
-        
+
         # Apply mask to train_data
         filtered_train_data = {}
         for key, value in train_data.items():
@@ -795,50 +801,18 @@ def _setup_training(
             else:
                 filtered_train_data[key] = value
         train_data = filtered_train_data
-        
-        # --- Filter EVAL data ---
-        t_eval = eval_data['t'].squeeze()
-        eval_mask = (t_eval >= t_start) & (t_eval < t_end)
-        # Handle edge case: last window should include t_end
-        if t_eval.max() <= t_end:
-            eval_mask = eval_mask | (t_eval == t_end)
-        
-        n_eval_original = eval_data['x'].shape[0]
-        n_eval_filtered = eval_mask.sum().item()
-        
-        logger.info(f"  [Time Marching] Filtering eval data for window {window_idx}: "
-              f"t in [{t_start:.4f}, {t_end:.4f}]")
-        logger.info(f"  [Time Marching] Eval data: {n_eval_original} → {n_eval_filtered} points")
-        
-        # Apply mask to eval_data
-        filtered_eval_data = {}
-        for key, value in eval_data.items():
-            if torch.is_tensor(value):
-                filtered_eval_data[key] = value[eval_mask]
-            elif key == 'mask':
-                filtered_eval_data[key] = {
-                    k: v[eval_mask] if torch.is_tensor(v) else v
-                    for k, v in value.items()
-                }
-            else:
-                filtered_eval_data[key] = value
-        eval_data = filtered_eval_data
 
     logger.info(f"  Train size: {train_data['x'].shape[0]}")
-    logger.info(f"  Eval size: {eval_data['x'].shape[0]}")
     logger.info(f"  Train data device: {train_data['x'].device}")
-    logger.info(f"  Eval data device: {eval_data['x'].device}")
 
     # Reset the default device before creating DataLoaders (see
     # _set_default_torch_device). Model and data stay on CUDA via explicit
     # .to(device); this only affects the sampler's generator creation.
     _set_default_torch_device(device, full_batch=False)
 
-    # Create DataLoaders
+    # Create DataLoader
     train_loader = _create_dataloader(train_data, cfg['batch_size'],
                                       shuffle=True)
-    eval_loader = _create_dataloader(eval_data, cfg['batch_size'],
-                                     shuffle=False)
 
     # ── 3-phase logic (root -> M-term tree spawn -> leaf training) ──
     adaptive_cfg_init = cfg['adaptive_pinn']
@@ -923,14 +897,14 @@ def _setup_training(
     save_every = cfg['save_every']
 
     # Metrics storage
-    # Note: train_loss is stored every epoch, eval metrics only every print_every
+    # Note: train_loss is stored every epoch; rel-L2/inf-norm (computed on the
+    # ground-truth solver's native grid) only every eval_every epochs.
     metrics = {
         'train_loss_epochs': [],  # All epochs
         'train_loss': [],          # All epochs
         'epochs': [],              # Evaluation epochs only
-        'eval_loss': [],
-        'eval_rel_l2': [],
-        'eval_inf_norm': [],
+        'rel_l2': [],              # Solver-grid rel-L2
+        'inf_norm': [],            # Solver-grid inf-norm
         'causal_history': [],      # Causal training state (tol, min_weight, stage) at eval epochs
         'lra_history': [],         # LRA weights and grad norms at eval epochs
         'resample_events': [],     # Track resampling/skipping events
@@ -961,7 +935,7 @@ def _setup_training(
         },
     }
 
-    best_eval_loss = float('inf')
+    best_rel_l2 = float('inf')
     best_checkpoint_path = None
     # Patience is counted in EPOCHS on the TRAIN loss (checked every epoch);
     # patience_evals is accepted as a legacy alias interpreted as
@@ -1038,10 +1012,18 @@ def _setup_training(
         logger.info(f"  Timing profiling: {'enabled' if enable_timing_cfg else 'disabled'}")
 
         from adaptive.region_detector import RegionDetector
-        from adaptive.visualization import prepare_ground_truth_grid
+        from trainer.utils import native_ground_truth_grid
 
         domain_bounds = model.get_domain_bounds()
-        gt_grid, gt_x, gt_t = prepare_ground_truth_grid(eval_data, domain_bounds)
+        # GT heatmap background straight from the solver's native grid
+        # (no eval sample, no interpolation).
+        _native_gt = native_ground_truth_grid(cfg)
+        if _native_gt is not None:
+            gt_grid, gt_x, gt_t = _native_gt
+        else:
+            gt_grid, gt_x, gt_t = None, None, None
+            logger.warning("  [GT] Solver native grid unavailable — plots "
+                           "will render without a ground-truth background.")
 
         region_detector = RegionDetector(
             n_estimators=1,
@@ -1069,9 +1051,6 @@ def _setup_training(
         model._timer = timer
 
     train_loss = 0.0
-    eval_loss = 0.0
-    eval_rel_l2 = 0.0
-    eval_inf_norm = 0.0
 
     resample_every = cfg['sampling']['resample_every_epochs']
     base_seed = cfg['seed']
@@ -1181,9 +1160,8 @@ def _setup_training(
         device=device,
         run_dir=run_dir,
         train_data=train_data,
-        eval_data=eval_data,
         train_loader=train_loader,
-        eval_loader=eval_loader,
+        plain_train_data=train_data,
         active_cfg=active_cfg,
         epochs=epochs,
         phase3_epochs=phase3_epochs,
@@ -1202,7 +1180,7 @@ def _setup_training(
         eval_every=eval_every,
         save_every=save_every,
         metrics=metrics,
-        best_eval_loss=best_eval_loss,
+        best_rel_l2=best_rel_l2,
         best_checkpoint_path=best_checkpoint_path,
         patience_epochs=patience_epochs,
         min_epochs=min_epochs,
@@ -1229,9 +1207,6 @@ def _setup_training(
         start_time=start_time,
         timer=timer,
         train_loss=train_loss,
-        eval_loss=eval_loss,
-        eval_rel_l2=eval_rel_l2,
-        eval_inf_norm=eval_inf_norm,
         resample_every=resample_every,
         base_seed=base_seed,
         grad_clip_norm=grad_clip_norm,

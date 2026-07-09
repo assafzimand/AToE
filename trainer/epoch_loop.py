@@ -78,13 +78,12 @@ def _train_segment(
     run_dir = ctx.run_dir
     train_data = ctx.train_data
     train_loader = ctx.train_loader
-    eval_loader = ctx.eval_loader
     batches_per_epoch = ctx.batches_per_epoch
     print_every = ctx.print_every
     eval_every = ctx.eval_every
     save_every = ctx.save_every
     metrics = ctx.metrics
-    best_eval_loss = ctx.best_eval_loss
+    best_rel_l2 = ctx.best_rel_l2
     best_checkpoint_path = ctx.best_checkpoint_path
     patience_epochs = ctx.patience_epochs
     patience_rel_delta = ctx.patience_rel_delta
@@ -95,9 +94,8 @@ def _train_segment(
     timer = ctx.timer
     start_time = ctx.start_time
     train_loss = ctx.train_loss
-    eval_loss = ctx.eval_loss
-    eval_rel_l2 = ctx.eval_rel_l2
-    eval_inf_norm = ctx.eval_inf_norm
+    rel_l2 = ctx.rel_l2
+    inf_norm = ctx.inf_norm
     resample_every = ctx.resample_every
     base_seed = ctx.base_seed
     grad_clip_norm = ctx.grad_clip_norm
@@ -161,7 +159,7 @@ def _train_segment(
           f"trainable_params={_n_train_params}")
     
     # ── DEBUG: Print comprehensive model state at segment start ──
-    _debug_print_model_state(model, segment_name, ctx.eval_data)
+    _debug_print_model_state(model, segment_name, ctx.train_data)
     
     metrics.setdefault('segment_events', []).append({
         'segment': segment_name,
@@ -663,7 +661,7 @@ def _train_segment(
             # Save a NaN-state checkpoint for post-mortem inspection
             _nan_ckpt_path = checkpoint_dir / f"nan_checkpoint_epoch_{epoch}.pt"
             _save_checkpoint(_nan_ckpt_path, model, optimizer, current_optimizer_name,
-                             epoch, train_loss, eval_loss, cfg, metrics)
+                             epoch, train_loss, rel_l2, cfg, metrics)
             logger.info(f"  [NaN] Checkpoint saved to {_nan_ckpt_path}")
             logger.info(f"{'!'*60}\n")
             _nan_detected = True
@@ -704,70 +702,55 @@ def _train_segment(
                            or epoch == total_epochs)
         
         if should_evaluate:
-            # Eval phase: one physics pass per batch (loss + components; drives
-            # patience and best-checkpoint selection, stays GT-free) plus
-            # rel-L2 / inf-norm on the solver's NATIVE grid (paper-comparable,
-            # same metric as finalize and the comparison reports).
+            # Evaluation = rel-L2 / inf-norm on the ground-truth solver's
+            # NATIVE grid (the single reported metric; paper-comparable, same
+            # metric as finalize, plot filenames and the comparison reports),
+            # plus a full-batch loss-component snapshot on the plain training
+            # set for the [LossTerms] log and the components training curve.
             model.eval()
-            eval_loss = 0.0
-            n_eval_batches = 0
-            comp_sums = {}
 
             timer.start('eval.native_grid')
             _native = compute_native_grid_metrics(model, cfg, device)
             timer.stop('eval.native_grid')
-            if _native is None and not _native_fallback_logged:
-                logger.warning("  [Eval] Solver native grid unavailable — "
-                               "rel-L2/inf-norm fall back to the random eval subsample.")
-                _native_fallback_logged = True
+            if _native is not None:
+                rel_l2 = _native['rel_l2']
+                inf_norm = _native['inf_norm']
+            else:
+                rel_l2 = float('nan')
+                inf_norm = float('nan')
+                if not _native_fallback_logged:
+                    logger.warning("  [Eval] Solver native grid unavailable — "
+                                   "rel-L2/inf-norm cannot be computed.")
+                    _native_fallback_logged = True
 
-            # Subsample accumulators (fallback only)
-            total_diff_sq = 0.0
-            total_gt_sq = 0.0
-            eval_inf_norm = 0.0
-
-            # Eval metric uses the model's CURRENT blending_mode (composed
+            # The metric uses the model's CURRENT blending_mode (composed
             # forward): the configured mode normally, but hard indicators
             # during split segments (set by _run_split_segment) so the rel-L2
             # curve reflects what is actually being trained.
-            for batch in eval_loader:
-                # Physics losses need gradients w.r.t. inputs even during
-                # evaluation (for PDE residual derivatives); model.eval() still
-                # disables dropout/batchnorm training behavior.
+
+            # ── Loss-component snapshot on the plain training set ──
+            # During split segments ctx.train_data holds the split schema, so
+            # the snapshot probes ctx.plain_train_data through the composed
+            # loss (split_loss falls back to it for plain batches). Physics
+            # losses need gradients w.r.t. inputs even in eval mode.
+            _probe = (train_data if isinstance(train_data, dict)
+                      and 'mask' in train_data else ctx.plain_train_data)
+            comp_means = {}
+            if _probe is not None:
                 timer.start('eval.loss_fn')
-                comps = loss_fn(model, batch, return_components=True,
+                comps = loss_fn(model, _probe, return_components=True,
                                 update_causal_state=False)
                 timer.stop('eval.loss_fn')
-                for k, v in comps.items():
-                    val = float(v.item()) if isinstance(v, torch.Tensor) else float(v)
-                    comp_sums[k] = comp_sums.get(k, 0.0) + val
-
-                if _native is None:
-                    with torch.no_grad():
-                        inputs = torch.cat([batch['x'], batch['t']], dim=1)
-                        h_pred = model(inputs)
-                        diff = h_pred - batch['h_gt']
-                        total_diff_sq += (diff ** 2).sum().item()
-                        total_gt_sq += (batch['h_gt'] ** 2).sum().item()
-                        inf_norm = compute_infinity_norm_error(h_pred, batch['h_gt'])
-                        eval_inf_norm = max(eval_inf_norm, inf_norm.item())
-
-                n_eval_batches += 1
-
-            comp_means = {k: v / n_eval_batches for k, v in comp_sums.items()}
-            eval_loss = comp_means.pop('total')
-            if _native is not None:
-                eval_rel_l2 = _native['rel_l2']
-                eval_inf_norm = _native['inf_norm']
-            else:
-                # Global subsample rel-L2: ||pred - gt||_2 / ||gt||_2
-                eval_rel_l2 = math.sqrt(total_diff_sq) / (math.sqrt(total_gt_sq) + 1e-10)
+                comp_means = {
+                    k: float(v.item()) if isinstance(v, torch.Tensor) else float(v)
+                    for k, v in comps.items()
+                }
+                comp_means.pop('total', None)
 
             # Store evaluation metrics (train_loss already stored above for all epochs)
             metrics['epochs'].append(epoch)
-            metrics['eval_loss'].append(eval_loss)
-            metrics['eval_rel_l2'].append(eval_rel_l2)
-            metrics['eval_inf_norm'].append(eval_inf_norm)
+            metrics['rel_l2'].append(rel_l2)
+            metrics['inf_norm'].append(inf_norm)
 
             # ── Term-wise loss components (from the same eval pass) ──
             metrics['loss_components']['epochs'].append(epoch)
@@ -803,9 +786,8 @@ def _train_segment(
             batch_mode = "mini" if current_optimizer_name in ('Adam', 'SOAP') else "full"
             logger.info(f"Epoch [{epoch}/{total_epochs}] ({elapsed:.1f}s) [{current_optimizer_name}/{batch_mode}] | "
                   f"Train Loss: {train_loss:.6e} | "
-                  f"Eval Loss: {eval_loss:.6e} | "
-                  f"Eval Rel-L2: {eval_rel_l2:.6e} | "
-                  f"Eval Inf: {eval_inf_norm:.6e}")
+                  f"Rel-L2 (grid): {rel_l2:.6e} | "
+                  f"Inf (grid): {inf_norm:.6e}")
 
             # DIAGNOSTIC: Causal weight progression
             if causal_state is not None and causal_epoch_min_weight is not None:
@@ -978,19 +960,20 @@ def _train_segment(
                 if expert_grads:
                     logger.info(f"  [DIAG] Expert grad norms: {[f'{x:.3e}' for x in expert_grads[:5]]}" + ("..." if len(expert_grads) > 5 else ""))
 
-        # Save checkpoint periodically (only when we have eval metrics)
-        if epoch % save_every == 0 and eval_loss is not None:
+        # Save checkpoint periodically (only when we have grid metrics)
+        if epoch % save_every == 0 and rel_l2 is not None:
             checkpoint_path = checkpoint_dir / f"checkpoint_epoch_{epoch}.pt"
             _save_checkpoint(checkpoint_path, model, optimizer, current_optimizer_name, epoch,
-                           train_loss, eval_loss, cfg, metrics)
+                           train_loss, rel_l2, cfg, metrics)
             logger.info(f"  Checkpoint saved: {checkpoint_path}")
 
-        # Save best model (only when we have eval metrics)
-        if eval_loss is not None and eval_loss < best_eval_loss:
-            best_eval_loss = eval_loss
+        # Save best model on the solver-grid rel-L2 (checked at eval epochs)
+        if (should_evaluate and rel_l2 is not None
+                and math.isfinite(rel_l2) and rel_l2 < best_rel_l2):
+            best_rel_l2 = rel_l2
             best_checkpoint_path = checkpoint_dir / "best_model.pt"
             _save_checkpoint(best_checkpoint_path, model, optimizer, current_optimizer_name, epoch,
-                           train_loss, eval_loss, cfg, metrics)
+                           train_loss, rel_l2, cfg, metrics)
 
         # Patience-based early stopping on TRAIN loss, counted in epochs
         # (checked every epoch — train loss exists every epoch, unlike the
@@ -1048,12 +1031,11 @@ def _train_segment(
     ctx.step_count = step_count
     ctx.switch_epoch = switch_epoch
     ctx.optimizer_2_name = optimizer_2_name
-    ctx.best_eval_loss = best_eval_loss
+    ctx.best_rel_l2 = best_rel_l2
     ctx.best_checkpoint_path = best_checkpoint_path
     ctx.train_loss = train_loss
-    ctx.eval_loss = eval_loss
-    ctx.eval_rel_l2 = eval_rel_l2
-    ctx.eval_inf_norm = eval_inf_norm
+    ctx.rel_l2 = rel_l2
+    ctx.inf_norm = inf_norm
     ctx.train_data = train_data
     ctx.train_loader = train_loader
     ctx._nan_detected = _nan_detected
@@ -1063,23 +1045,23 @@ def _train_segment(
     if not _nan_detected:
         _save_segment_pred_plot(ctx, segment_name)
     _final_tl = train_loss if train_loss is not None else float('nan')
-    _final_el = eval_loss if eval_loss is not None else float('nan')
+    _final_rl2 = rel_l2 if rel_l2 is not None else float('nan')
     _oom_stopped = getattr(ctx, 'oom_stopped', False)
-    
+
     # Save segment-end checkpoint
     _save_segment_checkpoint(ctx, segment_name, epoch, optimizer, current_optimizer_name,
-                             train_loss, eval_loss, metrics, cfg)
-    
+                             train_loss, rel_l2, metrics, cfg)
+
     logger.info(f"[Segment:{segment_name}] done | ran {epoch - segment_start_epoch} "
           f"epochs (stop={_stop_reason}) | "
-          f"train_loss={_final_tl:.6e} eval_loss={_final_el:.6e}")
+          f"train_loss={_final_tl:.6e} rel_l2={_final_rl2:.6e}")
     return SegmentResult(
         nan_detected=_nan_detected,
         stopped_early=_stopped_early,
         stop_reason=_stop_reason,
         epochs_run=epoch - segment_start_epoch,
         final_train_loss=_final_tl,
-        final_eval_loss=_final_el,
+        final_rel_l2=_final_rl2,
         oom_stopped=_oom_stopped,
     )
 
@@ -1091,7 +1073,7 @@ def _train_segment(
 
 def _save_segment_checkpoint(ctx: TrainingContext, segment_name: str, epoch: int,
                              optimizer, optimizer_name: str, train_loss: float,
-                             eval_loss: float, metrics: Dict, cfg: Dict) -> None:
+                             rel_l2: float, metrics: Dict, cfg: Dict) -> None:
     """Save checkpoint at the end of a training segment.
     
     Creates a checkpoint file named `checkpoint_after_<segment>.pt` in the 
@@ -1105,7 +1087,7 @@ def _save_segment_checkpoint(ctx: TrainingContext, segment_name: str, epoch: int
     try:
         checkpoint_path = checkpoint_dir / f"checkpoint_after_{segment_name}.pt"
         _save_checkpoint(checkpoint_path, ctx.model, optimizer, optimizer_name, epoch,
-                        train_loss, eval_loss, cfg, metrics)
+                        train_loss, rel_l2, cfg, metrics)
         logger.info(f"  [Segment:{segment_name}] saved checkpoint_after_{segment_name}.pt")
     except Exception as e:
         logger.info(f"  [Segment:{segment_name}] checkpoint save failed: {e}")
@@ -1117,8 +1099,7 @@ def _save_segment_pred_plot(ctx: TrainingContext, segment_name: str) -> None:
     Captures the full-composition prediction at the end of a segment so each
     stage (root, every level, fine-tune, joint) leaves a visual checkpoint.
     """
-    gt_grid = ctx.gt_grid
-    if gt_grid is None or ctx.problem_cfg.get('spatial_dim', None) != 1:
+    if ctx.problem_cfg.get('spatial_dim', None) != 1:
         return
     out_dir = ctx.adaptive_plots_dir or ctx.run_dir
     if out_dir is None:

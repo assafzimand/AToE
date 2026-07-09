@@ -29,7 +29,7 @@ class SegmentResult:
     stop_reason: str = 'budget'
     epochs_run: int = 0
     final_train_loss: float = float('inf')
-    final_eval_loss: float = float('inf')
+    final_rel_l2: float = float('inf')
     oom_stopped: bool = False
 
 
@@ -44,11 +44,13 @@ class TrainingContext:
     device: Any = None
     run_dir: Optional[Path] = None
 
-    # Data / loaders
+    # Data / loaders. ``plain_train_data`` always points at the plain-format
+    # (x/t/h_gt/mask) training set, even while a split segment has swapped
+    # ``train_data`` to the split schema — it is the probe set for the
+    # loss-component snapshots logged at eval epochs.
     train_data: Any = None
-    eval_data: Any = None
     train_loader: Any = None
-    eval_loader: Any = None
+    plain_train_data: Any = None
 
     # ── Phase / optimizer lifecycle ─────────────────────────────────────────
     active_cfg: Optional[Dict] = None
@@ -72,8 +74,10 @@ class TrainingContext:
     save_every: int = 0
 
     # ── Metrics / best-model tracking ───────────────────────────────────────
+    # All rel-L2 / inf-norm values are computed on the ground-truth solver's
+    # NATIVE grid (the single reported metric — there is no eval dataset).
     metrics: Dict = field(default_factory=dict)
-    best_eval_loss: float = float('inf')
+    best_rel_l2: float = float('inf')
     best_checkpoint_path: Any = None
     patience_epochs: int = 0  # train-loss plateau window, counted in epochs
     min_epochs: int = 0
@@ -108,9 +112,8 @@ class TrainingContext:
     start_time: float = 0.0
     timer: Any = None
     train_loss: float = 0.0
-    eval_loss: float = 0.0
-    eval_rel_l2: float = 0.0
-    eval_inf_norm: float = 0.0
+    rel_l2: Any = None
+    inf_norm: Any = None
     resample_every: int = 0
     base_seed: int = 0
     grad_clip_norm: Any = None

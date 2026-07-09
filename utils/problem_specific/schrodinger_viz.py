@@ -74,7 +74,7 @@ def visualize_dataset(data_dict: Dict, save_dir: Path, config: Dict, split_name:
     print(f"  Schrodinger visualization saved to {save_path}")
 
 
-def visualize_evaluation(model, eval_data_path: str, save_dir: Path, config: Dict):
+def visualize_evaluation(model, save_dir: Path, config: Dict):
     """
     Evaluation visualization for Schrödinger equation.
     Produces predictions_and_error_maps.png via the generic visualizer.
@@ -87,14 +87,13 @@ def visualize_evaluation(model, eval_data_path: str, save_dir: Path, config: Dic
     2. Six heatmaps for u and v components (2 rows × 3 columns):
        - Row 1: u (real) - Ground truth, Prediction, Error
        - Row 2: v (imaginary) - Ground truth, Prediction, Error
-       
+
     3. Six fixed-time plots (2 rows × 3 columns):
        - Row 1: |h| at t=0, π/4, π/2
        - Row 2: arg(h) at t=0, π/4, π/2
-       
+
     Args:
         model: Trained model
-        eval_data_path: Path to evaluation dataset
         save_dir: Directory to save visualizations
         config: Configuration dictionary
     """
@@ -103,15 +102,10 @@ def visualize_evaluation(model, eval_data_path: str, save_dir: Path, config: Dic
         model, save_dir, config,
         filename="pred_final_schrodinger_relL2_{relL2}.png")
 
-    from utils.dataset_gen import load_dataset
-
     device = torch.device('cuda' if config['cuda'] and torch.cuda.is_available() else 'cpu')
     model = model.to(device)
     model.eval()
-    
-    # Load evaluation data
-    eval_data = load_dataset(eval_data_path, device)
-    
+
     # Get problem-specific config
     problem = config.get('problem', 'schrodinger')
     problem_config = config[problem]

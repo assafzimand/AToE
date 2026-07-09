@@ -111,3 +111,59 @@ def compute_native_grid_metrics(
         'n_points': xt.shape[0],
         'grid_shape': (len(t_grid), len(x_grid)),
     }
+
+
+def native_ground_truth_grid(
+    cfg: Dict,
+    max_points_per_axis: int = 512,
+) -> Optional[tuple]:
+    """Ground-truth heatmap grid from the solver's NATIVE solution.
+
+    Single GT source for plots and tree fitting — no random eval sample, no
+    interpolation between solver grid nodes. The grid is restricted to the
+    config's temporal domain (time-marching windows see their own window) and
+    strided down to at most ``max_points_per_axis`` per axis so pcolormesh
+    stays fast on large solver grids.
+
+    Returns:
+        (gt_grid, grid_x, grid_t) where ``gt_grid`` is (nx, nt) for scalar
+        problems or (nx, nt, output_dim) for multi-output (complex) ones,
+        or None if the solver grid is unavailable.
+    """
+    import importlib
+
+    problem = cfg['problem']
+    try:
+        solver = importlib.import_module(f'solvers.{problem}_solver')
+        x_grid, t_grid, h_sol = solver._get_solution_cached(cfg)
+    except Exception:
+        return None
+
+    t0, t1 = cfg[problem]['temporal_domain']
+    t_grid = np.asarray(t_grid)
+    t_mask = (t_grid >= t0 - 1e-12) & (t_grid <= t1 + 1e-12)
+    t_grid = t_grid[t_mask]
+    h_sol = np.asarray(h_sol)[t_mask]        # (nt, nx)
+    x_grid = np.asarray(x_grid)
+
+    # Subsample for plotting speed (always keep the last grid point so the
+    # domain edges stay covered).
+    def _stride_idx(n):
+        stride = max(1, int(math.ceil(n / max_points_per_axis)))
+        idx = list(range(0, n, stride))
+        if idx[-1] != n - 1:
+            idx.append(n - 1)
+        return np.asarray(idx)
+
+    xi = _stride_idx(len(x_grid))
+    ti = _stride_idx(len(t_grid))
+    x_grid = x_grid[xi]
+    t_grid = t_grid[ti]
+    h_sol = h_sol[np.ix_(ti, xi)]
+
+    h_xt = h_sol.T                            # (nx, nt)
+    if np.iscomplexobj(h_xt):
+        gt = np.stack([h_xt.real, h_xt.imag], axis=2)
+    else:
+        gt = np.asarray(h_xt, dtype=np.float64)
+    return gt, x_grid, t_grid

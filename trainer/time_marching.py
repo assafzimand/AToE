@@ -297,7 +297,7 @@ def _plot_combined_loss_curves(
     Create a combined loss curve plot showing all windows concatenated.
 
     Reads metrics.json from each window and creates a single plot with:
-    - Train loss and eval loss curves concatenated across windows
+    - Train loss and solver-grid rel-L2 curves concatenated across windows
     - Vertical lines showing window boundaries
     - (Optional) horizontal marker for the final full-domain rel-L2
 
@@ -311,30 +311,29 @@ def _plot_combined_loss_curves(
     all_train_epochs = []
     all_train_loss = []
     all_eval_epochs = []
-    all_eval_loss = []
     all_eval_rel_l2 = []
-    
+
     epoch_offset = 0
     window_boundaries = [0]  # Epoch boundaries between windows
-    
+
     for window in windows:
         window_metrics_path = run_dir / f"window_{window.idx}" / "metrics.json"
         if not window_metrics_path.exists():
             logger.info(f"    Warning: metrics.json not found for window {window.idx}")
             continue
-        
+
         with open(window_metrics_path, 'r') as f:
             metrics = json.load(f)
-        
+
         # Offset epochs to create continuous timeline
         train_epochs = np.array(metrics['train_loss_epochs']) + epoch_offset
         eval_epochs = np.array(metrics['epochs']) + epoch_offset
-        
+
         all_train_epochs.extend(train_epochs)
         all_train_loss.extend(metrics['train_loss'])
         all_eval_epochs.extend(eval_epochs)
-        all_eval_loss.extend(metrics['eval_loss'])
-        all_eval_rel_l2.extend(metrics['eval_rel_l2'])
+        # 'rel_l2' is the solver-grid metric ('eval_rel_l2' in older runs)
+        all_eval_rel_l2.extend(metrics.get('rel_l2', metrics.get('eval_rel_l2', [])))
         
         # Update offset for next window
         if len(train_epochs) > 0:
@@ -348,11 +347,9 @@ def _plot_combined_loss_curves(
     # Create figure with 2 subplots
     fig, axes = plt.subplots(1, 2, figsize=(16, 5))
     
-    # Plot 1: Loss curves
+    # Plot 1: Loss curve
     ax = axes[0]
     ax.plot(all_train_epochs, all_train_loss, 'b-', label='Train Loss',
-            linewidth=2, alpha=0.8)
-    ax.plot(all_eval_epochs, all_eval_loss, 'r-', label='Eval Loss',
             linewidth=2, alpha=0.8)
     
     # Add window boundary markers
@@ -370,9 +367,9 @@ def _plot_combined_loss_curves(
     ax.set_title(f'Time Marching: Combined Loss Curves [{len(windows)} windows]', 
                  fontsize=14, fontweight='bold')
     
-    # Plot 2: Relative L2 error
+    # Plot 2: Relative L2 error (solver grid, per window)
     ax = axes[1]
-    ax.plot(all_eval_epochs, all_eval_rel_l2, 'r-', label='Per-window Eval Rel-L2',
+    ax.plot(all_eval_epochs, all_eval_rel_l2, 'r-', label='Per-window Rel-L2 (grid)',
             linewidth=2, alpha=0.8)
 
     if final_rel_l2 is not None:
@@ -542,13 +539,11 @@ def train_with_time_marching(
         # 5. Call existing train() as black box
         logger.info(f"\n  Training window {window.idx}...")
         train_data_path = f"datasets/{problem}/training_data.pt"
-        eval_data_path = f"datasets/{problem}/eval_data.pt"
-        
+
         checkpoint_path = train(
             model=window_model,
             loss_fn=loss_fn,
             train_data_path=train_data_path,
-            eval_data_path=eval_data_path,
             cfg=window_cfg,
             run_dir=window_run_dir,
         )

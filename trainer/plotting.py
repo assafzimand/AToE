@@ -68,12 +68,12 @@ def plot_training_curves(
     Plot training curves (paper-ready: no panel titles; the log/linear scale
     is noted in the y-label; run metadata goes into the filename via
     ``name_suffix``). Saves the combined figure AND each panel as its own
-    figure, all as PNG + PDF.
+    figure, as PNG.
 
     Args:
         metrics: Dictionary with keys:
                 - 'train_loss_epochs', 'train_loss' (all epochs)
-                - 'epochs', 'eval_rel_l2' (eval epochs only)
+                - 'epochs', 'rel_l2' (solver-grid rel-L2, eval epochs only)
                 - Optional: 'loss_components' dict with 'epochs', 'residual', 'ic', 'bc' lists
         save_dir: Directory to save plots
         optimizer_switch_epochs: List of epochs where optimizer switched.
@@ -84,7 +84,7 @@ def plot_training_curves(
         name_suffix: Appended to filenames, e.g. 'burgers1d_ep39300_E7' →
                     training_curves_burgers1d_ep39300_E7.png
     """
-    from utils.plot_io import save_png_and_pdf
+    from utils.plot_io import save_png
 
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -127,7 +127,9 @@ def plot_training_curves(
         _finish(ax, 'Loss', [metrics['train_loss']])
 
     def _panel_rel_l2(ax):
-        ax.plot(eval_epochs, metrics['eval_rel_l2'], 'r-',
+        # 'rel_l2' is the solver-grid metric ('eval_rel_l2' in older runs)
+        _rl2 = metrics.get('rel_l2', metrics.get('eval_rel_l2', []))
+        ax.plot(eval_epochs, _rl2, 'r-',
                 label='Rel. $L^2$ error', linewidth=2, alpha=0.8)
         # Root rel-L2 baseline (horizontal black line). Only shown when the
         # root was LOADED from a checkpoint: if it was trained in this
@@ -140,9 +142,9 @@ def plot_training_curves(
                        linewidth=1.5, alpha=0.8,
                        label=f'Root ({root_rel_l2:.2e})')
         _draw_markers(ax)
-        # Rel-L2 is ALWAYS linear scale (bounded metric; log made near-flat
-        # curves masquerade as linear). log_series=None skips _safe_log_scale.
-        _finish(ax, 'Relative $L^2$ error', None)
+        # Safe log scale (falls back to linear if any value is <= 0). The
+        # log scale is plot-only: reported/tabulated rel-L2 stays raw.
+        _finish(ax, 'Relative $L^2$ error', [_rl2])
 
     def _panel_components(ax):
         comp_epochs = loss_comps['epochs']
@@ -183,7 +185,7 @@ def plot_training_curves(
     for ax, (_, draw) in zip(axes, panels):
         draw(ax)
     plt.tight_layout()
-    save_path = save_png_and_pdf(save_dir / f'training_curves{suffix}.png', fig=fig)
+    save_path = save_png(save_dir / f'training_curves{suffix}.png', fig=fig)
     plt.close(fig)
 
     # Standalone per-panel figures (papers rarely place all panels together)
@@ -191,7 +193,7 @@ def plot_training_curves(
         fig_s, ax_s = plt.subplots(figsize=(7, 5))
         draw(ax_s)
         plt.tight_layout()
-        save_png_and_pdf(save_dir / f'training_curves_{key}{suffix}.png', fig=fig_s)
+        save_png(save_dir / f'training_curves_{key}{suffix}.png', fig=fig_s)
         plt.close(fig_s)
 
     print(f"  Training curves saved to {save_path} (+ per-panel files)")
@@ -408,8 +410,8 @@ def plot_per_expert_curves(
     _fig_legend(axes[1, :], 0.52)   # IC/BC scatter kinds
 
     plt.tight_layout()
-    from utils.plot_io import save_png_and_pdf
-    save_png_and_pdf(save_path, fig=fig)
+    from utils.plot_io import save_png
+    save_png(save_path, fig=fig)
     plt.close()
 
 

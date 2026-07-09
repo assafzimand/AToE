@@ -310,8 +310,8 @@ def _generate_training_results_plot(parent_dir, df,
         'PDE', 'Model', 'Capacity', 'Optimizer',
         'LR / Sched', 'Spawning']
     result_cols = [
-        'Train\nLoss', 'Eval\nLoss',
-        'Eval\nRel-L2', 'Eval\nInf', 'Dense\nRel-L2',
+        'Train\nLoss',
+        'Rel-L2\n(grid)', 'Inf\n(grid)', 'Dense\nRel-L2',
         'Ckpt\nRel-L2']
     col_labels = ['Experiment'] + info_cols + result_cols
     n_info = len(info_cols)
@@ -342,9 +342,8 @@ def _generate_training_results_plot(parent_dir, df,
             info.get('lr_sched', '-'),
             info.get('spawning', '-'),
             _fmt(row['final_train_loss']),
-            _fmt(row['final_eval_loss']),
-            _fmt(row['final_eval_rel_l2']),
-            _fmt(row['final_eval_inf_norm']),
+            _fmt(row['final_rel_l2']),
+            _fmt(row['final_inf_norm']),
             _fmt(row.get('final_dense_rel_l2')),
             _fmt(row.get('final_ckpt_rel_l2')),
         ]
@@ -375,8 +374,8 @@ def _generate_training_results_plot(parent_dir, df,
         'GreenRed', ['#2ecc71', '#f1c40f', '#e74c3c'])
 
     result_keys = [
-        'final_train_loss', 'final_eval_loss',
-        'final_eval_rel_l2', 'final_eval_inf_norm',
+        'final_train_loss',
+        'final_rel_l2', 'final_inf_norm',
         'final_dense_rel_l2', 'final_ckpt_rel_l2']
     for ri, key in enumerate(result_keys):
         ci = first_result_col + ri
@@ -524,9 +523,12 @@ def generate_comparison_for_batch(batch_dir: Path, label: str = None):
         metrics_data.append({
             'experiment': exp_name,
             'final_train_loss': _last(train_metrics.get('train_loss', [])),
-            'final_eval_loss': _last(train_metrics.get('eval_loss', [])),
-            'final_eval_rel_l2': _last(train_metrics.get('eval_rel_l2', [])),
-            'final_eval_inf_norm': _last(train_metrics.get('eval_inf_norm', [])),
+            # 'rel_l2'/'inf_norm' are the solver-grid metrics; older runs
+            # stored them as 'eval_rel_l2'/'eval_inf_norm'.
+            'final_rel_l2': _last(train_metrics.get(
+                'rel_l2', train_metrics.get('eval_rel_l2', []))),
+            'final_inf_norm': _last(train_metrics.get(
+                'inf_norm', train_metrics.get('eval_inf_norm', []))),
             'final_dense_rel_l2': dense_rel_l2,
             'final_ckpt_rel_l2': ckpt_rel_l2,
         })

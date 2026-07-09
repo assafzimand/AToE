@@ -241,8 +241,8 @@ def _plot_expert_regions_2d(
     ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    from utils.plot_io import save_png_and_pdf
-    save_png_and_pdf(output_path, fig=fig)
+    from utils.plot_io import save_png
+    save_png(output_path, fig=fig)
     plt.close()
     logger.info(f"  Expert regions plot saved to {output_path}")
 
@@ -788,8 +788,8 @@ def plot_expert_soft_weights(
         fig.colorbar(im, ax=axes[:n_plots].tolist(), label='Normalized weight',
                      shrink=0.85, pad=0.01)
 
-    from utils.plot_io import save_png_and_pdf
-    save_png_and_pdf(output_path, fig=fig)
+    from utils.plot_io import save_png
+    save_png(output_path, fig=fig)
     plt.close()
     mode_str = 'Hard' if blending_mode == 'hard' else 'Soft'
     logger.info(f"  {mode_str} blending weights plot saved to {output_path}")
@@ -878,7 +878,7 @@ def plot_capacity_map(
     ax.tick_params(labelsize=11)
 
     plt.tight_layout()
-    from utils.plot_io import save_png_and_pdf
-    save_png_and_pdf(output_path, fig=fig)
+    from utils.plot_io import save_png
+    save_png(output_path, fig=fig)
     plt.close()
     logger.info(f"  Capacity-density map saved to {output_path}")
