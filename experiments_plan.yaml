@@ -1,4 +1,4 @@
-experiment_name: allen_cahn_M8
+experiment_name: allen_cahn_M8_interface_anneal_collar_data_ablation
 base_config:
   problem: allen_cahn
   model: AToELeaves
@@ -47,7 +47,7 @@ base_config:
   save_every: 999999
   seed: 42
   allen_cahn:
-    pretrained_base_checkpoint: null
+    pretrained_base_checkpoint: roots_checkpoints/allen_cahn_root.pt
     spatial_dim: 1
     output_dim: 1
     spatial_domain:
@@ -386,10 +386,13 @@ base_config:
       lr_decay_rate: 0.98
       lr_decay_steps: 1000
       lr_warmup_steps: 0
+    # Short polish fine-tune for the interface-anneal / collar-data
+    # ablation: 5k pure SSBroyden (no Adam stage; optimizer_2 null means
+    # no switch).
     fine_tune:
-      epochs: 45000
-      optimizer_1: adam
-      optimizer_2: ssbroyden
+      epochs: 5000
+      optimizer_1: ssbroyden
+      optimizer_2: null
       optimizer_switch_epoch: 5000
       lr: 0.0001
       lr_schedule: none
@@ -398,24 +401,20 @@ base_config:
       lr_warmup_steps: 0
       l2sp_lambda: 0.0
       collar_data_ratio: 0.0
+# Interface-anneal / collar-data ablation on allen_cahn (pretrained root;
+# always on: per-leaf normalization, collar training boxes, u0-guided
+# u/u_x interfaces on every face, exact IC/BC on the blended composition
+# at full weight). Phase-3-best is saved per run (best_model_phase3.pt +
+# segment_reconcile_events), so the short fine-tune's contribution is
+# directly readable per run.
+#   A - baseline: no interface anneal, no collar sampling
+#   B - interface anneal only (all u0 guides decay to 0.5 by phase-3 end)
+#   C - collar-focused fine-tune sampling only (collar_data_ratio=0.5)
+#   D - interface anneal + collar sampling
+# Note: A/C share an identical phase 3, as do B/D (collar only affects
+# fine-tune) - the C-A and D-B deltas isolate the collar effect.
 experiments:
-# - name: burgers
-#   problem: burgers1d
-#   model: AToELeaves
-#   base_architecture:
-#   - 2
-#   - 60
-#   - 60
-#   - 60
-#   - 60
-#   - 1
-#   experts_architecture:
-#   - 2
-#   - 20
-#   - 20
-#   - 20
-#   - 1
-- name: allen_cahn
+- name: A_baseline
   problem: allen_cahn
   model: AToELeaves
   base_architecture:
@@ -431,19 +430,71 @@ experiments:
   - 20
   - 20
   - 1
-# - name: schrodinger
-#   problem: schrodinger
-#   model: AToELeaves
-#   base_architecture:
-#   - 2
-#   - 60
-#   - 60
-#   - 60
-#   - 60
-#   - 2
-#   experts_architecture:
-#   - 2
-#   - 20
-#   - 20
-#   - 20
-#   - 2
+  adaptive_pinn:
+    split_icbc:
+      interface_decrease_weight: 0.0
+    fine_tune:
+      collar_data_ratio: 0.0
+- name: B_interface_anneal
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture:
+  - 2
+  - 60
+  - 60
+  - 60
+  - 60
+  - 1
+  experts_architecture:
+  - 2
+  - 20
+  - 20
+  - 20
+  - 1
+  adaptive_pinn:
+    split_icbc:
+      interface_decrease_weight: 0.5
+    fine_tune:
+      collar_data_ratio: 0.0
+- name: C_collar_data
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture:
+  - 2
+  - 60
+  - 60
+  - 60
+  - 60
+  - 1
+  experts_architecture:
+  - 2
+  - 20
+  - 20
+  - 20
+  - 1
+  adaptive_pinn:
+    split_icbc:
+      interface_decrease_weight: 0.0
+    fine_tune:
+      collar_data_ratio: 0.5
+- name: D_interface_anneal_collar_data
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture:
+  - 2
+  - 60
+  - 60
+  - 60
+  - 60
+  - 1
+  experts_architecture:
+  - 2
+  - 20
+  - 20
+  - 20
+  - 1
+  adaptive_pinn:
+    split_icbc:
+      interface_decrease_weight: 0.5
+    fine_tune:
+      collar_data_ratio: 0.5
