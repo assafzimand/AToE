@@ -27,8 +27,8 @@ its stages is described in detail in the subsections that follow.
 \Require PDE problem, architectures $\mathcal{A}_{\mathrm{base}}$, $\mathcal{A}_{\mathrm{exp}}$, budget $M$
 \State Train a vanilla PINN $u_0$ with $\mathcal{A}_{\mathrm{base}}$ to convergence
 \State Build a decision tree from $u_0$; trim to an $M$-term complete binary tree
-\State Record $u_0$ (values and normal derivatives) on the faces of the inflated leaf regions $\tilde\Omega_j$
-\State Train the experts $u_j$ with $\mathcal{A}_{\mathrm{exp}}$, each on its region $\tilde\Omega_j$ with the recorded $u_0$ data as face guides, while the true IC/BC are enforced on the blended composition
+\State Record $u_0$ on the faces of each leaf region $\Omega_j$, extended by a collar for the later smooth blending
+\State Train the experts $u_j$ with $\mathcal{A}_{\mathrm{exp}}$, each on its extended region with the recorded $u_0$ data as face guides, while the true IC/BC are enforced on the blended composition
 \State Blend the experts via smoothstep POU (partition of unity) weights
 \State Fine tune the blended composition under the global loss
 \Ensure Global approximate solution $u_\theta$
