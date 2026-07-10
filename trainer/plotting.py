@@ -284,11 +284,9 @@ def plot_per_expert_curves(
         'total': '#2c3e50',
     }
 
-    for col, eidx in enumerate(expert_ids):
+    def _draw_curve_panel(ax, eidx, title=None):
+        """Term-wise loss curves for one expert."""
         eh = per_expert_history[eidx]
-
-        # ── Top: term-wise loss curves ──
-        ax = axes[0, col]
         vals_for_log = []
         for term, values in eh.items():
             if not values:
@@ -312,10 +310,11 @@ def plot_per_expert_curves(
         ax.grid(True, alpha=0.3)
         if vals_for_log:
             ax.set_yscale('log')
-        ax.set_title(f'Expert {eidx}', fontsize=12)
+        if title:
+            ax.set_title(title, fontsize=12)
 
-        # ── Bottom: region on GT heatmap ──
-        ax2 = axes[1, col]
+    def _draw_region_panel(ax2, eidx, title=None):
+        """Expert region over the GT heatmap + face-sample scatter."""
         if (gt_grid is not None
                 and grid_x is not None
                 and grid_t is not None):
@@ -370,8 +369,7 @@ def plot_per_expert_curves(
             ax2.set_xlim(lo[0] - pad * xr, hi[0] + pad * xr)
             ax2.set_ylim(lo[-1] - pad * tr, hi[-1] + pad * tr)
 
-        # Scatter IC/BC interface samples for this expert (legend is shared
-        # at figure level, so labels are attached only on the first column)
+        # Scatter IC/BC interface samples for this expert
         if eidx in _sd_by_expert:
             for kcode, (label, color, marker, ms) in _icbc_kinds.items():
                 if kcode in _sd_by_expert[eidx]:
@@ -385,7 +383,12 @@ def plot_per_expert_curves(
 
         ax2.set_xlabel('x', fontsize=11)
         ax2.set_ylabel('t', fontsize=11)
-        ax2.set_title(f'Region E{eidx}', fontsize=12)
+        if title:
+            ax2.set_title(title, fontsize=12)
+
+    for col, eidx in enumerate(expert_ids):
+        _draw_curve_panel(axes[0, col], eidx, title=f'Expert {eidx}')
+        _draw_region_panel(axes[1, col], eidx, title=f'Region E{eidx}')
 
     # Shared figure-level legends (deduplicated across panels) instead of
     # one repeated legend per panel; no suptitle — segment/expert counts
@@ -407,6 +410,24 @@ def plot_per_expert_curves(
     plt.tight_layout()
     from utils.plot_io import save_png
     save_png(save_path, fig=fig)
-    plt.close()
+    plt.close(fig)
+
+    # Standalone per-expert figures: curve | region side by side, no
+    # titles (paper-ready; the expert index lives only in the filename).
+    for eidx in expert_ids:
+        fig_e, (axc, axr) = plt.subplots(1, 2, figsize=(11, 4.5))
+        _draw_curve_panel(axc, eidx)
+        _draw_region_panel(axr, eidx)
+        if axc.get_legend_handles_labels()[0]:
+            axc.legend(fontsize=9, frameon=True)
+        if axr.get_legend_handles_labels()[0]:
+            axr.legend(fontsize=9, frameon=True, loc='upper right')
+        plt.tight_layout()
+        save_png(
+            save_path.with_name(
+                f'{save_path.stem}_expert{eidx}{save_path.suffix}'),
+            fig=fig_e,
+        )
+        plt.close(fig_e)
 
 
