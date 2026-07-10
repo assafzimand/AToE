@@ -26,11 +26,10 @@ its stages is described in detail in the subsections that follow.
 \begin{algorithmic}[1]
 \Require PDE problem, architectures $\mathcal{A}_{\mathrm{base}}$, $\mathcal{A}_{\mathrm{exp}}$, budget $M$
 \State Train a vanilla PINN $u_0$ with $\mathcal{A}_{\mathrm{base}}$ to convergence
-\State Build a decision tree from $u_0$; trim to an $M$-term complete binary tree
-\State Record $u_0$ on the faces of each leaf region $\Omega_j$, extended by a collar for the later smooth blending
-\State Train the experts $u_j$ with $\mathcal{A}_{\mathrm{exp}}$, each on its extended region with the recorded $u_0$ data as face guides, while the true IC/BC are enforced on the blended composition
-\State Blend the experts via smoothstep POU (partition of unity) weights
-\State Fine tune the blended composition under the global loss
+\State Build a decision tree from $u_0$, trim to an $M$-term complete binary tree
+\State Assign an expert $u_j$ with $\mathcal{A}_{\mathrm{exp}}$ to each leaf region and form the composition $u_\theta$ via smoothstep POU (partition of unity) weights
+\State Train the experts on their regions, guided by $u_0$ on the region faces, with the true IC/BC enforced on $u_\theta$
+\State Fine tune $u_\theta$ under the global loss
 \Ensure Global approximate solution $u_\theta$
 \end{algorithmic}
 \end{algorithm}
@@ -219,179 +218,13 @@ experiments employ time-marching with $4$ and $10$ windows, respectively.
 
 \vspace{0.5em}
 
-\subsection{Expert Training}
-\label{sec:expert_training}
-
-Rather than training the experts through the global loss terms, we exploit a
-core MoE idea and let each expert solve a localized, and therefore easier,
-problem on its own subdomain, guided by the converged root, in the spirit
-of the interface treatment of~\cite{luo2025pdd}.
-
-\subsubsection{Training Regions}
-\label{sec:training_regions}
-
-Each leaf expert is trained on the
-inflated region
-\begin{equation}
-\tilde\Omega_j = \Bigl(\,\prod_{i=1}^{d+1}
-[\,a_{j,i} - \delta_{j,i},\; b_{j,i} + \delta_{j,i}\,]\Bigr) \cap \Omega,
-\qquad \delta_{j,i} = \alpha\,(b_{j,i} - a_{j,i}),
-\label{eq:inflated_region}
-\end{equation}
-i.e.\ its leaf region enlarged by the collar of its blending window
-(Section~\ref{sec:smoothstep_windows}) and clipped to the domain. This is
-exactly the support of the window $\Psi_{\Omega_j}$, so every expert is
-trained on the entire set where the final composition evaluates it, in the
-manner of the overlapping subdomains of FBPINN~\cite{moseley2021fbpinn}. As
-in~\cite{moseley2021fbpinn}, the inputs of each expert are affinely
-normalized from $\tilde\Omega_j$ to $[-1,1]^{d+1}$ before its MLP, which
-conditions the small networks well even for deep leaves whose coordinate
-ranges are tiny fractions of the domain.
-
-\subsubsection{Face Guides from the Root}
-\label{sec:face_guides}
-
-The predictions of $u_0$ are
-recorded on the outer faces of $\tilde\Omega_j$ and serve as guide
-data for the local problems: values on the lower temporal face
-$\Gamma^{t}_j$, and values together with the spatial normal derivative on
-the two spatial faces $\Gamma^{x}_j$ whenever the global boundary
-conditions of the problem constrain both $u$ and $u_x$ (e.g.\ periodic
-problems); derivative interface conditions of this kind follow the XPINN
-treatment~\cite{jagtap2020xpinn}. Faces that fall on the physical boundary
-of $\Omega$ or on $t{=}0$ receive the same $u_0$ guides and no special
-treatment. With $X^{\Gamma t}_j$, $X^{\Gamma x}_j$ the sample sets on the
-faces,
-\begin{align}
-\mathcal{L}^{\Gamma t}_j
-&= \frac{1}{|X^{\Gamma t}_j|}\sum_{(x,t)\in X^{\Gamma t}_j}
-\bigl\| u_j(x,t) - u_0(x,t) \bigr\|^2,
-\label{eq:interface_loss}\\
-\mathcal{L}^{\Gamma x}_j
-&= \frac{1}{|X^{\Gamma x}_j|}\sum_{(x,t)\in X^{\Gamma x}_j}
-\bigl\| u_j(x,t) - u_0(x,t) \bigr\|^2,
-\qquad
-\mathcal{L}^{\Gamma x'}_j
-= \frac{1}{|X^{\Gamma x}_j|}\sum_{(x,t)\in X^{\Gamma x}_j}
-\bigl\| \partial_x u_j(x,t) - \partial_x u_0(x,t) \bigr\|^2 .
-\label{eq:interface_deriv_loss}
-\end{align}
-
-\subsubsection{Exact Constraints on the Composition}
-\label{sec:composition_constraints}
-
-The true initial and
-boundary conditions are not imposed per expert; they are enforced once, on
-the blended composition $u_\theta$ of
-Eq.~\eqref{eq:global_atoe}, the object that is actually evaluated and
-reported, using the standard global loss terms of
-Section~\ref{sec:background}. The full expert training objective is
-\begin{equation}
-\mathcal{L}
-= \sum_{j\in\mathcal{L}}
-\Bigl[
-\lambda_r\,\mathcal{L}^{\mathrm{res}}_j
-+ s(e)\,\bigl(
-\lambda_{ic}\,\mathcal{L}^{\Gamma t}_j
-+ \lambda_{bc}\,(\mathcal{L}^{\Gamma x}_j + \mathcal{L}^{\Gamma x'}_j)
-\bigr)
-\Bigr]
-+ \lambda_{ic}\,\mathcal{L}^{\mathrm{ic}}(u_\theta)
-+ \lambda_{bc}\,\mathcal{L}^{\mathrm{bc}}(u_\theta),
-\label{eq:leaf_local_loss}
-\end{equation}
-where $\mathcal{L}^{\mathrm{res}}_j$ enforces the PDE residual on
-collocation points inside $\tilde\Omega_j$ (collocation points in a collar
-shared by several windows contribute to each covering expert). This mixed
-enforcement - approximate $u_0$ guides on the subdomain faces, exact IC/BC
-data on the composed model, follows the Schwarz-type couplings of PINNs
-in~\cite{snyder2023schwarz}. The per expert terms are separable, so the
-experts solve mutually consistent local problems tied together only by the
-shared frozen root and by the composition terms.
-
-\subsubsection{Interface Annealing}
-\label{sec:interface_annealing}
-
-Although the guide terms improve the
-solution globally, the $u_0$ predictions carry the root's error and thus
-introduce a certain limit on the local experts predictions near the
-faces. The guide terms are therefore scaled by an optional linear anneal
-\begin{equation}
-s(e) = 1 - w\,\frac{e - e_0}{E}, \qquad w \in [0,1],
-\label{eq:interface_anneal}
-\end{equation}
-where $e$ is the current iteration, $e_0$ the start and $E$ the budget of
-the expert training stage; $w=0$ (the default) keeps the guides fixed,
-while $w>0$ lets the experts progressively detach from the root as their
-own residual improves, consistent with penalty annealing practice in
-domain decomposed PINNs~\cite{hu2022apinn}. The exact composition terms are
-never annealed.
-
-\subsubsection{Initialization and Training Scheme}
-\label{sec:expert_training_scheme}
-
-When model size is not a concern, one may set
-$\mathcal{A}_{\mathrm{exp}} = \mathcal{A}_{\mathrm{base}}$ and initialize each
-expert by copying the weights of the root, with the per expert input
-normalization of Section~\ref{sec:training_regions} disabled, so that at
-initialization every expert reproduces
-the root prediction on its region. This warm start reduces expert training
-time. The experts are trained with the same scheme as the root
-(Section~\ref{sec:root_training}). The loss weights $\lambda_r$,
-$\lambda_{ic}$, and $\lambda_{bc}$ are kept from the root training.
-Examples of face guide training samples for inner domain experts are shown
-in Figure~\ref{fig:local_expert_training}.
-
-\vspace{0.5em}
-
-\begin{figure}[H]
-\centering
-
-\begin{subfigure}{0.4\textwidth}
-\centering
-\includegraphics[width=\textwidth]
-{images/section3_method/local_expert_training_schrodinger.png}
-\caption{Schrödinger}
-\end{subfigure}
-\hfill
-\begin{subfigure}{0.4\textwidth}
-\centering
-\includegraphics[width=\textwidth]
-{images/section3_method/local_expert_training_allen_cahn.png}
-\caption{Allen--Cahn}
-\end{subfigure}
-
-\vspace{0.5em}
-
-\begin{subfigure}{0.4\textwidth}
-\centering
-\includegraphics[width=\textwidth]
-{images/section3_method/local_expert_training_burgers.png}
-\caption{Burgers}
-\end{subfigure}
-\hfill
-\begin{subfigure}{0.4\textwidth}
-\centering
-\includegraphics[width=\textwidth]
-{images/section3_method/local_expert_training_kdv.png}
-\caption{KdV}
-\end{subfigure}
-
-\vspace{0.5em}
-
-\caption{
-Examples of face guide training samples for inner domain experts, carrying
-value, and derivative on spatial faces, data from the root prediction
-$u_0$ on the faces of the inflated regions $\tilde\Omega_j$.
-}
-\label{fig:local_expert_training}
-\end{figure}
-
-\subsection{Smooth Blending and Global Fine-Tuning}
+\subsection{Smooth Blending}
 \label{sec:smoothstep_windows}
 
-The trained leaf experts are combined into a single global approximation
-through smooth, compactly supported window functions. Let
+The leaf experts are combined into a single global approximation
+through smooth, compactly supported window functions. The resulting
+composition is the object that the later training stages optimize and that
+we evaluate and report. Let
 $\Omega \subset \mathbb{R}^d\times[0,T]$ denote the computational domain, and let
 $\{\Omega_i\}_{i=0}^{k}$ be the set of regions obtained from the hierarchical
 decision tree decomposition, where each region is an axis-aligned hypercube
@@ -399,7 +232,10 @@ decision tree decomposition, where each region is an axis-aligned hypercube
 \Omega_i = [a_{i,1}, b_{i,1}] \times \cdots \times [a_{i,d+1}, b_{i,d+1}].
 \]
 
-\noindent To smoothly blend the contributions of different experts while
+\subsubsection{Compact Smoothstep Windows}
+\label{sec:smoothstep_construction}
+
+To smoothly blend the contributions of different experts while
 ensuring compatibility with the PDE's differential order, we define compactly
 supported window functions with configurable smoothness. Let $N$ denote the
 smoothness order, chosen such that $N$ is at least the highest order of any
@@ -476,7 +312,10 @@ collars.
 \label{fig:window_demo}
 \end{figure}
 
-\noindent Given the indicators, the global solution of AToE is the
+\subsubsection{Partition-of-Unity Composition}
+\label{sec:pou_composition}
+
+Given the indicators, the global solution of AToE is the
 partition of unity (POU) combination over the set of leaves $\mathcal{L}$ of
 the trimmed tree:
 \begin{equation}
@@ -507,9 +346,196 @@ domain, each covering its region with smooth transitions in the collar zones.
 \label{fig:normalization_weights}
 \end{figure}
 
-\noindent Finally, the full composition \eqref{eq:global_atoe} is jointly fine
-tuned under the global PDE loss. This last stage reconciles the independently
-trained experts in the collar zones where neighboring windows overlap,
-producing a single, globally consistent solution. The fine tuning stage
-applies the same training scheme as in Section~\ref{sec:root_training} with a single change: the Adam learning rate is
-decreased to $10^{-4}$.
+\subsection{Expert Training}
+\label{sec:expert_training}
+
+Rather than training the experts through the global loss terms, we exploit a
+core MoE idea and let each expert solve a localized, and therefore easier,
+problem on its own subdomain, guided by the converged root, in the spirit
+of the interface treatment of~\cite{luo2025pdd}.
+
+\subsubsection{Training Regions}
+\label{sec:training_regions}
+
+Each leaf expert is trained on the
+inflated region
+\begin{equation}
+\tilde\Omega_j = \Bigl(\,\prod_{i=1}^{d+1}
+[\,a_{j,i} - \delta_{j,i},\; b_{j,i} + \delta_{j,i}\,]\Bigr) \cap \Omega,
+\qquad \delta_{j,i} = \alpha\,(b_{j,i} - a_{j,i}),
+\label{eq:inflated_region}
+\end{equation}
+i.e.\ its leaf region enlarged by the collar of its blending window
+(Section~\ref{sec:smoothstep_windows}) and clipped to the domain. This is
+exactly the support of the window $\Psi_{\Omega_j}$, so every expert is
+trained on the entire set where the final composition evaluates it, in the
+manner of the overlapping subdomains of FBPINN~\cite{moseley2021fbpinn}. As
+in~\cite{moseley2021fbpinn}, the inputs of each expert are affinely
+normalized from $\tilde\Omega_j$ to $[-1,1]^{d+1}$ before its MLP, which
+conditions the small networks well even for deep leaves whose coordinate
+ranges are tiny fractions of the domain.
+
+\subsubsection{Face Guides from the Root}
+\label{sec:face_guides}
+
+The predictions of $u_0$ are
+recorded on the outer faces of $\tilde\Omega_j$ and serve as guide
+data for the local problems: values on the lower temporal face
+$\Gamma^{t}_j$, and values together with the spatial normal derivative on
+the two spatial faces $\Gamma^{x}_j$ whenever the global boundary
+conditions of the problem constrain both $u$ and $u_x$ (e.g.\ periodic
+problems). Derivative interface conditions of this kind follow the XPINN
+treatment~\cite{jagtap2020xpinn}. Faces that fall on the physical boundary
+of $\Omega$ or on $t{=}0$ receive the same $u_0$ guides and no special
+treatment. With $X^{\Gamma t}_j$, $X^{\Gamma x}_j$ the sample sets on the
+faces,
+\begin{align}
+\mathcal{L}^{\Gamma t}_j
+&= \frac{1}{|X^{\Gamma t}_j|}\sum_{(x,t)\in X^{\Gamma t}_j}
+\bigl\| u_j(x,t) - u_0(x,t) \bigr\|^2,
+\label{eq:interface_loss}\\
+\mathcal{L}^{\Gamma x}_j
+&= \frac{1}{|X^{\Gamma x}_j|}\sum_{(x,t)\in X^{\Gamma x}_j}
+\bigl\| u_j(x,t) - u_0(x,t) \bigr\|^2,
+\qquad
+\mathcal{L}^{\Gamma x'}_j
+= \frac{1}{|X^{\Gamma x}_j|}\sum_{(x,t)\in X^{\Gamma x}_j}
+\bigl\| \partial_x u_j(x,t) - \partial_x u_0(x,t) \bigr\|^2 .
+\label{eq:interface_deriv_loss}
+\end{align}
+
+\subsubsection{Exact Constraints on the Composition}
+\label{sec:composition_constraints}
+
+The true initial and
+boundary conditions are not imposed per expert. They are enforced once, on
+the blended composition $u_\theta$ of
+Eq.~\eqref{eq:global_atoe}, the object that is actually evaluated and
+reported, using the standard global loss terms of
+Section~\ref{sec:background}. The full expert training objective is
+\begin{equation}
+\mathcal{L}
+= \sum_{j\in\mathcal{L}}
+\Bigl[
+\lambda_r\,\mathcal{L}^{\mathrm{res}}_j
++ s(e)\,\bigl(
+\lambda_{ic}\,\mathcal{L}^{\Gamma t}_j
++ \lambda_{bc}\,(\mathcal{L}^{\Gamma x}_j + \mathcal{L}^{\Gamma x'}_j)
+\bigr)
+\Bigr]
++ \lambda_{ic}\,\mathcal{L}^{\mathrm{ic}}(u_\theta)
++ \lambda_{bc}\,\mathcal{L}^{\mathrm{bc}}(u_\theta),
+\label{eq:leaf_local_loss}
+\end{equation}
+where $\mathcal{L}^{\mathrm{res}}_j$ enforces the PDE residual on
+collocation points inside $\tilde\Omega_j$ (collocation points in a collar
+shared by several windows contribute to each covering expert). This mixed
+enforcement - approximate $u_0$ guides on the subdomain faces, exact IC/BC
+data on the composed model, follows the Schwarz-type couplings of PINNs
+in~\cite{snyder2023schwarz}. The per expert terms are separable, so the
+experts solve mutually consistent local problems tied together only by the
+shared frozen root and by the composition terms.
+
+\subsubsection{Interface Annealing}
+\label{sec:interface_annealing}
+
+Although the guide terms improve the
+solution globally, the $u_0$ predictions carry the root's error and thus
+introduce a certain limit on the local experts predictions near the
+faces. The guide terms are therefore scaled by an optional linear anneal
+\begin{equation}
+s(e) = 1 - w\,\frac{e - e_0}{E}, \qquad w \in [0,1],
+\label{eq:interface_anneal}
+\end{equation}
+where $e$ is the current iteration, $e_0$ the start and $E$ the budget of
+the expert training stage. $w=0$ (the default) keeps the guides fixed,
+while $w>0$ lets the experts progressively detach from the root as their
+own residual improves, consistent with penalty annealing practice in
+domain decomposed PINNs~\cite{hu2022apinn}. The exact composition terms are
+never annealed.
+
+\subsubsection{Initialization and Training Scheme}
+\label{sec:expert_training_scheme}
+
+When model size is not a concern, one may set
+$\mathcal{A}_{\mathrm{exp}} = \mathcal{A}_{\mathrm{base}}$ and initialize each
+expert by copying the weights of the root, with the per expert input
+normalization of Section~\ref{sec:training_regions} disabled, so that at
+initialization every expert reproduces
+the root prediction on its region. This warm start reduces expert training
+time. The experts are trained with the same scheme as the root
+(Section~\ref{sec:root_training}). The loss weights $\lambda_r$,
+$\lambda_{ic}$, and $\lambda_{bc}$ are kept from the root training.
+Examples of face guide training samples for inner domain experts are shown
+in Figure~\ref{fig:local_expert_training}.
+
+\vspace{0.5em}
+
+\begin{figure}[H]
+\centering
+
+\begin{subfigure}{0.4\textwidth}
+\centering
+\includegraphics[width=\textwidth]
+{images/section3_method/local_expert_training_schrodinger.png}
+\caption{Schrödinger}
+\end{subfigure}
+\hfill
+\begin{subfigure}{0.4\textwidth}
+\centering
+\includegraphics[width=\textwidth]
+{images/section3_method/local_expert_training_allen_cahn.png}
+\caption{Allen--Cahn}
+\end{subfigure}
+
+\vspace{0.5em}
+
+\begin{subfigure}{0.4\textwidth}
+\centering
+\includegraphics[width=\textwidth]
+{images/section3_method/local_expert_training_burgers.png}
+\caption{Burgers}
+\end{subfigure}
+\hfill
+\begin{subfigure}{0.4\textwidth}
+\centering
+\includegraphics[width=\textwidth]
+{images/section3_method/local_expert_training_kdv.png}
+\caption{KdV}
+\end{subfigure}
+
+\vspace{0.5em}
+
+\caption{
+Examples of face guide training samples for inner domain experts, carrying
+value, and derivative on spatial faces, data from the root prediction
+$u_0$ on the faces of the inflated regions $\tilde\Omega_j$.
+}
+\label{fig:local_expert_training}
+\end{figure}
+
+\subsection{Global Fine-Tuning}
+\label{sec:fine_tuning}
+
+Finally, the full composition \eqref{eq:global_atoe} is jointly fine tuned
+under the global PDE loss, producing a single, globally consistent
+solution. This last stage targets the two error sources that no local
+training can remove: the root error inherited through the face guides
+(Section~\ref{sec:face_guides}), and the blending cross terms in the
+collar zones, which arise because a weighted combination of local
+solutions is not itself a solution of a nonlinear PDE.
+
+\noindent Since the experts are already trained on the full supports of
+their windows and the exact initial and boundary conditions are enforced
+on the composition throughout expert training
+(Section~\ref{sec:composition_constraints}), fine tuning is a short
+polishing stage rather than a structural repair. It consists of a few
+thousand SSBroyden iterations (5k in our experiments) applied directly,
+with no first order warm up stage, under the same full batch, resampling,
+and early stopping scheme as the other stages.
+
+\noindent Because the remaining error is concentrated where windows
+overlap, a configurable fraction $\rho$ of the residual collocation points
+may be drawn from the collar zones (points where at least two windows are
+active) rather than uniformly, focusing the fine tuning budget on the
+blending cross terms.
