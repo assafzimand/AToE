@@ -137,6 +137,12 @@ class TrainingContext:
     # ── Schwarz context (set during distill/blocks in _run_schwarz_phase3;
     #    drives the schwarz-aware resample branch in the epoch loop) ────────
     _schwarz_context: Any = None
+    # Phase-level best tracking across Schwarz blocks (reconcile_best=False
+    # segments share one rolling best_model_phase3.pt) and the plot alias
+    # that renames block heatmaps to pred_phase3_ep<N>.
+    _phase_best_rel_l2: float = float('inf')
+    _phase_best_epoch: Any = None
+    _segment_plot_alias: Any = None
 
     # ── Closure handles (created in the loop, consumed by finalize) ──────────
     _emergency_metrics_save: Any = None

@@ -271,6 +271,13 @@ def _run_schwarz_phase3(
     )
     ctx.loss_fn = schwarz_loss
 
+    # Phase-level artifacts (epoch-level, no s<i>_c<j> in filenames):
+    # one rolling best_model_phase3.pt across all blocks (recorded, never
+    # restored) and pred_phase3_ep<N> heatmaps at block ends.
+    ctx._phase_best_rel_l2 = float('inf')
+    ctx._phase_best_epoch = None
+    ctx._segment_plot_alias = 'phase3'
+
     block_summary = []
     res = SegmentResult()
     for b in range(n_blocks):
@@ -343,12 +350,23 @@ def _run_schwarz_phase3(
                          f"({res.stop_reason}) — stopping the schedule")
             break
 
+    ctx._segment_plot_alias = None
+
     # Per-sweep summary table (verify sweep-over-sweep improvement).
     logger.info("[Schwarz] ══ per-block summary ══")
     for row in block_summary:
         logger.info(f"[Schwarz]   block {row['block']:>3} sweep {row['sweep']} "
                     f"color {row['color']} active={row['active']} "
                     f"rel_l2={row['rel_l2']:.6e}")
+    if getattr(ctx, '_phase_best_epoch', None) is not None:
+        logger.info(f"[Schwarz] phase-3 BEST: "
+                    f"rel_l2={ctx._phase_best_rel_l2:.6e} at epoch "
+                    f"{ctx._phase_best_epoch} (best_model_phase3.pt; final "
+                    f"weights remain end-of-last-block)")
+        ctx.metrics['schwarz_phase_best'] = {
+            'rel_l2': ctx._phase_best_rel_l2,
+            'epoch': ctx._phase_best_epoch,
+        }
     ctx.metrics.setdefault('schwarz_blocks', []).extend(block_summary)
 
     _plot_expert_curves(ctx, schwarz_loss, regions, 'phase3_schwarz',

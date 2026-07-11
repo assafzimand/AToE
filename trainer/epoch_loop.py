@@ -94,9 +94,16 @@ def _train_segment(
     # segment's best is reconciled against the end-of-segment weights below.
     best_rel_l2 = float('inf')
     _best_epoch = None
-    best_checkpoint_path = (ctx.checkpoint_dir / f"best_model_{segment_name}.pt"
-                            if ctx.checkpoint_dir is not None and reconcile_best
-                            else None)
+    if reconcile_best:
+        best_checkpoint_path = (ctx.checkpoint_dir / f"best_model_{segment_name}.pt"
+                                if ctx.checkpoint_dir is not None else None)
+    else:
+        # Schwarz block: ONE phase-level rolling best across all blocks
+        # (epoch-stamped inside the checkpoint, seeded from ctx so it
+        # carries across blocks). Recorded only — never restored.
+        best_checkpoint_path = (ctx.checkpoint_dir / "best_model_phase3.pt"
+                                if ctx.checkpoint_dir is not None else None)
+        best_rel_l2 = getattr(ctx, '_phase_best_rel_l2', float('inf'))
     patience_epochs = ctx.patience_epochs
     patience_rel_delta = ctx.patience_rel_delta
     lra_weights = ctx.lra_weights
@@ -1093,6 +1100,13 @@ def _train_segment(
             _save_checkpoint(best_checkpoint_path, model, optimizer, current_optimizer_name, epoch,
                            train_loss, rel_l2, cfg, metrics)
             _best_epoch = epoch
+            if not reconcile_best:
+                # Phase-level best (Schwarz blocks): persist across blocks.
+                ctx._phase_best_rel_l2 = best_rel_l2
+                ctx._phase_best_epoch = epoch
+                logger.info(f"  [PhaseBest] new phase-3 best "
+                            f"rel_l2={rel_l2:.6e} at epoch {epoch} "
+                            f"-> {best_checkpoint_path.name}")
 
         # Interval-based patience on the TRAIN loss (see the init block for
         # the rationale). Interval boundaries align with resample events so
@@ -1163,12 +1177,15 @@ def _train_segment(
     # fine-tune) continues from it.
     if _nan_detected:
         _stop_reason = 'nan'
-    else:
+    elif reconcile_best:
         rel_l2, inf_norm = _reconcile_segment_best(
             model, optimizer, current_optimizer_name, segment_name, epoch,
             train_loss, best_rel_l2, _best_epoch, best_checkpoint_path,
             cfg, metrics, device)
         best_rel_l2 = min(best_rel_l2, rel_l2) if math.isfinite(rel_l2) else best_rel_l2
+    # else (Schwarz block): no restore, no end-of-segment best save — the
+    # block-end weights carry forward and rel_l2/inf_norm keep the last
+    # eval's values (blocks always evaluate on their final epoch).
 
     # ── Write reassigned segment state back to ctx ──
     # (objects mutated in place — model, metrics, timer — need no write-back.)
@@ -1310,17 +1327,35 @@ def _save_segment_pred_plot(ctx: TrainingContext, segment_name: str) -> None:
     out_dir = ctx.adaptive_plots_dir or ctx.run_dir
     if out_dir is None:
         return
-    # Epoch of the kept (best) weights, from this segment's reconcile event.
-    kept_epoch = ctx.epoch
-    for ev in reversed(ctx.metrics.get('segment_reconcile_events', [])):
-        if ev.get('segment') == segment_name:
-            kept_epoch = (ev.get('best_epoch')
-                          if ev.get('kept') == 'best' else ev.get('end_epoch'))
-            kept_epoch = kept_epoch if kept_epoch is not None else ctx.epoch
-            break
+    # Schwarz blocks set a plot alias: heatmaps are named by EPOCH under
+    # one phase-level prefix (pred_phase3_ep<N>), one image per block,
+    # block-end weights — the s<i>_c<j> segment name never reaches
+    # filenames. Deletion is same-stem only, so the block history is kept.
+    alias = getattr(ctx, '_segment_plot_alias', None)
+    if alias is not None:
+        kept_epoch = ctx.epoch
+        stem = f"pred_{alias}_ep{kept_epoch}"
+        log_desc = f"pred_{alias} plot (block-end weights, epoch {kept_epoch})"
+    else:
+        # Epoch of the kept (best) weights, from this segment's reconcile
+        # event.
+        kept_epoch = ctx.epoch
+        for ev in reversed(ctx.metrics.get('segment_reconcile_events', [])):
+            if ev.get('segment') == segment_name:
+                kept_epoch = (ev.get('best_epoch')
+                              if ev.get('kept') == 'best' else ev.get('end_epoch'))
+                kept_epoch = kept_epoch if kept_epoch is not None else ctx.epoch
+                break
+        stem = f"pred_after_{segment_name}_best_ep{kept_epoch}"
+        log_desc = (f"pred_after_{segment_name} plot (best weights, "
+                    f"epoch {kept_epoch})")
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
-        for _old in out_dir.glob(f"pred_after_{segment_name}_*.png"):
+        # One image per segment (or per block in alias mode): remove only
+        # this stem's previous renders.
+        _del_glob = (f"{stem}_*.png" if alias is not None
+                     else f"pred_after_{segment_name}_*.png")
+        for _old in out_dir.glob(_del_glob):
             _old.unlink(missing_ok=True)
         save_spawn_prediction_plot(
             model=ctx.model,
@@ -1329,13 +1364,10 @@ def _save_segment_pred_plot(ctx: TrainingContext, segment_name: str) -> None:
             grid_x=ctx.gt_x,
             grid_t=ctx.gt_t,
             # {relL2} placeholder is filled in by the renderer
-            output_path=(out_dir / f"pred_after_{segment_name}"
-                                   f"_best_ep{kept_epoch}"
-                                   f"_relL2_{{relL2}}.png"),
+            output_path=(out_dir / f"{stem}_relL2_{{relL2}}.png"),
             epoch=kept_epoch,
             cfg=ctx.cfg,
         )
-        logger.info(f"  [Segment:{segment_name}] saved pred_after_{segment_name} "
-                    f"plot (best weights, epoch {kept_epoch})")
+        logger.info(f"  [Segment:{segment_name}] saved {log_desc}")
     except Exception as _e:
         logger.info(f"  [Segment:{segment_name}] prediction plot failed: {_e}")

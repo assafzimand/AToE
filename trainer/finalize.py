@@ -41,6 +41,27 @@ from adaptive.subdomain_data import build_subdomain_data, KIND_NAMES
 
 from trainer.setup import _save_checkpoint, _NumpySafeEncoder
 
+import re as _re
+_SCHWARZ_BLOCK_RE = _re.compile(r'phase3_s\d+_c\d+$')
+
+
+def _collapse_block_markers(segment_events) -> list:
+    """(start_epoch, name) training-curve markers with Schwarz blocks
+    collapsed: the first ``phase3_s<i>_c<j>`` block becomes one 'schwarz'
+    marker, the rest are dropped (80 per-block lines would drown the plot;
+    the per-block detail stays in metrics['segment_events'])."""
+    markers = []
+    seen_schwarz = False
+    for s in segment_events:
+        name = s.get('segment', '')
+        if _SCHWARZ_BLOCK_RE.match(name):
+            if seen_schwarz:
+                continue
+            seen_schwarz = True
+            name = 'schwarz'
+        markers.append((s['start_epoch'], name))
+    return markers
+
 
 def _finalize_training(ctx: TrainingContext) -> Path:
     """Phase 3 of :func:`train`: final checkpoints, plots, metrics, summary.
@@ -97,8 +118,8 @@ def _finalize_training(ctx: TrainingContext) -> Path:
         try:
             training_plots_dir = run_dir / "training_plots"
             _switch_epochs = [e['epoch'] for e in metrics.get('optimizer_events', [])]
-            _segment_markers = [(s['start_epoch'], s.get('segment', ''))
-                                for s in metrics.get('segment_events', [])]
+            _segment_markers = _collapse_block_markers(
+                metrics.get('segment_events', []))
             plot_training_curves(metrics, training_plots_dir,
                                  optimizer_switch_epochs=_switch_epochs,
                                  segment_markers=_segment_markers)
@@ -161,8 +182,8 @@ def _finalize_training(ctx: TrainingContext) -> Path:
     training_plots_dir = run_dir / "training_plots"
     # Extract all optimizer switch epochs and segment markers from metrics
     optimizer_switch_epochs = [e['epoch'] for e in metrics.get('optimizer_events', [])]
-    segment_markers = [(s['start_epoch'], s.get('segment', ''))
-                       for s in metrics.get('segment_events', [])]
+    segment_markers = _collapse_block_markers(
+        metrics.get('segment_events', []))
     # Run metadata goes into the filenames (paper-ready; captions carry it)
     _n_exp = model.num_experts if hasattr(model, 'num_experts') else 0
     _curves_suffix = f"{cfg.get('problem', '')}_ep{total_epochs}_E{_n_exp}"

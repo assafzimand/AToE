@@ -430,7 +430,7 @@ base_config:
     # final all-active pass that removes block-coordinate suboptimality),
     # not a repair stage.
     fine_tune:
-      epochs: 5000
+      epochs: 10000
       optimizer_1: ssbroyden
       optimizer_2: null
       optimizer_switch_epoch: 99999
