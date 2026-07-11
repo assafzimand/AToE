@@ -134,6 +134,10 @@ class TrainingContext:
     # ── Split-loss context (set during _run_split_segment, else None) ──────
     _split_context: Any = None
 
+    # ── Schwarz context (set during distill/blocks in _run_schwarz_phase3;
+    #    drives the schwarz-aware resample branch in the epoch loop) ────────
+    _schwarz_context: Any = None
+
     # ── Closure handles (created in the loop, consumed by finalize) ──────────
     _emergency_metrics_save: Any = None
     _atexit: Any = None

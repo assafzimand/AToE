@@ -62,13 +62,12 @@ def _run_split_segment(
     model = ctx.model
     cfg = ctx.cfg
 
-    # Snapshot the model BEFORE training so interface targets stay stable
-    # across the whole segment (and across resamples).
+    # Frozen snapshot reused on resample (kept for API stability; the
+    # split dataset no longer mints any targets from it).
     model_snapshot = copy.deepcopy(model)
     model_snapshot.eval()
     for p in model_snapshot.parameters():
         p.requires_grad = False
-    logger.info(f"[SplitLoss] Created frozen model snapshot for interface targets")
 
     # Identify the leaf experts being trained in this segment
     leaf_info = model.get_leaf_info()
@@ -79,23 +78,15 @@ def _run_split_segment(
     logger.info(f"[SplitLoss] Building subdomain data for {len(new_expert_indices)} "
                 f"new expert(s): {new_expert_indices}")
 
-    # The leaves tile the domain and share the base (root) as their common
-    # parent, so mint interface targets from the frozen base — good root
-    # predictions regardless of expert architecture.
-    interface_model = model_snapshot.base_model
-    logger.info("[SplitLoss] Interface targets minted from frozen base (root).")
-
-    # Static faces (IC/BC/interface/continuity + minted targets) are constant
-    # within the segment: built once here, reused on every resample.
+    # Static rows (optional continuity pairs) are constant within the
+    # segment: built once here, reused on every resample.
     split_static = build_subdomain_static(
         model_snapshot, new_expert_indices, regions_list, cfg,
         ctx.device, seed=ctx.epoch,
-        interface_model=interface_model,
     )
     split_data = build_subdomain_data(
         model_snapshot, new_expert_indices, regions_list, cfg,
         ctx.device, seed=ctx.epoch,
-        interface_model=interface_model,
         static=split_static,
     )
 
@@ -109,8 +100,7 @@ def _run_split_segment(
     logger.info(
         "[SplitLoss] Grouped composed-residual mode: PDE residual on the "
         "blended PoU composition as a sum of per-group means (one per "
-        "expert solo zone + one collar mean); u0 guides on each expert's "
-        "exclusive-box interior faces only"
+        "expert solo zone + one collar mean); no u0 guide terms"
     )
     logger.info(
         f"[SplitLoss] trainable params: {len(trainable)}, "
@@ -152,20 +142,6 @@ def _run_split_segment(
         model, cfg, orig_loss_fn=orig_loss_fn, ic_bc_batch=ic_bc_batch,
     )
 
-    # D7: interface-weight anneal — lambda_Gamma scales linearly from 1.0
-    # to (1 - w) over this segment's epoch budget (0 = disabled). The epoch
-    # loop updates split_loss._interface_scale each epoch.
-    _anneal_w = float((ctx.adaptive_cfg.get('split_icbc', {}) or {}).get(
-        'interface_decrease_weight', 0.0) or 0.0)
-    split_loss._interface_anneal_w = _anneal_w
-    if _anneal_w > 0:
-        logger.info(f"[InterfaceAnneal] enabled: w={_anneal_w}, "
-                    f"lambda_Gamma 1.0 -> {1.0 - _anneal_w:.3g} over "
-                    f"{epoch_budget} epochs")
-    else:
-        logger.info("[InterfaceAnneal] disabled "
-                    "(interface_decrease_weight=0)")
-
     # Swap to split data/loss
     ctx.loss_fn = split_loss
     ctx.train_data = split_data
@@ -177,8 +153,7 @@ def _run_split_segment(
         'model_snapshot': model_snapshot,  # frozen snapshot reused on resample
         'new_expert_indices': new_expert_indices,
         'regions': regions_list,
-        'interface_model': interface_model,  # frozen base for interface targets
-        'static': split_static,  # cached faces + targets; resample redraws residuals only
+        'static': split_static,  # cached continuity rows; resample redraws residuals only
     }
 
     # D2 reporting: experts train on their inflated boxes (region + collar),
@@ -304,16 +279,8 @@ def _log_subdomain_summary(new_expert_indices, regions, split_data, cfg):
                            f"this draw (no residual mean of its own until "
                            f"the next resample)")
         if swallowed:
-            logger.info(f"[SplitData] expert={eidx} is swallowed: no guide "
-                        f"faces (trained via composed residual only)")
-        else:
-            if counts.get('interface_t', 0) == 0:
-                logger.info(f"[SplitData] expert={eidx} has 0 t-interface "
-                            f"points (face on t_min: exact IC covers it)")
-            if counts.get('interface_x', 0) == 0:
-                logger.info(f"[SplitData] expert={eidx} has 0 x-interface "
-                            f"points (faces on the physical boundary: "
-                            f"exact BC covers them)")
+            logger.info(f"[SplitData] expert={eidx} is swallowed: trained "
+                        f"via the collar group of the composed residual")
     
     # Log continuity pair summary
     if cont_neighbors is not None:

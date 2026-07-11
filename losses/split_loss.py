@@ -1,4 +1,4 @@
-"""Split loss: composed PDE residual + per-expert u0 face guides.
+"""Split loss: composed PDE residual + exact IC/BC on the composition.
 
 The exact-object scheme — every physics term is evaluated on the blended
 PoU composition u_theta (the reported object):
@@ -12,34 +12,27 @@ PoU composition u_theta (the reported object):
     up-weighting the pre-redesign per-expert loss had; a plain global
     mean instead lets them drown (N1_clean run, 2026-07-11).
   - The global loss's exact IC and BC terms, evaluated on the plain
-    training set's IC/BC rows through the composed model, at full,
-    un-annealed weight.
+    training set's IC/BC rows through the composed model, at full weight.
 
-Per-expert scaffolding, on the expert's OWN output:
-  - u0-guide matching on the interior faces of its EXCLUSIVE box
-    Omega_hat (value on the lower-t face; value + d/dx on x-faces for
-    problems whose global BC pairs u and u_x), scaled by the annealable
-    interface weight. Faces on t_min / the physical boundary carry no
-    guides (skipped at data build), and swallowed leaves (empty exclusive
-    box) have no guide rows at all — they train purely through the
-    composed residual, FBPINN-style.
-  - Neighbor-to-neighbor continuity on shared interior faces (optional).
+There are NO u0 face-guide terms (removed on the AToE-Schwarz branch —
+the Schwarz schedule's frozen neighbors replace root-minted interface
+data; this grouped loss remains as the non-Schwarz fallback path).
+
+Per-expert scaffolding:
+  - Neighbor-to-neighbor continuity on shared interior faces (optional,
+    weight 0 by default).
 
 Total loss:
     L = w_res*( sum_j L_res(u_theta; solo_j) + L_res(u_theta; collar) )
         + w_ic*L_IC(u_theta) + w_bc*L_BC(u_theta)
-        + sum_j [ s(e)*( w_ic*L_iface_t_j
-                         + w_bc*(L_iface_x_j + L_iface_x_deriv_j) )
-                  + w_cont*L_cont_j ]
-with s(e) the linear interface anneal (interface_decrease_weight).
+        + sum_j w_cont*L_cont_j
 """
 
 import torch
 import importlib
 from typing import Dict, Callable
 from adaptive.subdomain_data import (
-    KIND_RESIDUAL, KIND_INTERFACE_T, KIND_INTERFACE_X,
-    KIND_CONTINUITY, PERIODIC_PROBLEMS,
+    KIND_RESIDUAL, KIND_CONTINUITY, PERIODIC_PROBLEMS,  # noqa: F401
 )
 from utils.logging_config import get_logger
 
@@ -73,11 +66,6 @@ def build_split_loss(
     w_bc = loss_weights['bc']
     w_cont = loss_weights.get('continuity', 1.0)
 
-    # Problems whose global BC pairs u AND u_x (periodic set): their x-face
-    # guides carry d/dx targets too, matched in the grad-enabled interface
-    # pass. Value-only-BC problems (burgers1d) match values only.
-    match_x_derivs = problem in PERIODIC_PROBLEMS
-
     pde_res_fn, deriv_fn = _import_pde_helpers(problem)
     pde_params = _get_pde_params(problem, pc)
 
@@ -106,19 +94,14 @@ def build_split_loss(
                 xt = torch.cat([x, t], dim=1)
                 h_pred = model(xt)
                 return torch.mean((h_pred - h_gt) ** 2)
-        
+
         x = batch['x']
         t = batch['t']
-        h_gt = batch['h_gt']
-        h_x_gt = batch.get('h_x_gt', None)  # interface d/dx guide targets
         expert_ids = batch['expert_id']
         kinds = batch['kind']
         cont_neighbors = batch.get('cont_neighbor', None)
         cont_dims = batch.get('cont_dim', None)
         device = x.device
-        # D7: interface-weight anneal scale (updated per epoch by the
-        # trainer when interface_decrease_weight > 0; 1.0 otherwise).
-        interface_scale = split_loss_fn._interface_scale
 
         # Per-expert history is recorded once per epoch (the trainer arms
         # _record_next at each epoch start). Recording every closure call
@@ -128,7 +111,6 @@ def build_split_loss(
         if record_now:
             split_loss_fn._record_next = False
 
-        unique_experts = [e for e in expert_ids.unique().tolist() if e >= 0]
         total_loss = torch.tensor(0.0, device=device)
         all_comps = {}
 
@@ -156,31 +138,21 @@ def build_split_loss(
             all_comps['residual_term'] = residual_term
             all_comps['residual_collar'] = residual_collar
 
-        for eidx in unique_experts:
-            emask = (expert_ids == eidx)
-            comps = _compute_expert_loss(
-                model, eidx,
-                x[emask], t[emask], h_gt[emask],
-                kinds[emask],
-                w_res, w_ic, w_bc, match_x_derivs,
-                device,
-                residual_diag=residual_solo_means.get(eidx),
-                h_x_gt=h_x_gt[emask] if h_x_gt is not None else None,
-                interface_scale=interface_scale,
-            )
-            # Only the guide terms enter the optimized loss per expert; the
-            # residual entered once above, through the composition.
-            total_loss = total_loss + comps['guides_scaled']
-            if record_now:
-                _record(per_expert_history, eidx, comps)
-            if return_components:
-                all_comps[eidx] = comps
+        # Per-expert solo-mean diagnostics (recording/plotting only; the
+        # optimized residual entered once above, through the composition).
+        if record_now or return_components:
+            for eidx, solo_mean in residual_solo_means.items():
+                comps = {'residual': solo_mean,
+                         'total': w_res * solo_mean}
+                if record_now:
+                    _record(per_expert_history, eidx, comps)
+                if return_components:
+                    all_comps[eidx] = comps
 
         # ── Exact physics on the composition: global IC + BC on u_theta ──
         # The global loss's own IC/BC terms (periodic pairing included),
         # evaluated through the blended PoU composition on the plain
-        # training set's IC/BC rows, at FULL weight — the u0 face guides
-        # above are the annealable part, this is the ground truth.
+        # training set's IC/BC rows, at FULL weight.
         if ic_bc_batch is not None and orig_loss_fn is not None:
             comps_g = orig_loss_fn(model, ic_bc_batch,
                                    return_components=True,
@@ -228,10 +200,6 @@ def build_split_loss(
     split_loss_fn._residual_cache = residual_cache
     split_loss_fn._cache_residuals = False  # trainer sets True when a plot is due
     split_loss_fn._record_next = True  # trainer re-arms once per epoch
-    # Interface-weight anneal — the trainer sets _interface_anneal_w
-    # from config and updates _interface_scale each epoch.
-    split_loss_fn._interface_scale = 1.0
-    split_loss_fn._interface_anneal_w = 0.0
     return split_loss_fn
 
 
@@ -303,102 +271,10 @@ def _compute_composed_residual(
     return residual_term, solo_means, collar_mean
 
 
-def _compute_expert_loss(
-    model, expert_idx, x, t, h_gt, kinds,
-    w_res, w_ic, w_bc, match_x_derivs, device,
-    residual_diag=None,
-    h_x_gt=None,
-    interface_scale=1.0,
-):
-    """Per-expert u0-guide terms, on the expert's own output (no PoU).
-
-    The guide faces sit on the interior boundary of the expert's
-    exclusive box (data build skips t_min / physical-boundary faces and
-    swallowed leaves entirely):
-      * ``interface_t`` — lower-t face, value matching, one plain forward;
-      * ``interface_x`` — x-faces, value matching, plus d(u_j)/dx matched
-        to the minted d(u_0)/dx targets (``interface_x_deriv``) when the
-        problem's global BC pairs u and u_x (``match_x_derivs``) — that
-        pass is grad-enabled; value-only problems keep it in the plain
-        forward.
-
-    ``interface_scale`` multiplies ALL guide terms (the exact IC/BC live
-    on the composition, at full weight, outside this function).
-
-    ``residual_diag`` is the DETACHED composed-residual mean over this
-    expert's SOLO-zone points (its group mean in the grouped residual) —
-    recorded in ``comps['residual']`` and folded into ``comps['total']``
-    for the per-expert curves, but never added to the optimized loss here
-    (the residual enters through the grouped composition term). Only
-    ``comps['guides_scaled']`` carries gradient out of this function.
-    """
-    z = torch.tensor(0.0, device=device)
-    comps = {
-        'residual': residual_diag if residual_diag is not None else z.clone(),
-        'interface_t': z.clone(),
-        'interface_x': z.clone(),
-        'interface_x_deriv': z.clone(),
-    }
-
-    deriv_pass = match_x_derivs and h_x_gt is not None
-
-    # Kinds handled by the single plain (no input-grad) face forward.
-    face_kinds = [('interface_t', KIND_INTERFACE_T)]
-    if not deriv_pass:
-        face_kinds.append(('interface_x', KIND_INTERFACE_X))
-
-    face_mask = torch.zeros_like(kinds, dtype=torch.bool)
-    for _, kval in face_kinds:
-        face_mask |= (kinds == kval)
-
-    if face_mask.any():
-        xt_face = torch.cat([x[face_mask], t[face_mask]], dim=1)
-        u_face = model.forward_single_expert(expert_idx, xt_face)
-        se_face = (u_face - h_gt[face_mask]) ** 2
-        kinds_face = kinds[face_mask]
-        for key, kval in face_kinds:
-            kmask = (kinds_face == kval)
-            if kmask.any():
-                comps[key] = torch.mean(se_face[kmask])
-
-    # ── x-faces with value + d/dx guide matching (grad-enabled pass) ──
-    if deriv_pass:
-        ifm_x = (kinds == KIND_INTERFACE_X)
-        if ifm_x.any():
-            x_if = x[ifm_x].clone().detach().requires_grad_(True)
-            t_if = t[ifm_x].clone().detach()
-            u_if = model.forward_single_expert(
-                expert_idx, torch.cat([x_if, t_if], dim=1))
-            comps['interface_x'] = torch.mean((u_if - h_gt[ifm_x]) ** 2)
-            n_out = u_if.shape[1]
-            d_loss = torch.tensor(0.0, device=device)
-            for c in range(n_out):
-                g = torch.autograd.grad(
-                    u_if[:, c].sum(), x_if,
-                    create_graph=True, retain_graph=True,
-                )[0][:, 0]
-                d_loss = d_loss + torch.mean(
-                    (g - h_x_gt[ifm_x][:, c]) ** 2)
-            # Mean over output components (matches the value term's
-            # mean-over-all-elements convention).
-            comps['interface_x_deriv'] = d_loss / n_out
-
-    comps['guides_scaled'] = interface_scale * (
-        w_ic * comps['interface_t']
-        + w_bc * (comps['interface_x'] + comps['interface_x_deriv'])
-    )
-    # Recording-only local total (residual part is detached diagnostics).
-    comps['total'] = w_res * comps['residual'] + comps['guides_scaled']
-    return comps
-
-
 def _record(history, expert_idx, comps):
     if expert_idx not in history:
         history[expert_idx] = {
-            k: [] for k in [
-                'residual', 'interface_t', 'interface_x',
-                'interface_x_deriv', 'total', 'continuity',
-            ]
+            k: [] for k in ['residual', 'total', 'continuity']
         }
     for k in history[expert_idx]:
         if k in comps:
@@ -412,10 +288,7 @@ def _record_continuity(history, expert_idx, cont_val):
     """Record continuity loss for an expert (separate from main _record)."""
     if expert_idx not in history:
         history[expert_idx] = {
-            k: [] for k in [
-                'residual', 'interface_t', 'interface_x',
-                'interface_x_deriv', 'total', 'continuity',
-            ]
+            k: [] for k in ['residual', 'total', 'continuity']
         }
     # Append to continuity; if list is shorter, pad with 0
     cont_list = history[expert_idx]['continuity']
@@ -429,7 +302,7 @@ def _compute_continuity_loss(
     deriv_fn, pde_params, device, problem,
 ):
     """Compute continuity loss on shared interior faces between neighbors.
-    
+
     For each pair (a, b) of face-neighbor experts, enforces agreement of:
     - Value: u_a = u_b
     - First derivative: ∂u_a/∂d = ∂u_b/∂d (where d is face-normal dim)

@@ -1124,15 +1124,11 @@ def _setup_training(
     else:
         logger.info(f"  Resampling: disabled")
     
-    # AToE design knobs (D1 / D7 / D6)
+    # AToE design knobs (D1 / D6)
     if is_adaptive:
         _pln = adaptive_cfg.get('per_leaf_normalization', True)
         logger.info(f"  Per-leaf input normalization: "
                     f"{'enabled' if _pln else 'disabled'}")
-        _idw = float((adaptive_cfg.get('split_icbc', {}) or {}).get(
-            'interface_decrease_weight', 0.0) or 0.0)
-        logger.info("  Interface-weight anneal: "
-                    + (f"enabled (w={_idw})" if _idw > 0 else "disabled"))
         _cdr = float((adaptive_cfg.get('fine_tune', {}) or {}).get(
             'collar_data_ratio', 0.0) or 0.0)
         logger.info("  Fine-tune collar sampling: "

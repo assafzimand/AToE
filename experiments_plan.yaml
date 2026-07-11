@@ -380,7 +380,6 @@ base_config:
     epsilon_node_acceptance: 0.00
     split_icbc:
       enabled: true
-      interface_decrease_weight: 0.0
     initial_train:
       epochs: 45000
       optimizer_1: adam
@@ -439,7 +438,5 @@ experiments:
   - 20
   - 1
   adaptive_pinn:
-    split_icbc:
-      interface_decrease_weight: 0.0
     fine_tune:
       collar_data_ratio: 0.0

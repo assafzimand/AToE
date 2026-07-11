@@ -55,8 +55,15 @@ def _train_segment(
     *,
     lr_override=None,
     min_epochs_override=None,
+    reconcile_best=True,
 ) -> SegmentResult:
     """Run one training segment: a self-contained epoch loop with no spawning.
+
+    ``reconcile_best=False`` disables per-segment best-checkpoint saving AND
+    the end-of-segment best-weights restore — the end-of-segment weights carry
+    forward as-is. Used by Schwarz blocks, where the global metric may
+    transiently worsen while a local problem improves and a restore would
+    fight the sweep.
 
     Builds a fresh optimizer + scheduler from ``segment_cfg`` over the model's
     currently-trainable params (freezing is set by the caller), advances the
@@ -88,7 +95,8 @@ def _train_segment(
     best_rel_l2 = float('inf')
     _best_epoch = None
     best_checkpoint_path = (ctx.checkpoint_dir / f"best_model_{segment_name}.pt"
-                            if ctx.checkpoint_dir is not None else None)
+                            if ctx.checkpoint_dir is not None and reconcile_best
+                            else None)
     patience_epochs = ctx.patience_epochs
     patience_rel_delta = ctx.patience_rel_delta
     lra_weights = ctx.lra_weights
@@ -211,14 +219,6 @@ def _train_segment(
         if hasattr(loss_fn, '_record_next'):
             loss_fn._record_next = True
 
-        # D7: interface-weight anneal — lambda_Gamma decays linearly from
-        # 1.0 to (1 - w) over this segment's epoch budget.
-        if getattr(loss_fn, '_interface_anneal_w', 0.0) > 0:
-            _aw = loss_fn._interface_anneal_w
-            _prog = min(1.0, max(0.0, (epoch - segment_start_epoch)
-                                 / max(1, epoch_budget)))
-            loss_fn._interface_scale = 1.0 - _aw * _prog
-
         # Enable residual caching for adaptive sampling if needed
         # Cache THIS epoch's residuals for NEXT epoch's resampling
         # (adaptive_sampling_enabled already set from problem_cfg above)
@@ -275,17 +275,53 @@ def _train_segment(
         # orders of magnitude higher and rel-L2 drifts up).
         _resampled_this_epoch = False
         _split_ctx = getattr(ctx, '_split_context', None)
+        _schwarz_ctx = getattr(ctx, '_schwarz_context', None)
         if resample_every > 0 and epoch > 1 and (epoch - 1) % resample_every == 0:
             resample_seed = base_seed + epoch
             _resampled_this_epoch = True
-            if _split_ctx is not None:
+            if _schwarz_ctx is not None:
+                # Schwarz-owned data: a plain global redraw would break the
+                # restriction (blocks) or clobber the u0 targets (distill).
+                if _schwarz_ctx.get('mode') == 'distill':
+                    from adaptive.subdomain_data import build_distill_data
+                    logger.info(f"  [Resample-Distill] Redrawing per-expert "
+                                f"u0-distill points at epoch {epoch}")
+                    train_data = build_distill_data(
+                        _schwarz_ctx['base_model'],
+                        _schwarz_ctx['expert_indices'],
+                        _schwarz_ctx['regions'], cfg, device,
+                        seed=resample_seed,
+                    )
+                else:
+                    # Block mode: redraw residuals restricted to the ACTIVE
+                    # experts' window supports.
+                    from adaptive.subdomain_data import sample_schwarz_residuals
+                    logger.info(f"  [Resample-Schwarz] Redrawing active-support "
+                                f"residuals at epoch {epoch} (active="
+                                f"{_schwarz_ctx['active_indices']})")
+                    train_data = sample_schwarz_residuals(
+                        _schwarz_ctx['active_indices'], _schwarz_ctx['regions'],
+                        cfg, device, seed=resample_seed,
+                    )
+                ctx.train_data = train_data
+                _set_default_torch_device(device, full_batch=False)
+                train_loader = _create_split_dataloader(
+                    train_data, cfg['batch_size'], shuffle=True)
+                ctx.train_loader = train_loader
+                _set_default_torch_device(
+                    device,
+                    full_batch=current_optimizer_name in ('LBFGS', 'SSBroyden'))
+                metrics['resample_events'].append({
+                    'epoch': epoch, 'action': 'schwarz_resampled',
+                    'optimizer': current_optimizer_name,
+                })
+            elif _split_ctx is not None:
                 logger.info(f"  [Resample-Split] Redrawing residual interiors at epoch {epoch}")
-                # Static faces + interface targets are cached for the segment;
+                # Static rows (continuity) are cached for the segment;
                 # only the residual collocation points are redrawn.
                 train_data = build_subdomain_data(
                     _split_ctx['model_snapshot'], _split_ctx['new_expert_indices'],
                     _split_ctx['regions'], cfg, device, seed=resample_seed,
-                    interface_model=_split_ctx.get('interface_model'),
                     static=_split_ctx.get('static'),
                 )
                 ctx.train_data = train_data
@@ -822,17 +858,6 @@ def _train_segment(
                 _blend = None
             metrics.setdefault('eval_blending_mode', []).append(_blend)
 
-            # D7: interface-anneal scale at this eval (None outside split
-            # segments), aligned with 'epochs' like eval_blending_mode.
-            _if_scale = (getattr(loss_fn, '_interface_scale', None)
-                         if getattr(ctx, '_split_context', None) is not None
-                         else None)
-            metrics.setdefault('interface_scale', []).append(_if_scale)
-            if (_if_scale is not None
-                    and getattr(loss_fn, '_interface_anneal_w', 0.0) > 0):
-                logger.info(f"  [InterfaceAnneal] epoch={epoch} "
-                            f"scale={_if_scale:.4f}")
-
             # ── Term-wise loss components (from the same eval pass) ──
             metrics['loss_components']['epochs'].append(epoch)
             for term in ['residual', 'ic', 'bc']:
@@ -844,9 +869,9 @@ def _train_segment(
                 **comp_means,
             })
 
-            # Per-expert split-loss breakdown
-            _split_ctx = getattr(ctx, '_split_context', None)
-            if _split_ctx is not None and hasattr(loss_fn, '_per_expert_history'):
+            # Per-expert split-loss breakdown (split, Schwarz, and distill
+            # losses all carry _per_expert_history)
+            if hasattr(loss_fn, '_per_expert_history'):
                 _peh = loss_fn._per_expert_history
                 for _eidx in sorted(_peh.keys()):
                     _eh = _peh[_eidx]

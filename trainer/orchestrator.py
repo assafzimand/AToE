@@ -205,7 +205,15 @@ def train_orchestrator(ctx: TrainingContext) -> None:
     logger.info(f"[Phase 3] Training {total} leaf experts (base retired from composition)")
     _set_trainable(model, 'leaves')
 
-    if split_enabled:
+    schwarz_enabled = (ctx.adaptive_cfg.get('schwarz', {}) or {}).get(
+        'enabled', False)
+    if schwarz_enabled:
+        from trainer.schwarz_segment import _run_schwarz_phase3
+        logger.info("[Phase 3] Schwarz schedule enabled: distill warm start "
+                    "+ colored freeze/unfreeze blocks on the classic "
+                    "composed PINN loss")
+        _run_schwarz_phase3(ctx, cfg['epochs'], cfg)
+    elif split_enabled:
         _run_split_segment(ctx, 'phase3', cfg['epochs'], cfg)
     else:
         res = _train_segment(ctx, 'phase3', cfg['epochs'], cfg)
@@ -223,8 +231,10 @@ def train_orchestrator(ctx: TrainingContext) -> None:
         logger.info(f"[FineTune] Using composed loss with blending_mode='{blending}' (matches inference)")
         _set_trainable(model, 'leaves')
 
-        # Ensure split_context is cleared so eval uses configured blending_mode
+        # Ensure split/schwarz contexts are cleared so eval uses the
+        # configured blending_mode and resampling takes the plain path
         ctx._split_context = None
+        ctx._schwarz_context = None
 
         # L2-SP anchoring: snapshot weights and wrap loss
         l2sp_lambda = fine_tune_cfg.get('l2sp_lambda', 0.0)
