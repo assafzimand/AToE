@@ -1267,18 +1267,33 @@ def _reconcile_segment_best(model, optimizer, optimizer_name: str,
 
 
 def _save_segment_pred_plot(ctx: TrainingContext, segment_name: str) -> None:
-    """Save ``pred_after_<segment>.png`` (1D problems with ground truth).
+    """Save ``pred_after_<segment>_best_ep<N>.png`` (1D problems with GT).
 
-    Captures the full-composition prediction at the end of a segment so each
-    stage (root, every level, fine-tune, joint) leaves a visual checkpoint.
+    Runs after reconciliation, so the in-memory model holds the segment's
+    BEST weights — the ones every later stage continues from. The filename
+    stamps the epoch that produced those weights (the best epoch when the
+    best checkpoint was restored, the final epoch when end-of-segment was
+    the best), read from the segment's reconcile event. Exactly one image
+    per segment: any previously saved pred_after_<segment> images are
+    removed first.
     """
     if ctx.problem_cfg.get('spatial_dim', None) != 1:
         return
     out_dir = ctx.adaptive_plots_dir or ctx.run_dir
     if out_dir is None:
         return
+    # Epoch of the kept (best) weights, from this segment's reconcile event.
+    kept_epoch = ctx.epoch
+    for ev in reversed(ctx.metrics.get('segment_reconcile_events', [])):
+        if ev.get('segment') == segment_name:
+            kept_epoch = (ev.get('best_epoch')
+                          if ev.get('kept') == 'best' else ev.get('end_epoch'))
+            kept_epoch = kept_epoch if kept_epoch is not None else ctx.epoch
+            break
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
+        for _old in out_dir.glob(f"pred_after_{segment_name}_*.png"):
+            _old.unlink(missing_ok=True)
         save_spawn_prediction_plot(
             model=ctx.model,
             domain_bounds=ctx.domain_bounds,
@@ -1286,11 +1301,13 @@ def _save_segment_pred_plot(ctx: TrainingContext, segment_name: str) -> None:
             grid_x=ctx.gt_x,
             grid_t=ctx.gt_t,
             # {relL2} placeholder is filled in by the renderer
-            output_path=(out_dir / f"pred_after_{segment_name}_ep{ctx.epoch}"
+            output_path=(out_dir / f"pred_after_{segment_name}"
+                                   f"_best_ep{kept_epoch}"
                                    f"_relL2_{{relL2}}.png"),
-            epoch=ctx.epoch,
+            epoch=kept_epoch,
             cfg=ctx.cfg,
         )
-        logger.info(f"  [Segment:{segment_name}] saved pred_after_{segment_name} plot")
+        logger.info(f"  [Segment:{segment_name}] saved pred_after_{segment_name} "
+                    f"plot (best weights, epoch {kept_epoch})")
     except Exception as _e:
         logger.info(f"  [Segment:{segment_name}] prediction plot failed: {_e}")

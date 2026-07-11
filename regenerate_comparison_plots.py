@@ -116,10 +116,18 @@ def _eval_segment_rel_l2s(result_path: Path, helpers) -> Dict:
 
 
 def _regen_segment_plots(result_path: Path, helpers) -> None:
-    """Re-render pred_after_<segment>.png in adaptive_plots/ from each
-    segment's best checkpoint (best_model_<segment>.pt; legacy runs:
-    checkpoint_after_<segment>.pt), replacing the in-training plots with the
-    unified native-grid renderer."""
+    """Re-render pred_after_<segment>_best_ep<N>.png in adaptive_plots/ from
+    each segment's best checkpoint (best_model_<segment>.pt; legacy runs:
+    checkpoint_after_<segment>.pt) with the unified native-grid renderer.
+
+    Exactly one image per segment: any existing pred_after_<segment> images
+    (the in-training save included — same weights, since reconciliation
+    keeps the best in memory) are removed first. The epoch stamp is the
+    checkpoint's own epoch — the weights every later stage continued from.
+    Rendering always uses the model's configured blending mode: phase-3
+    checkpoints are trained and reported on the soft PoU composition (D2),
+    so no hard-indicator override.
+    """
     import yaml
 
     cfg_path = result_path / 'config_used.yaml'
@@ -139,17 +147,15 @@ def _regen_segment_plots(result_path: Path, helpers) -> None:
             model = helpers._build_model(cfg)
             epoch = helpers._load_checkpoint(model, ckpt_path, is_adaptive)
             model.eval()
-            # Split-segment (phase3) checkpoints are trained with hard region
-            # ownership — render them with hard indicators so the regenerated
-            # plot matches the in-training pred_after_phase3.png.
-            if segment.startswith('phase3') and hasattr(model, 'blending_mode'):
-                model.blending_mode = 'hard'
             out_dir.mkdir(parents=True, exist_ok=True)
+            for _old in out_dir.glob(f'pred_after_{segment}_*.png'):
+                _old.unlink()
             plot_predictions_and_error_maps(
                 model, out_dir, cfg,
-                filename=f'pred_after_{segment}_ep{epoch}_relL2_{{relL2}}.png')
+                filename=f'pred_after_{segment}_best_ep{epoch}'
+                         f'_relL2_{{relL2}}.png')
             print(f"  [SegmentPlots] regenerated pred_after_{segment} "
-                  f"(epoch {epoch})")
+                  f"(best weights, epoch {epoch})")
         except Exception as _seg_err:
             print(f"  [SegmentPlots] {segment}: failed — {_seg_err}")
 
