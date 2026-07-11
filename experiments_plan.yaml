@@ -1,15 +1,16 @@
-experiment_name: allen_cahn_M8_exact_object_grouped_res
+experiment_name: schwarz_S1_allen_cahn_burgers
 base_config:
   problem: allen_cahn
   model: AToELeaves
   activation: tanh
   precision: float64
-  # Phase 3 under the GROUPED exact-object loss: the composed residual is
-  # a sum of per-group means (one per expert solo zone + one collar mean),
-  # restoring the per-region weighting the N1_clean global mean lost
-  # (N1 plateaued at 3.50e-5 by ~19.5k with train loss at 2e-13).
-  # 35k = 5k Adam + 30k SSBroyden - N1 showed nothing moves past ~20k.
-  epochs: 35000
+  # Phase-3 budget for the SCHWARZ schedule: 40k epochs = 80 blocks x 500
+  # epochs. With the expected ~4 colors that is 20 full sweeps over the
+  # leaf coloring (a different color count just makes the last sweep
+  # partial - harmless, blocks cycle round-robin). Each block trains one
+  # color with everything else frozen, pure SSBroyden, on the classic
+  # composed loss restricted to the active supports.
+  epochs: 40000
   batch_size: 99999
   min_epochs: 1
   eval_every: 500
@@ -173,7 +174,7 @@ base_config:
       freeze_previous_windows: true
       m_distribution: quadratic
   burgers1d:
-    pretrained_base_checkpoint: null
+    pretrained_base_checkpoint: roots_checkpoints/burgers_root.pt
     spatial_dim: 1
     output_dim: 1
     spatial_domain:
@@ -380,6 +381,26 @@ base_config:
     epsilon_node_acceptance: 0.00
     split_icbc:
       enabled: true
+    # Schwarz phase 3 (overrides the split_icbc path when enabled):
+    #   distill - every expert individually MSE-fitted to the frozen root
+    #   on its window support (warm start; replaces u0 face guides). 5k =
+    #   3k Adam + 2k SSBroyden so the fit is tight: frozen neighbors ARE
+    #   the collar boundary data of the first sweep.
+    #   blocks - greedy coloring of the support-overlap graph; each block
+    #   unfreezes one color for 500 epochs (aligned with the resample
+    #   cadence), fresh SSBroyden per block, residual restricted to the
+    #   active supports (one weight-1 mean per active expert).
+    schwarz:
+      enabled: true
+      epochs_per_block: 500
+      group_mode: colored
+      optimizer: ssbroyden
+      distill:
+        epochs: 5000
+        optimizer_1: adam
+        optimizer_2: ssbroyden
+        optimizer_switch_epoch: 3000
+        lr: 0.001
     initial_train:
       epochs: 45000
       optimizer_1: adam
@@ -391,9 +412,10 @@ base_config:
       lr_decay_steps: 1000
       lr_warmup_steps: 0
     # Fine-tune 5k pure SSBroyden (no Adam stage; optimizer_2 null means
-    # no switch): classic PINN loss on u_theta. N1 proved the fine-tune is
-    # a no-op under the exact-object phase 3 (best at its FIRST epoch), so
-    # 5k is a polish budget, not a repair budget.
+    # no switch): classic PINN loss on u_theta, ALL experts unfrozen -
+    # under the Schwarz schedule this is the natural terminal move (the
+    # final all-active pass that removes block-coordinate suboptimality),
+    # not a repair stage.
     fine_tune:
       epochs: 5000
       optimizer_1: ssbroyden
@@ -406,22 +428,24 @@ base_config:
       lr_warmup_steps: 0
       l2sp_lambda: 0.0
       collar_data_ratio: 0.0
-# Round 4 (2026-07-11): GROUPED exact-object phase-3 loss. Same scheme as
-# N1_clean (composed residual, u0 guides on exclusive-box interior faces,
-# exact IC/BC on the composition) with ONE change: the residual is a sum
-# of per-group means - one mean per expert's solo zone (where
-# u_theta == u_j, i.e. its well-posed local problem) + one collar mean -
-# instead of N1's single global mean. Restores the per-region weighting
-# of the pre-redesign loss (small high-detail zones get ~25-100x per-point
-# weight back). Same pretrained root (rel-L2 3.0e-5), M=8, phase 3 = 35k
-# (5k Adam + 30k SSBroyden), fine-tune = 5k pure SSBroyden (classic PINN
-# on u_theta - N1 showed FT is a no-op under the exact-object phase 3).
-#   N2 - clean: no interface anneal, no collar sampling.
-# Reference points: N1_clean 3.50e-5 (plateau ~19.5k, loss 2e-13); R1
-# (old per-expert loss, had this weighting) 3.17e-5 phase 3 / 2.97e-5 FT;
-# root 3.0e-5; main hard-indicator phase 3 3.4e-6.
+# Round 5 (2026-07-12): SCHWARZ phase 3 (branch AToE-Schwarz), first real
+# test. FBPINN-as-Schwarz template (arXiv:2211.05560): the loss is the
+# CLASSIC global PINN loss of the composition u_theta (composed residual
+# + exact IC/BC, no u0 guide terms at all); locality comes from the
+# training schedule - colored freeze/unfreeze blocks with the frozen
+# neighbors acting as collar boundary data that improves every sweep.
+# Flow per run: distill 5k (3k Adam + 2k SSBroyden, per-expert MSE to
+# the frozen root on its support) -> 80 blocks x 500 SSBroyden epochs
+# (~20 sweeps at 4 colors) -> fine-tune 5k pure SSBroyden all-active.
+# Total 50k epochs per run. Per-region weighting is automatic (one mean
+# per active support); no interface anneal, no collar sampling.
+# S1: allen_cahn (root rel-L2 3.0e-5). S2: burgers1d (pretrained root
+# from roots_checkpoints/burgers_root.pt, same architectures).
+# Reference points (allen_cahn): root 3.0e-5; N1_clean 3.50e-5; N2
+# grouped 35k; R1 3.17e-5/2.97e-5; main hard-indicator phase 3 3.4e-6;
+# target territory ~3e-6 on the SOFT composition.
 experiments:
-- name: N2_grouped_res
+- name: S1_allen_cahn_schwarz
   problem: allen_cahn
   model: AToELeaves
   base_architecture:
@@ -437,6 +461,19 @@ experiments:
   - 20
   - 20
   - 1
-  adaptive_pinn:
-    fine_tune:
-      collar_data_ratio: 0.0
+- name: S2_burgers_schwarz
+  problem: burgers1d
+  model: AToELeaves
+  base_architecture:
+  - 2
+  - 60
+  - 60
+  - 60
+  - 60
+  - 1
+  experts_architecture:
+  - 2
+  - 20
+  - 20
+  - 20
+  - 1
