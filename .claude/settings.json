@@ -4,7 +4,8 @@
       "Read(//c/Users/assaf/Desktop/kdv_01_main_20260607_060715/**)",
       "Bash(Sort-Object Name)",
       "Bash(python -c ' *)",
-      "WebSearch"
+      "WebSearch",
+      "Bash(git -C \"c:/Users/assaf/Desktop/Coding/Msc/Master/AToE\" diff main AToE -- docs/3_method_updated.tex)"
     ]
   }
 }
