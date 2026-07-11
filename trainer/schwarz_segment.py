@@ -271,12 +271,13 @@ def _run_schwarz_phase3(
     )
     ctx.loss_fn = schwarz_loss
 
-    # Phase-level artifacts (epoch-level, no s<i>_c<j> in filenames):
-    # one rolling best_model_phase3.pt across all blocks (recorded, never
-    # restored) and pred_phase3_ep<N> heatmaps at block ends.
+    # Phase-level artifacts (epoch-level, no s<i>_c<j> in filenames): one
+    # rolling best_model_phase3.pt across all blocks (recorded, never
+    # restored) and ONE pred_after_phase3 heatmap rendered from that
+    # checkpoint whenever the phase best improves.
     ctx._phase_best_rel_l2 = float('inf')
     ctx._phase_best_epoch = None
-    ctx._segment_plot_alias = 'phase3'
+    _last_rendered_best_epoch = None
 
     block_summary = []
     res = SegmentResult()
@@ -345,12 +346,18 @@ def _run_schwarz_phase3(
         })
         logger.info(f"[Schwarz] block {b + 1} end: "
                     f"rel_l2={res.final_rel_l2:.6e}")
+
+        # Refresh the single phase-level heatmap when the phase best
+        # improved during this block (rendered from the checkpoint, not
+        # the block-end weights).
+        if ctx._phase_best_epoch != _last_rendered_best_epoch:
+            _render_phase_best_plot(ctx)
+            _last_rendered_best_epoch = ctx._phase_best_epoch
+
         if res.nan_detected or res.oom_stopped:
             logger.error(f"[Schwarz] block {b + 1} aborted "
                          f"({res.stop_reason}) — stopping the schedule")
             break
-
-    ctx._segment_plot_alias = None
 
     # Per-sweep summary table (verify sweep-over-sweep improvement).
     logger.info("[Schwarz] ══ per-block summary ══")
@@ -386,6 +393,54 @@ def _run_schwarz_phase3(
     ctx.train_loader = orig_train_loader
     ctx._schwarz_context = None
     return res
+
+
+def _render_phase_best_plot(ctx) -> None:
+    """Render THE phase-3 heatmap from the phase-best checkpoint.
+
+    Exactly one image per phase: ``pred_after_phase3_best_ep<N>`` where N
+    is the epoch of the current best. Weights come from
+    ``best_model_phase3.pt`` loaded into a frozen deepcopy — the live
+    model (block-end weights) is untouched.
+    """
+    if ctx.problem_cfg.get('spatial_dim', None) != 1:
+        return
+    if ctx.checkpoint_dir is None or ctx._phase_best_epoch is None:
+        return
+    ckpt_path = ctx.checkpoint_dir / 'best_model_phase3.pt'
+    if not ckpt_path.exists():
+        return
+    out_dir = ctx.adaptive_plots_dir or ctx.run_dir
+    if out_dir is None:
+        return
+    try:
+        import copy
+        from utils.dataset_plotting import save_spawn_prediction_plot
+        best_model = copy.deepcopy(ctx.model)
+        ckpt = torch.load(ckpt_path, map_location=ctx.device,
+                          weights_only=False)
+        best_model.load_state_dict(ckpt['model_state_dict'])
+        best_model.eval()
+
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for _old in out_dir.glob("pred_after_phase3_*.png"):
+            _old.unlink(missing_ok=True)
+        save_spawn_prediction_plot(
+            model=best_model,
+            domain_bounds=ctx.domain_bounds,
+            gt_grid=ctx.gt_grid,
+            grid_x=ctx.gt_x,
+            grid_t=ctx.gt_t,
+            output_path=(out_dir / f"pred_after_phase3"
+                                   f"_best_ep{ctx._phase_best_epoch}"
+                                   f"_relL2_{{relL2}}.png"),
+            epoch=ctx._phase_best_epoch,
+            cfg=ctx.cfg,
+        )
+        logger.info(f"[Schwarz] refreshed pred_after_phase3 heatmap "
+                    f"(phase-best weights, epoch {ctx._phase_best_epoch})")
+    except Exception as _e:
+        logger.warning(f"[Schwarz] phase-best heatmap failed: {_e}")
 
 
 def _plot_expert_curves(ctx, loss_fn, regions, tag, n_experts):

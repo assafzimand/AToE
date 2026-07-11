@@ -32,8 +32,10 @@ def _safe_log_scale(ax, values_list):
 # (optimizer switch) and red/blue solid (loss curves).
 _SEGMENT_STYLES = {
     'root':      ('#1f77b4', 'Root start'),
-    'phase3':    ('#8e24aa', 'Local Experts start'),   # vivid purple
-    'fine_tune': ('#e67e22', 'Fine-Tune start'),       # orange
+    'distill':   ('#00838f', 'Distill start'),          # teal
+    'schwarz':   ('#8e24aa', 'Schwarz start'),          # vivid purple
+    'phase3':    ('#8e24aa', 'Local Experts start'),    # vivid purple
+    'fine_tune': ('#e67e22', 'Fine-Tune start'),        # orange
 }
 
 
@@ -42,13 +44,11 @@ def _draw_segment_markers(ax, segment_markers):
 
     Bolder than the optimizer-switch markers (these are the primary phase
     boundaries). ``segment_markers`` is a list of (start_epoch, segment_name)
-    tuples. Epoch <= 1 (start of the first segment) is skipped. Each segment
-    name is labeled once per axis.
+    tuples — the first segment's marker (epoch 1 / root-or-distill start)
+    is drawn too. Each segment name is labeled once per axis.
     """
     labeled = set()
     for epoch, name in segment_markers:
-        if epoch <= 1:
-            continue
         color, label = _SEGMENT_STYLES.get(
             name, ('#7f7f7f', f'{name} start'))
         ax.axvline(x=epoch, color=color, linestyle='--',

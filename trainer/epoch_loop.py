@@ -1206,7 +1206,10 @@ def _train_segment(
     ctx.train_loader = train_loader
     ctx._nan_detected = _nan_detected
 
-    if not _nan_detected:
+    # Schwarz blocks (reconcile_best=False) save no per-segment prediction
+    # plot — the driver renders ONE phase-level image from the phase-best
+    # checkpoint whenever it improves.
+    if not _nan_detected and reconcile_best:
         _save_segment_pred_plot(ctx, segment_name)
     _final_tl = train_loss if train_loss is not None else float('nan')
     _final_rl2 = rel_l2 if rel_l2 is not None else float('nan')
@@ -1327,35 +1330,17 @@ def _save_segment_pred_plot(ctx: TrainingContext, segment_name: str) -> None:
     out_dir = ctx.adaptive_plots_dir or ctx.run_dir
     if out_dir is None:
         return
-    # Schwarz blocks set a plot alias: heatmaps are named by EPOCH under
-    # one phase-level prefix (pred_phase3_ep<N>), one image per block,
-    # block-end weights — the s<i>_c<j> segment name never reaches
-    # filenames. Deletion is same-stem only, so the block history is kept.
-    alias = getattr(ctx, '_segment_plot_alias', None)
-    if alias is not None:
-        kept_epoch = ctx.epoch
-        stem = f"pred_{alias}_ep{kept_epoch}"
-        log_desc = f"pred_{alias} plot (block-end weights, epoch {kept_epoch})"
-    else:
-        # Epoch of the kept (best) weights, from this segment's reconcile
-        # event.
-        kept_epoch = ctx.epoch
-        for ev in reversed(ctx.metrics.get('segment_reconcile_events', [])):
-            if ev.get('segment') == segment_name:
-                kept_epoch = (ev.get('best_epoch')
-                              if ev.get('kept') == 'best' else ev.get('end_epoch'))
-                kept_epoch = kept_epoch if kept_epoch is not None else ctx.epoch
-                break
-        stem = f"pred_after_{segment_name}_best_ep{kept_epoch}"
-        log_desc = (f"pred_after_{segment_name} plot (best weights, "
-                    f"epoch {kept_epoch})")
+    # Epoch of the kept (best) weights, from this segment's reconcile event.
+    kept_epoch = ctx.epoch
+    for ev in reversed(ctx.metrics.get('segment_reconcile_events', [])):
+        if ev.get('segment') == segment_name:
+            kept_epoch = (ev.get('best_epoch')
+                          if ev.get('kept') == 'best' else ev.get('end_epoch'))
+            kept_epoch = kept_epoch if kept_epoch is not None else ctx.epoch
+            break
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
-        # One image per segment (or per block in alias mode): remove only
-        # this stem's previous renders.
-        _del_glob = (f"{stem}_*.png" if alias is not None
-                     else f"pred_after_{segment_name}_*.png")
-        for _old in out_dir.glob(_del_glob):
+        for _old in out_dir.glob(f"pred_after_{segment_name}_*.png"):
             _old.unlink(missing_ok=True)
         save_spawn_prediction_plot(
             model=ctx.model,
@@ -1364,10 +1349,13 @@ def _save_segment_pred_plot(ctx: TrainingContext, segment_name: str) -> None:
             grid_x=ctx.gt_x,
             grid_t=ctx.gt_t,
             # {relL2} placeholder is filled in by the renderer
-            output_path=(out_dir / f"{stem}_relL2_{{relL2}}.png"),
+            output_path=(out_dir / f"pred_after_{segment_name}"
+                                   f"_best_ep{kept_epoch}"
+                                   f"_relL2_{{relL2}}.png"),
             epoch=kept_epoch,
             cfg=ctx.cfg,
         )
-        logger.info(f"  [Segment:{segment_name}] saved {log_desc}")
+        logger.info(f"  [Segment:{segment_name}] saved pred_after_{segment_name} "
+                    f"plot (best weights, epoch {kept_epoch})")
     except Exception as _e:
         logger.info(f"  [Segment:{segment_name}] prediction plot failed: {_e}")
