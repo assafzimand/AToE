@@ -381,25 +381,33 @@ base_config:
     epsilon_node_acceptance: 0.00
     split_icbc:
       enabled: true
-    # Schwarz phase 3 (overrides the split_icbc path when enabled):
+    # Schwarz phase 3 (overrides the split_icbc path when enabled).
+    # NOTE: the TOP-LEVEL optimizer_1/optimizer_2/optimizer_switch_epoch
+    # do NOT apply inside Schwarz phase 3 - the distill and block
+    # optimizer plans below are authoritative (same key convention as
+    # initial_train / fine_tune; the block switch epoch is relative to
+    # each block's start, so optimizer_2+switch would give EVERY block an
+    # Adam warmup - off by default, knob exists if blocks look rough).
     #   distill - every expert individually MSE-fitted to the frozen root
-    #   on its window support (warm start; replaces u0 face guides). 5k =
-    #   3k Adam + 2k SSBroyden so the fit is tight: frozen neighbors ARE
-    #   the collar boundary data of the first sweep.
+    #   on its window support (warm start; replaces u0 face guides).
+    #   Adam-only, long (10k): the fit quality bounds sweep 1, since
+    #   frozen neighbors ARE the collar boundary data.
     #   blocks - greedy coloring of the support-overlap graph; each block
     #   unfreezes one color for 500 epochs (aligned with the resample
-    #   cadence), fresh SSBroyden per block, residual restricted to the
-    #   active supports (one weight-1 mean per active expert).
+    #   cadence), fresh pure SSBroyden per block, residual restricted to
+    #   the active supports (one weight-1 mean per active expert).
     schwarz:
       enabled: true
       epochs_per_block: 500
       group_mode: colored
-      optimizer: ssbroyden
+      optimizer_1: ssbroyden
+      optimizer_2: null
+      optimizer_switch_epoch: 99999
       distill:
-        epochs: 5000
+        epochs: 10000
         optimizer_1: adam
-        optimizer_2: ssbroyden
-        optimizer_switch_epoch: 3000
+        optimizer_2: null
+        optimizer_switch_epoch: 99999
         lr: 0.001
     initial_train:
       epochs: 45000
@@ -434,18 +442,18 @@ base_config:
 # + exact IC/BC, no u0 guide terms at all); locality comes from the
 # training schedule - colored freeze/unfreeze blocks with the frozen
 # neighbors acting as collar boundary data that improves every sweep.
-# Flow per run: distill 5k (3k Adam + 2k SSBroyden, per-expert MSE to
-# the frozen root on its support) -> 80 blocks x 500 SSBroyden epochs
-# (~20 sweeps at 4 colors) -> fine-tune 5k pure SSBroyden all-active.
-# Total 50k epochs per run. Per-region weighting is automatic (one mean
+# Flow per run: distill 10k (Adam-only, per-expert MSE to the frozen
+# root on its support) -> 80 blocks x 500 pure-SSBroyden epochs (~20
+# sweeps at 4 colors) -> fine-tune 5k pure SSBroyden all-active.
+# Total 55k epochs per run. Per-region weighting is automatic (one mean
 # per active support); no interface anneal, no collar sampling.
-# S1: allen_cahn (root rel-L2 3.0e-5). S2: burgers1d (pretrained root
-# from roots_checkpoints/burgers_root.pt, same architectures).
+# S1_allen_cahn: root rel-L2 3.0e-5. S1_burgers: pretrained root from
+# roots_checkpoints/burgers_root.pt (same 2-60x4-1 arch, verified).
 # Reference points (allen_cahn): root 3.0e-5; N1_clean 3.50e-5; N2
 # grouped 35k; R1 3.17e-5/2.97e-5; main hard-indicator phase 3 3.4e-6;
 # target territory ~3e-6 on the SOFT composition.
 experiments:
-- name: S1_allen_cahn_schwarz
+- name: S1_allen_cahn
   problem: allen_cahn
   model: AToELeaves
   base_architecture:
@@ -461,7 +469,7 @@ experiments:
   - 20
   - 20
   - 1
-- name: S2_burgers_schwarz
+- name: S1_burgers
   problem: burgers1d
   model: AToELeaves
   base_architecture:

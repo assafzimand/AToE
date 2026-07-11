@@ -234,9 +234,13 @@ def _run_schwarz_phase3(
     p_block = int(scfg.get('epochs_per_block', 500))
     n_blocks = max(1, epoch_budget // p_block)
     n_sweeps = (n_blocks + n_colors - 1) // n_colors
+    _opt1 = scfg.get('optimizer_1', scfg.get('optimizer', 'ssbroyden'))
+    _opt2 = scfg.get('optimizer_2', None)
+    _opt_desc = (f"{_opt1} -> {_opt2} at block epoch "
+                 f"{scfg.get('optimizer_switch_epoch')}" if _opt2 else _opt1)
     logger.info(f"[Schwarz] schedule: {n_blocks} blocks x {p_block} epochs "
                 f"(~{n_sweeps} sweeps over {n_colors} colors), "
-                f"optimizer={scfg.get('optimizer', 'ssbroyden')}")
+                f"per-block optimizer: {_opt_desc}")
 
     # Composition IC/BC batch: the plain training set's IC/BC rows (exact
     # physics on u_theta, every block, full weight) — same extraction as
@@ -296,10 +300,18 @@ def _run_schwarz_phase3(
             'regions': regions,
         }
 
+        # Block optimizer plan — same convention as initial_train/fine_tune
+        # (optimizer_1 / optimizer_2 / optimizer_switch_epoch), applied PER
+        # BLOCK: the switch epoch is relative to the block start, so e.g.
+        # optimizer_switch_epoch: 100 gives every block a 100-epoch Adam
+        # warmup before SSBroyden. The top-level cfg optimizer keys do NOT
+        # apply inside Schwarz phase 3.
         seg_cfg = dict(cfg)
-        seg_cfg['optimizer_1'] = scfg.get('optimizer', 'ssbroyden')
-        seg_cfg['optimizer_2'] = None
-        seg_cfg['optimizer_switch_epoch'] = 10 ** 9
+        seg_cfg['optimizer_1'] = scfg.get(
+            'optimizer_1', scfg.get('optimizer', 'ssbroyden'))
+        seg_cfg['optimizer_2'] = scfg.get('optimizer_2', None)
+        seg_cfg['optimizer_switch_epoch'] = scfg.get(
+            'optimizer_switch_epoch', 10 ** 9)
         if 'lr' in scfg:
             seg_cfg['lr'] = scfg['lr']
 

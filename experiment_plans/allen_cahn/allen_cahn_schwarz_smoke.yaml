@@ -141,10 +141,14 @@ base_config:
       enabled: true
       epochs_per_block: 2
       group_mode: colored
-      optimizer: ssbroyden
+      optimizer_1: ssbroyden
+      optimizer_2: null
+      optimizer_switch_epoch: 99999
       distill:
         epochs: 2
         optimizer_1: adam
+        optimizer_2: null
+        optimizer_switch_epoch: 99999
         lr: 0.001
     initial_train:
       epochs: 45000          # skipped: pretrained root checkpoint is loaded
