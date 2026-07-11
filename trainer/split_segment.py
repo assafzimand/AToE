@@ -107,8 +107,9 @@ def _run_split_segment(
     frozen = [n for n, p in model.named_parameters()
               if not p.requires_grad]
     logger.info(
-        "[SplitLoss] Composed-residual mode: PDE residual on the blended "
-        "PoU composition (uniform points); u0 guides on each expert's "
+        "[SplitLoss] Grouped composed-residual mode: PDE residual on the "
+        "blended PoU composition as a sum of per-group means (one per "
+        "expert solo zone + one collar mean); u0 guides on each expert's "
         "exclusive-box interior faces only"
     )
     logger.info(
@@ -250,11 +251,12 @@ def _log_subdomain_summary(new_expert_indices, regions, split_data, cfg):
     """Log per-expert point summaries for the subdomain dataset.
 
     Residual rows are one uniform draw over the whole domain, tagged with
-    the leaf whose hard region owns each point (diagnostics only). Guide
-    faces live on each expert's exclusive box; swallowed leaves have none.
-    The summary logs each expert's exclusive box next to its hard region,
-    the owned residual count split into solo (inside the exclusive box)
-    vs collar, and the per-kind face counts.
+    the loss GROUP: the leaf whose exclusive (solo) box contains the
+    point, or -1 for collar points. The grouped residual takes one mean
+    per group at weight 1 each. Guide faces live on each expert's
+    exclusive box; swallowed leaves have none. The summary logs each
+    expert's exclusive box next to its hard region, its solo-group point
+    count, the per-kind face counts, and the collar-group size.
     """
     from adaptive.subdomain_data import (
         _domain_box, KIND_RESIDUAL, exclusive_bounds, is_swallowed,
@@ -270,10 +272,12 @@ def _log_subdomain_summary(new_expert_indices, regions, split_data, cfg):
     sigma_fraction = cfg['adaptive_pinn']['sigma_fraction']
     g_lo, g_hi = _domain_box(pc)
 
-    n_res_total = int((kinds == KIND_RESIDUAL).sum())
-    logger.info(f"[SplitData] composed residual: {n_res_total} uniform "
-                f"points over the whole domain (owner tags are "
-                f"diagnostics only)")
+    rmask_all = (kinds == KIND_RESIDUAL)
+    n_res_total = int(rmask_all.sum())
+    n_collar = int((rmask_all & (expert_ids == -1)).sum())
+    logger.info(f"[SplitData] grouped composed residual: {n_res_total} "
+                f"uniform points; collar group={n_collar} points, solo "
+                f"groups get one weight-1 mean per expert")
 
     for eidx in new_expert_indices:
         emask = (expert_ids == eidx)
@@ -285,23 +289,7 @@ def _log_subdomain_summary(new_expert_indices, regions, split_data, cfg):
         counts = {}
         for k_val, k_name in KIND_NAMES.items():
             counts[k_name] = ((kinds[emask] == k_val).sum().item() if n_total > 0 else 0)
-
-        # Owned residual split: solo (inside the exclusive box, where
-        # u_theta == u_j) vs collar (>= 2 windows active).
-        rmask = emask & (kinds == KIND_RESIDUAL)
-        n_solo = 0
-        if rmask.any() and not swallowed:
-            xr = split_data['x'][rmask]
-            tr = split_data['t'][rmask]
-            in_solo = torch.ones(xr.shape[0], dtype=torch.bool,
-                                 device=xr.device)
-            for d in range(spatial_dim):
-                in_solo &= ((xr[:, d] >= excl_bl[d])
-                            & (xr[:, d] <= excl_bu[d]))
-            in_solo &= ((tr[:, 0] >= excl_bl[spatial_dim])
-                        & (tr[:, 0] <= excl_bu[spatial_dim]))
-            n_solo = int(in_solo.sum())
-        n_collar = counts.get('residual', 0) - n_solo
+        n_solo = counts.get('residual', 0)
 
         _fmt = lambda v: [round(float(x), 6) for x in v]
         logger.info(
@@ -309,11 +297,12 @@ def _log_subdomain_summary(new_expert_indices, regions, split_data, cfg):
             f"hard=[{region.bounds_lower}..{region.bounds_upper}] "
             f"exclusive=[{_fmt(excl_bl)}..{_fmt(excl_bu)}]"
             f"{' SWALLOWED' if swallowed else ''} "
-            f"total={n_total} residual_owned(solo={n_solo}, collar={n_collar}) {counts}"
+            f"total={n_total} residual_solo_group={n_solo} {counts}"
         )
-        if counts.get('residual', 0) == 0:
-            logger.warning(f"[SplitData] expert={eidx} owns 0 residual points "
-                           f"(tiny region vs the uniform draw)")
+        if n_solo == 0 and not swallowed:
+            logger.warning(f"[SplitData] expert={eidx} solo group is EMPTY "
+                           f"this draw (no residual mean of its own until "
+                           f"the next resample)")
         if swallowed:
             logger.info(f"[SplitData] expert={eidx} is swallowed: no guide "
                         f"faces (trained via composed residual only)")

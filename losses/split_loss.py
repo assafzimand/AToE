@@ -3,10 +3,14 @@
 The exact-object scheme — every physics term is evaluated on the blended
 PoU composition u_theta (the reported object):
   - PDE residual of u_theta on ONE uniform collocation set over the whole
-    domain. On each expert's exclusive zone (where only its window is
-    active) this reduces to the expert's own local residual — same value,
-    same gradients — while in the collars the gradients reach every
-    active expert through the window weights.
+    domain, aggregated as a SUM OF PER-GROUP MEANS: one mean per expert's
+    exclusive (solo) zone plus one mean over the collar set. On a solo
+    zone u_theta == u_j, so that group is the expert's well-posed local
+    residual; in the collar group the gradients reach every active expert
+    through the window weights. Each group carries weight 1, so small
+    solo zones (the tree's high-detail regions) keep the per-region
+    up-weighting the pre-redesign per-expert loss had; a plain global
+    mean instead lets them drown (N1_clean run, 2026-07-11).
   - The global loss's exact IC and BC terms, evaluated on the plain
     training set's IC/BC rows through the composed model, at full,
     un-annealed weight.
@@ -22,7 +26,8 @@ Per-expert scaffolding, on the expert's OWN output:
   - Neighbor-to-neighbor continuity on shared interior faces (optional).
 
 Total loss:
-    L = w_res*L_res(u_theta) + w_ic*L_IC(u_theta) + w_bc*L_BC(u_theta)
+    L = w_res*( sum_j L_res(u_theta; solo_j) + L_res(u_theta; collar) )
+        + w_ic*L_IC(u_theta) + w_bc*L_BC(u_theta)
         + sum_j [ s(e)*( w_ic*L_iface_t_j
                          + w_bc*(L_iface_x_j + L_iface_x_deriv_j) )
                   + w_cont*L_cont_j ]
@@ -128,23 +133,28 @@ def build_split_loss(
         all_comps = {}
 
         # ── PDE residual of the COMPOSITION on the uniform collocation set ──
-        # One forward through the blended PoU model; on exclusive zones this
-        # equals the owning expert's local residual (neighbor windows are
-        # identically zero there), in collars the gradients reach every
-        # active expert. Per-owner restricted means are returned detached,
-        # for diagnostics only.
-        residual_global, residual_by_owner = _compute_composed_residual(
-            model, x, t, expert_ids, kinds,
-            pde_res_fn, deriv_fn, pde_params, problem,
-            residual_cache=(
-                residual_cache
-                if split_loss_fn._cache_residuals else None
-            ),
-        )
-        if residual_global is not None:
-            total_loss = total_loss + w_res * residual_global
+        # One forward through the blended PoU model, aggregated as a sum of
+        # per-group means: one mean per expert's solo zone (where
+        # u_theta == u_j — the well-posed local residual) plus one mean over
+        # the collar set. Weight 1 per group keeps the tree's small
+        # high-detail zones from drowning in a global average.
+        residual_term, residual_solo_means, residual_collar = \
+            _compute_composed_residual(
+                model, x, t, expert_ids, kinds,
+                pde_res_fn, deriv_fn, pde_params, problem,
+                residual_cache=(
+                    residual_cache
+                    if split_loss_fn._cache_residuals else None
+                ),
+            )
+        if residual_term is not None:
+            total_loss = total_loss + w_res * residual_term
+        if record_now and residual_collar is not None:
+            global_history.setdefault('residual_collar', []).append(
+                float(residual_collar))
         if return_components:
-            all_comps['residual_global'] = residual_global
+            all_comps['residual_term'] = residual_term
+            all_comps['residual_collar'] = residual_collar
 
         for eidx in unique_experts:
             emask = (expert_ids == eidx)
@@ -154,7 +164,7 @@ def build_split_loss(
                 kinds[emask],
                 w_res, w_ic, w_bc, match_x_derivs,
                 device,
-                residual_diag=residual_by_owner.get(eidx),
+                residual_diag=residual_solo_means.get(eidx),
                 h_x_gt=h_x_gt[emask] if h_x_gt is not None else None,
                 interface_scale=interface_scale,
             )
@@ -234,20 +244,22 @@ def _compute_composed_residual(
 
     One forward through the composed model over all residual points; the
     PDE derivatives (window derivatives included) are computed w.r.t. a
-    single ``(xf, tf)`` leaf pair. The returned global mean is the
-    optimized term; the per-owner restricted means (owner = the leaf
-    whose hard region contains the point, from the ``expert_id`` tag)
-    are DETACHED diagnostics for the per-expert curves.
+    single ``(xf, tf)`` leaf pair. The optimized term is a SUM OF
+    PER-GROUP MEANS over the ``expert_id`` grouping tag: one mean per
+    expert's solo zone (tag = expert index; there u_theta == u_j) plus
+    one mean over the collar set (tag = -1). Each group carries weight 1.
 
     Returns:
-        (residual_global, residual_by_owner) where residual_global is the
-        mean r² tensor (None when there are no residual rows) and
-        residual_by_owner maps expert_idx -> detached mean r² over its
-        owned points.
+        (residual_term, solo_means, collar_mean) where residual_term is
+        the optimized sum-of-means tensor (None when there are no
+        residual rows), solo_means maps expert_idx -> DETACHED mean r²
+        over its solo points (per-expert curve diagnostics), and
+        collar_mean is the detached collar-group mean (None if no collar
+        rows).
     """
     rmask = (kinds == KIND_RESIDUAL)
     if rmask.sum() == 0:
-        return None, {}
+        return None, {}, None
 
     xf = x[rmask].clone().detach().requires_grad_(True)
     tf = t[rmask].clone().detach().requires_grad_(True)
@@ -276,17 +288,19 @@ def _compute_composed_residual(
             r2.detach().cpu(),
         ))
 
-    residual_global = r2.mean()
+    groups = expert_ids[rmask]
+    residual_term = None
+    solo_means = {}
+    collar_mean = None
+    for gidx in groups.unique().tolist():
+        gmean = r2[groups == gidx].mean()
+        residual_term = gmean if residual_term is None else residual_term + gmean
+        if gidx >= 0:
+            solo_means[int(gidx)] = gmean.detach()
+        else:
+            collar_mean = gmean.detach()
 
-    residual_by_owner = {}
-    r2_det = r2.detach()
-    owners = expert_ids[rmask]
-    for eidx in owners.unique().tolist():
-        if eidx < 0:
-            continue
-        residual_by_owner[int(eidx)] = r2_det[owners == eidx].mean()
-
-    return residual_global, residual_by_owner
+    return residual_term, solo_means, collar_mean
 
 
 def _compute_expert_loss(
@@ -312,11 +326,11 @@ def _compute_expert_loss(
     on the composition, at full weight, outside this function).
 
     ``residual_diag`` is the DETACHED composed-residual mean over this
-    expert's owned points — recorded in ``comps['residual']`` and folded
-    into ``comps['total']`` for the per-expert curves, but never added to
-    the optimized loss here (the residual enters once, globally, through
-    the composition). Only ``comps['guides_scaled']`` carries gradient
-    out of this function.
+    expert's SOLO-zone points (its group mean in the grouped residual) —
+    recorded in ``comps['residual']`` and folded into ``comps['total']``
+    for the per-expert curves, but never added to the optimized loss here
+    (the residual enters through the grouped composition term). Only
+    ``comps['guides_scaled']`` carries gradient out of this function.
     """
     z = torch.tensor(0.0, device=device)
     comps = {

@@ -5,8 +5,10 @@ Builds a combined training dataset of tagged points for the split loss:
 * RESIDUAL rows — one uniform draw over the WHOLE domain, fed to the PDE
   residual of the blended PoU composition u_theta (the reported object).
   Points are not duplicated or filtered per expert; the ``expert_id``
-  column tags the unique leaf whose HARD region owns each point, used
-  only for per-expert diagnostics, never for loss routing.
+  column is the loss GROUPING tag (solo owner via exclusive-box
+  membership, or -1 for collar points). The residual term is a sum of
+  per-group means — each expert's solo zone and the collar carry weight
+  1 each, restoring the per-region weighting of the pre-redesign loss.
 * INTERFACE rows — u0-guide faces per expert, placed on the boundary of
   its EXCLUSIVE zone Omega_hat_j (hard region shrunk by the neighboring
   windows' incoming collars — the set where u_theta == u_j exactly), so
@@ -159,10 +161,15 @@ def sample_subdomain_residuals(
 
     One uniform draw over the WHOLE domain — no per-expert filtering or
     duplication; the split loss evaluates the PDE residual of the blended
-    PoU composition on these points. The ``expert_id`` column tags the
-    unique leaf whose HARD region contains each point (leaves tile the
-    domain), used only for per-expert diagnostics. This is the only part
-    of the split dataset that changes on resample.
+    PoU composition on these points. The ``expert_id`` column is the loss
+    GROUPING tag: the leaf whose EXCLUSIVE (solo) box contains the point
+    (there u_theta == u_j, so the point belongs to that expert's solo
+    residual mean), or -1 for collar points (>= 2 windows active), which
+    form the composed collar mean. The exclusive boxes are the
+    conservative per-face-shrunk boxes of :func:`exclusive_bounds`, so a
+    thin margin of truly-solo points may land in the collar group — safe,
+    just grouped differently. This is the only part of the split dataset
+    that changes on resample.
     """
     torch.manual_seed(seed)
 
@@ -173,6 +180,8 @@ def sample_subdomain_residuals(
     t_min_global, t_max_global = pc['temporal_domain']
     output_dim = pc['output_dim']
     n_res_total = cfg.get('sampling', {}).get('n_residual_train', 10000)
+    sigma_fraction = cfg['adaptive_pinn']['sigma_fraction']
+    g_lo, g_hi = _domain_box(pc)
 
     x_g = torch.zeros(n_res_total, spatial_dim, device=device)
     t_g = torch.zeros(n_res_total, 1, device=device)
@@ -182,17 +191,19 @@ def sample_subdomain_residuals(
     t_g[:, 0] = (torch.rand(n_res_total, device=device)
                  * (t_max_global - t_min_global) + t_min_global)
 
-    # Diagnostic owner tag: the leaf whose hard region contains the point.
-    # First match wins on shared faces (measure-zero ties).
+    # Solo-owner tag (exclusive boxes are disjoint; swallowed leaves own
+    # nothing and their territory stays in the collar group).
     owner = torch.full((n_res_total,), -1, dtype=torch.long, device=device)
     for eidx in new_expert_indices:
-        region = regions[eidx]
+        excl_lo, excl_hi = exclusive_bounds(
+            eidx, new_expert_indices, regions, sigma_fraction, g_lo, g_hi)
+        if is_swallowed(excl_lo, excl_hi):
+            continue
         mask = (owner == -1)
         for d in range(spatial_dim):
-            mask &= ((x_g[:, d] >= region.bounds_lower[d])
-                     & (x_g[:, d] <= region.bounds_upper[d]))
-        mask &= ((t_g[:, 0] >= region.bounds_lower[spatial_dim])
-                 & (t_g[:, 0] <= region.bounds_upper[spatial_dim]))
+            mask &= ((x_g[:, d] >= excl_lo[d]) & (x_g[:, d] <= excl_hi[d]))
+        mask &= ((t_g[:, 0] >= excl_lo[spatial_dim])
+                 & (t_g[:, 0] <= excl_hi[spatial_dim]))
         owner[mask] = eidx
 
     return {

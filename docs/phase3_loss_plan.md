@@ -16,42 +16,70 @@
 - **Swallowed leaf**: `Omega_hat_j` is empty (neighbor collars cover all of `Omega_j`).
   Must be detected and handled, not crash.
 
-## Loss
+## Phase-3 loss (FINAL form — grouped exact-object)
 
 ```
-L =   lambda_r  * L_res( u_theta ; Omega )                    (1) global PDE residual, composition
+L_phase3 =
+      lambda_r  * ( SUM_j L_res( u_theta ; Omega_hat_j )      (1) solo-zone residual means
+                  +       L_res( u_theta ; C ) )                  + one collar mean
     + lambda_ic * L_ic ( u_theta )                            (2) exact IC on composition
     + lambda_bc * L_bc ( u_theta )                            (3) exact BC on composition
-    + SUM_j ( lambda_ic * L_Gt_j                              (4) u0 guides on the interior
-            + lambda_bc * ( L_Gx_j + L_Gx'_j ) )                  faces of Omega_hat_j
+    + SUM_j s(e) * ( lambda_ic * L_Gt_j                       (4) u0 guides on the interior
+                   + lambda_bc * ( L_Gx_j + L_Gx'_j ) )           faces of Omega_hat_j
                                                                   (skipped if Omega_hat_j empty)
 ```
 
-- `L_res(v ; S)` = mean squared PDE residual of network `v` over point set `S`.
+- `L_res(v ; S)` = mean squared PDE residual of network `v` over the points in set `S`.
 - `L_Gt_j`  = MSE of `u_j - u0` on the lower-t face of `Omega_hat_j`.
 - `L_Gx_j`  = MSE of `u_j - u0` on the two x-faces of `Omega_hat_j`.
 - `L_Gx'_j` = MSE of `d/dx u_j - d/dx u0` on the x-faces — only for the periodic set
   (allen_cahn, kdv, ks, schrodinger), i.e. the existing D3 rule, unchanged.
+- `s(e)` = optional linear interface anneal (D7), default off (`s == 1`).
 
-So the method is: **the standard global PINN loss on the composition, plus u0 interface
-scaffolding per expert on its exclusive zone's interior faces.**
+Every physics term is evaluated on `u_theta`, the reported object. On `Omega_hat_j`
+the neighboring windows are identically zero (compact support), so
+`L_res(u_theta; Omega_hat_j)` IS the expert's well-posed local residual — same value,
+same gradients as evaluating `u_j` alone.
 
-Why the single global residual term is equivalent to the split
-"per-expert on exclusive zones + composed on collars" version: on `Omega_hat_j` the
-neighboring windows are identically zero (compact support), so the value and all
-derivatives of `u_theta` there involve only `u_j` — same loss value, same gradients.
+**Why a sum of per-group means and not one global mean** (N1_clean, 2026-07-11):
+with a single global mean the loss converged to 2e-13 while rel-L2 froze at 3.50e-5 —
+worse than the root. Each point carried weight 1/10000, so the tree's small
+high-detail zones (the sharp features it was built to isolate) contributed ~1% of the
+loss while showing the LARGEST per-zone residuals all run long. One weight-1 mean per
+group restores the per-region weighting the pre-redesign per-expert loss had
+(per-point weight `1/n_group`, i.e. ~25-100x more for the small zones).
+
+Grouping tag = the `expert_id` column of the residual rows: solo owner via
+exclusive-box membership, `-1` for collar points. Swallowed leaves own no solo group.
+An expert whose solo group happens to be empty on a draw simply has no mean until the
+next resample (logged as a warning).
+
+## Fine-tune loss
+
+Classic PINN on the composition — nothing else:
+
+```
+L_ft =  lambda_r  * L_res( u_theta ; Omega )                  uniform points, global mean
+      + lambda_ic * L_ic ( u_theta )
+      + lambda_bc * L_bc ( u_theta )
+```
+
+No guides, no grouping, no collar sampling; pure SSBroyden (5k), leaf experts only.
+Under the exact-object phase 3 this stage is a polish: N1 showed its best epoch was
+its FIRST — phase 3 already leaves the composition at the loss's minimum.
 
 Implementation notes:
 - Keep the forward pass masking experts by window support, so the composed residual on
-  10k points does not evaluate every expert on every point (cost then equals the split version).
-- Per-expert diagnostics (`[SplitTerms]`-style) can be kept by logging the residual
-  restricted to each `Omega_hat_j`.
+  10k points does not evaluate every expert on every point.
+- Per-expert diagnostics (`[SplitTerms]`-style): each expert's recorded residual is
+  its solo-group mean; the collar mean is logged on the composition line.
 
 ## What participates where
 
 | Set | Term | Network evaluated | Target / data |
 |---|---|---|---|
-| interior of `Omega` (uniform points) | PDE residual | `u_theta` (on `Omega_hat_j` this reduces to `u_j` alone; in collars gradients reach all active experts) | — |
+| `Omega_hat_j` (solo points, one weight-1 mean per expert) | PDE residual | `u_theta` == `u_j` there | — |
+| `C` (collar points, one weight-1 mean) | PDE residual | `u_theta` (gradients reach all active experts) | — |
 | interior faces of `Omega_hat_j` (not on `t=0` / physical boundary) | guide | `u_j` | frozen `u0`: values on lower-t face; values + x-derivative on x-faces for periodic problems |
 | `t=0` | IC | `u_theta` | exact IC, 256 rows, unchanged |
 | spatial boundary | BC | `u_theta` | exact BC, 256 rows, unchanged |
@@ -75,8 +103,8 @@ Implementation notes:
   residual (1), FBPINN-style. Log which leaves this applies to and monitor their
   training curves; a fading guide (D7 with w=1) is the deferred fallback.
 - **D7 anneal** on the guide terms (4): keep as an optional knob, default off (w=0).
-- **Sampling**: 10k residual points uniform over `Omega`, fed directly to the composed
-  residual — no per-expert filtering/allocation at all; redrawn every 500 epochs as now.
+- **Sampling**: 10k residual points uniform over `Omega`, fed to the grouped composed
+  residual — no per-expert filtering/duplication; redrawn every 500 epochs as now.
   Face guides sampled as now (256 per face), on the `Omega_hat_j` faces.
   (Optional-later knob: densify collar points D6-style in phase 3 if collars look
   under-resolved; not part of this change.)
@@ -86,8 +114,8 @@ Implementation notes:
 - Per-leaf input normalization on `Omega_tilde_j`.
 - Soft-composition eval / best-checkpoint selection.
 - Root frozen during phase 3.
-- Fine-tune stage (pure SSBroyden, D6 optional) — expected to become a short polish.
-- Phase-3 budget / optimizer plan (5k Adam + SSBroyden).
+- Fine-tune: 5k pure SSBroyden on the classic composed PINN loss (see above).
+- Phase-3 budget / optimizer plan: 35k = 5k Adam + 30k SSBroyden.
 
 ## Success criteria (allen_cahn, M=8, same pretrained root)
 

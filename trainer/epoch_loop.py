@@ -858,12 +858,15 @@ def _train_segment(
                         f"  [SplitTerms] expert={_eidx} {_s}"
                     )
                 # Composition IC/BC terms (exact physics on the blended PoU)
+                # + the collar group's residual mean (the >=2-window set).
                 _gh = getattr(loss_fn, '_global_history', None)
                 if _gh and _gh.get('ic_comp'):
+                    _collar = (f" residual_collar={_gh['residual_collar'][-1]:.6e}"
+                               if _gh.get('residual_collar') else "")
                     logger.info(
                         f"  [SplitTerms] composition "
                         f"ic={_gh['ic_comp'][-1]:.6e} "
-                        f"bc={_gh['bc_comp'][-1]:.6e}"
+                        f"bc={_gh['bc_comp'][-1]:.6e}{_collar}"
                     )
 
         # End epoch timing (handles printing based on print_every)
