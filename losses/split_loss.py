@@ -1,24 +1,31 @@
-"""Per-expert split loss with u0-guided interfaces and composition IC/BC.
+"""Split loss: composed PDE residual + per-expert u0 face guides.
 
-Each leaf expert is trained on its OWN output (no PoU inside the
-per-expert terms), with:
-  - PDE residual inside its inflated training box (region + collar)
-  - u0-guide matching on every outer face of that box (value on the
-    lower-t face; value + d/dx on x-faces for problems whose global BC
-    pairs u and u_x), scaled by the annealable interface weight
-  - Neighbor-to-neighbor continuity on shared interior faces (optional)
+The exact-object scheme — every physics term is evaluated on the blended
+PoU composition u_theta (the reported object):
+  - PDE residual of u_theta on ONE uniform collocation set over the whole
+    domain. On each expert's exclusive zone (where only its window is
+    active) this reduces to the expert's own local residual — same value,
+    same gradients — while in the collars the gradients reach every
+    active expert through the window weights.
+  - The global loss's exact IC and BC terms, evaluated on the plain
+    training set's IC/BC rows through the composed model, at full,
+    un-annealed weight.
 
-The EXACT physics constraints are enforced once, on the blended PoU
-composition u_theta (the reported object): the global loss's IC and BC
-terms are evaluated on the plain training set's IC/BC rows through the
-composed model, at full, un-annealed weight.
+Per-expert scaffolding, on the expert's OWN output:
+  - u0-guide matching on the interior faces of its EXCLUSIVE box
+    Omega_hat (value on the lower-t face; value + d/dx on x-faces for
+    problems whose global BC pairs u and u_x), scaled by the annealable
+    interface weight. Faces on t_min / the physical boundary carry no
+    guides (skipped at data build), and swallowed leaves (empty exclusive
+    box) have no guide rows at all — they train purely through the
+    composed residual, FBPINN-style.
+  - Neighbor-to-neighbor continuity on shared interior faces (optional).
 
 Total loss:
-    L = sum_j [ w_res*L_res_j
-                + s(e)*( w_ic*L_iface_t_j
+    L = w_res*L_res(u_theta) + w_ic*L_IC(u_theta) + w_bc*L_BC(u_theta)
+        + sum_j [ s(e)*( w_ic*L_iface_t_j
                          + w_bc*(L_iface_x_j + L_iface_x_deriv_j) )
-                + w_cont*L_cont_j ]
-        + w_ic*L_IC(u_theta) + w_bc*L_BC(u_theta)
+                  + w_cont*L_cont_j ]
 with s(e) the linear interface anneal (interface_decrease_weight).
 """
 
@@ -116,15 +123,17 @@ def build_split_loss(
         if record_now:
             split_loss_fn._record_next = False
 
-        unique_experts = expert_ids.unique().tolist()
+        unique_experts = [e for e in expert_ids.unique().tolist() if e >= 0]
         total_loss = torch.tensor(0.0, device=device)
         all_comps = {}
 
-        # ── Residual: all experts share ONE autograd graph ──
-        # Each expert's points go through its own network, but derivatives are
-        # taken w.r.t. a single (xf, tf) leaf pair, so the (expensive, 2nd-4th
-        # order) autograd calls run once instead of once per expert.
-        residual_losses = _compute_all_residual_losses(
+        # ── PDE residual of the COMPOSITION on the uniform collocation set ──
+        # One forward through the blended PoU model; on exclusive zones this
+        # equals the owning expert's local residual (neighbor windows are
+        # identically zero there), in collars the gradients reach every
+        # active expert. Per-owner restricted means are returned detached,
+        # for diagnostics only.
+        residual_global, residual_by_owner = _compute_composed_residual(
             model, x, t, expert_ids, kinds,
             pde_res_fn, deriv_fn, pde_params, problem,
             residual_cache=(
@@ -132,6 +141,10 @@ def build_split_loss(
                 if split_loss_fn._cache_residuals else None
             ),
         )
+        if residual_global is not None:
+            total_loss = total_loss + w_res * residual_global
+        if return_components:
+            all_comps['residual_global'] = residual_global
 
         for eidx in unique_experts:
             emask = (expert_ids == eidx)
@@ -141,11 +154,13 @@ def build_split_loss(
                 kinds[emask],
                 w_res, w_ic, w_bc, match_x_derivs,
                 device,
-                residual_loss=residual_losses.get(eidx),
+                residual_diag=residual_by_owner.get(eidx),
                 h_x_gt=h_x_gt[emask] if h_x_gt is not None else None,
                 interface_scale=interface_scale,
             )
-            total_loss = total_loss + comps['total']
+            # Only the guide terms enter the optimized loss per expert; the
+            # residual entered once above, through the composition.
+            total_loss = total_loss + comps['guides_scaled']
             if record_now:
                 _record(per_expert_history, eidx, comps)
             if return_components:
@@ -210,49 +225,34 @@ def build_split_loss(
     return split_loss_fn
 
 
-def _compute_all_residual_losses(
+def _compute_composed_residual(
     model, x, t, expert_ids, kinds,
     pde_res_fn, deriv_fn, pde_params, problem,
     residual_cache=None,
 ):
-    """Per-expert residual losses computed in a single autograd graph.
+    """PDE residual of the blended PoU composition on the residual rows.
 
-    All experts' residual points are stacked (grouped by expert) onto one
-    ``(xf, tf)`` leaf pair; each block is forwarded through its own expert
-    network, and the PDE derivatives are computed once over the concatenated
-    output. The per-expert mean of r² over its own points is unchanged
-    relative to computing each expert separately.
+    One forward through the composed model over all residual points; the
+    PDE derivatives (window derivatives included) are computed w.r.t. a
+    single ``(xf, tf)`` leaf pair. The returned global mean is the
+    optimized term; the per-owner restricted means (owner = the leaf
+    whose hard region contains the point, from the ``expert_id`` tag)
+    are DETACHED diagnostics for the per-expert curves.
 
     Returns:
-        Dict mapping expert_idx -> residual loss tensor (mean r² in region).
+        (residual_global, residual_by_owner) where residual_global is the
+        mean r² tensor (None when there are no residual rows) and
+        residual_by_owner maps expert_idx -> detached mean r² over its
+        owned points.
     """
     rmask = (kinds == KIND_RESIDUAL)
     if rmask.sum() == 0:
-        return {}
+        return None, {}
 
-    x_r = x[rmask]
-    t_r = t[rmask]
-    eid_r = expert_ids[rmask]
-
-    # Group points into contiguous per-expert blocks
-    order = torch.argsort(eid_r, stable=True)
-    x_r = x_r[order]
-    t_r = t_r[order]
-    eid_r = eid_r[order]
-
-    xf = x_r.clone().detach().requires_grad_(True)
-    tf = t_r.clone().detach().requires_grad_(True)
+    xf = x[rmask].clone().detach().requires_grad_(True)
+    tf = t[rmask].clone().detach().requires_grad_(True)
     xt = torch.cat([xf, tf], dim=1)
-
-    u_parts = []
-    bounds = []  # (expert_idx, start, end) into the stacked tensors
-    start = 0
-    for eidx in eid_r.unique(sorted=True).tolist():
-        n = int((eid_r == eidx).sum().item())
-        u_parts.append(model.forward_single_expert(int(eidx), xt[start:start + n]))
-        bounds.append((int(eidx), start, start + n))
-        start += n
-    u_all = torch.cat(u_parts, dim=0)
+    u_all = model(xt)
 
     if problem == 'schrodinger':
         # Complex field h = u + iv: deriv_fn(u, v, x, t) -> complex derivatives,
@@ -276,19 +276,31 @@ def _compute_all_residual_losses(
             r2.detach().cpu(),
         ))
 
-    return {eidx: r2[s:e].mean() for eidx, s, e in bounds}
+    residual_global = r2.mean()
+
+    residual_by_owner = {}
+    r2_det = r2.detach()
+    owners = expert_ids[rmask]
+    for eidx in owners.unique().tolist():
+        if eidx < 0:
+            continue
+        residual_by_owner[int(eidx)] = r2_det[owners == eidx].mean()
+
+    return residual_global, residual_by_owner
 
 
 def _compute_expert_loss(
     model, expert_idx, x, t, h_gt, kinds,
     w_res, w_ic, w_bc, match_x_derivs, device,
-    residual_loss=None,
+    residual_diag=None,
     h_x_gt=None,
     interface_scale=1.0,
 ):
-    """Per-expert local loss (no PoU). Residual is supplied precomputed.
+    """Per-expert u0-guide terms, on the expert's own output (no PoU).
 
-    Every face of the expert's training box is a u0 guide:
+    The guide faces sit on the interior boundary of the expert's
+    exclusive box (data build skips t_min / physical-boundary faces and
+    swallowed leaves entirely):
       * ``interface_t`` — lower-t face, value matching, one plain forward;
       * ``interface_x`` — x-faces, value matching, plus d(u_j)/dx matched
         to the minted d(u_0)/dx targets (``interface_x_deriv``) when the
@@ -298,10 +310,17 @@ def _compute_expert_loss(
 
     ``interface_scale`` multiplies ALL guide terms (the exact IC/BC live
     on the composition, at full weight, outside this function).
+
+    ``residual_diag`` is the DETACHED composed-residual mean over this
+    expert's owned points — recorded in ``comps['residual']`` and folded
+    into ``comps['total']`` for the per-expert curves, but never added to
+    the optimized loss here (the residual enters once, globally, through
+    the composition). Only ``comps['guides_scaled']`` carries gradient
+    out of this function.
     """
     z = torch.tensor(0.0, device=device)
     comps = {
-        'residual': residual_loss if residual_loss is not None else z.clone(),
+        'residual': residual_diag if residual_diag is not None else z.clone(),
         'interface_t': z.clone(),
         'interface_x': z.clone(),
         'interface_x_deriv': z.clone(),
@@ -350,13 +369,12 @@ def _compute_expert_loss(
             # mean-over-all-elements convention).
             comps['interface_x_deriv'] = d_loss / n_out
 
-    comps['total'] = (
-        w_res * comps['residual']
-        + interface_scale * (
-            w_ic * comps['interface_t']
-            + w_bc * (comps['interface_x'] + comps['interface_x_deriv'])
-        )
+    comps['guides_scaled'] = interface_scale * (
+        w_ic * comps['interface_t']
+        + w_bc * (comps['interface_x'] + comps['interface_x_deriv'])
     )
+    # Recording-only local total (residual part is detached diagnostics).
+    comps['total'] = w_res * comps['residual'] + comps['guides_scaled']
     return comps
 
 

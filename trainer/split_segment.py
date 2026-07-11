@@ -107,8 +107,9 @@ def _run_split_segment(
     frozen = [n for n, p in model.named_parameters()
               if not p.requires_grad]
     logger.info(
-        f"[SplitLoss] NO-PoU mode: each expert trained "
-        f"on its local output only"
+        "[SplitLoss] Composed-residual mode: PDE residual on the blended "
+        "PoU composition (uniform points); u0 guides on each expert's "
+        "exclusive-box interior faces only"
     )
     logger.info(
         f"[SplitLoss] trainable params: {len(trainable)}, "
@@ -248,12 +249,16 @@ def _run_split_segment(
 def _log_subdomain_summary(new_expert_indices, regions, split_data, cfg):
     """Log per-expert point summaries for the subdomain dataset.
 
-    Includes the D2 verifiability info: each expert's inflated training box
-    next to its hard region, and how many of its residual points landed in
-    the hard box vs the collar.
+    Residual rows are one uniform draw over the whole domain, tagged with
+    the leaf whose hard region owns each point (diagnostics only). Guide
+    faces live on each expert's exclusive box; swallowed leaves have none.
+    The summary logs each expert's exclusive box next to its hard region,
+    the owned residual count split into solo (inside the exclusive box)
+    vs collar, and the per-kind face counts.
     """
-    from adaptive.indicators import inflated_bounds
-    from adaptive.subdomain_data import _domain_box, KIND_RESIDUAL
+    from adaptive.subdomain_data import (
+        _domain_box, KIND_RESIDUAL, exclusive_bounds, is_swallowed,
+    )
 
     expert_ids = split_data['expert_id']
     kinds = split_data['kind']
@@ -265,44 +270,61 @@ def _log_subdomain_summary(new_expert_indices, regions, split_data, cfg):
     sigma_fraction = cfg['adaptive_pinn']['sigma_fraction']
     g_lo, g_hi = _domain_box(pc)
 
+    n_res_total = int((kinds == KIND_RESIDUAL).sum())
+    logger.info(f"[SplitData] composed residual: {n_res_total} uniform "
+                f"points over the whole domain (owner tags are "
+                f"diagnostics only)")
+
     for eidx in new_expert_indices:
         emask = (expert_ids == eidx)
         n_total = emask.sum().item()
         region = regions[eidx]
-        infl_bl, infl_bu = inflated_bounds(region, sigma_fraction, g_lo, g_hi)
+        excl_bl, excl_bu = exclusive_bounds(
+            eidx, new_expert_indices, regions, sigma_fraction, g_lo, g_hi)
+        swallowed = is_swallowed(excl_bl, excl_bu)
         counts = {}
         for k_val, k_name in KIND_NAMES.items():
             counts[k_name] = ((kinds[emask] == k_val).sum().item() if n_total > 0 else 0)
 
-        # Residual split: inside the hard region vs in the collar (D2)
+        # Owned residual split: solo (inside the exclusive box, where
+        # u_theta == u_j) vs collar (>= 2 windows active).
         rmask = emask & (kinds == KIND_RESIDUAL)
-        n_hard = 0
-        if rmask.any():
+        n_solo = 0
+        if rmask.any() and not swallowed:
             xr = split_data['x'][rmask]
             tr = split_data['t'][rmask]
-            in_hard = torch.ones(xr.shape[0], dtype=torch.bool,
+            in_solo = torch.ones(xr.shape[0], dtype=torch.bool,
                                  device=xr.device)
             for d in range(spatial_dim):
-                in_hard &= ((xr[:, d] >= region.bounds_lower[d])
-                            & (xr[:, d] <= region.bounds_upper[d]))
-            in_hard &= ((tr[:, 0] >= region.bounds_lower[spatial_dim])
-                        & (tr[:, 0] <= region.bounds_upper[spatial_dim]))
-            n_hard = int(in_hard.sum())
-        n_collar = counts.get('residual', 0) - n_hard
+                in_solo &= ((xr[:, d] >= excl_bl[d])
+                            & (xr[:, d] <= excl_bu[d]))
+            in_solo &= ((tr[:, 0] >= excl_bl[spatial_dim])
+                        & (tr[:, 0] <= excl_bu[spatial_dim]))
+            n_solo = int(in_solo.sum())
+        n_collar = counts.get('residual', 0) - n_solo
 
-        _fmt = lambda v: [round(x, 6) for x in v]
+        _fmt = lambda v: [round(float(x), 6) for x in v]
         logger.info(
             f"[SplitData] expert={eidx} depth={region.depth} parent={region.parent_idx} "
             f"hard=[{region.bounds_lower}..{region.bounds_upper}] "
-            f"train_box=[{_fmt(infl_bl)}..{_fmt(infl_bu)}] "
-            f"total={n_total} residual(hard={n_hard}, collar={n_collar}) {counts}"
+            f"exclusive=[{_fmt(excl_bl)}..{_fmt(excl_bu)}]"
+            f"{' SWALLOWED' if swallowed else ''} "
+            f"total={n_total} residual_owned(solo={n_solo}, collar={n_collar}) {counts}"
         )
         if counts.get('residual', 0) == 0:
-            logger.warning(f"[SplitData] expert={eidx} has 0 residual points!")
-        if counts.get('interface_t', 0) == 0:
-            logger.warning(f"[SplitData] expert={eidx} has 0 t-interface points!")
-        if counts.get('interface_x', 0) == 0:
-            logger.warning(f"[SplitData] expert={eidx} has 0 x-interface points!")
+            logger.warning(f"[SplitData] expert={eidx} owns 0 residual points "
+                           f"(tiny region vs the uniform draw)")
+        if swallowed:
+            logger.info(f"[SplitData] expert={eidx} is swallowed: no guide "
+                        f"faces (trained via composed residual only)")
+        else:
+            if counts.get('interface_t', 0) == 0:
+                logger.info(f"[SplitData] expert={eidx} has 0 t-interface "
+                            f"points (face on t_min: exact IC covers it)")
+            if counts.get('interface_x', 0) == 0:
+                logger.info(f"[SplitData] expert={eidx} has 0 x-interface "
+                            f"points (faces on the physical boundary: "
+                            f"exact BC covers them)")
     
     # Log continuity pair summary
     if cont_neighbors is not None:
