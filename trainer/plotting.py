@@ -111,7 +111,10 @@ def plot_training_curves(
     def _finish(ax, ylabel, log_series):
         ax.set_xlabel('Epoch', fontsize=14)
         is_log = _safe_log_scale(ax, log_series) if log_series else False
-        ax.set_ylabel(f'{ylabel}{" (log)" if is_log else ""}', fontsize=14)
+        # "(log scale)" = logarithmic AXIS; the plotted values are the raw
+        # metric (identical to the reported numbers), never log-transformed.
+        ax.set_ylabel(f'{ylabel}{" (log scale)" if is_log else ""}',
+                      fontsize=14)
         ax.legend(fontsize=12)
         ax.grid(True, alpha=0.3)
         ax.tick_params(labelsize=12)
@@ -306,7 +309,7 @@ def plot_per_expert_curves(
             if np.isfinite(v_masked).any():
                 vals_for_log.append(v_masked[np.isfinite(v_masked)])
         ax.set_xlabel('Epoch', fontsize=11)
-        ax.set_ylabel('Loss (log)', fontsize=11)
+        ax.set_ylabel('Loss (log scale)', fontsize=11)
         ax.grid(True, alpha=0.3)
         if vals_for_log:
             ax.set_yscale('log')
