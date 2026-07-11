@@ -379,9 +379,14 @@ base_config:
     enable_gradient_diagnostics: false
     M_experts_num: 8
     epsilon_node_acceptance: 0.00
+    # Non-Schwarz fallback phase-3 path (grouped exact-object loss) - OFF:
+    # schwarz.enabled takes precedence anyway, but keep this false so the
+    # plan reads as what actually runs.
     split_icbc:
-      enabled: true
-    # Schwarz phase 3 (overrides the split_icbc path when enabled).
+      enabled: false
+    # Schwarz phase 3. The BLOCK BUDGET is the top-level `epochs` key
+    # (40000 -> 80 blocks x epochs_per_block=500); distill and fine_tune
+    # have their own epochs. Night total: 10k + 40k + 5k = 55k per run.
     # NOTE: the TOP-LEVEL optimizer_1/optimizer_2/optimizer_switch_epoch
     # do NOT apply inside Schwarz phase 3 - the distill and block
     # optimizer plans below are authoritative (same key convention as
