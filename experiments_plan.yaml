@@ -195,7 +195,7 @@ base_config:
       residual: 1.0
       ic: 1.0
       bc: 1.0
-      continuity: 0.0
+      continuity: 1.0
     causal_training:
       enabled: false
       num_chunks: 32
