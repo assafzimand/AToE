@@ -131,7 +131,9 @@ class TrainingContext:
     _nan_detected: bool = False
     oom_stopped: bool = False
 
-    # ── Split-loss context (set during _run_split_segment, else None) ──────
+    # ── Owner-imitator context (set during _run_split_segment, else None):
+    # holds the refresh state (lambda schedule, static rows, imit order) the
+    # epoch loop's refresh arm reads at every resample boundary. ──────────
     _split_context: Any = None
 
     # ── Closure handles (created in the loop, consumed by finalize) ──────────

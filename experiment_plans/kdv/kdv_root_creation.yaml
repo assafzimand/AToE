@@ -307,7 +307,7 @@ base_config:
     spawn_retries_before_stop: false
     spawn_retry_after: 10
     reinitialize_base_after_spawn: false
-    split_icbc: { enabled: false }
+    owner_imitator: { enabled: false }
     additive: false
 
     # ── Phase 1: the only phase that runs (M=0 -> never reaches Phase 3) ────

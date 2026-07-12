@@ -1,44 +1,27 @@
-"""Per-leaf split training segment: swaps in subdomain data + split loss around the epoch loop."""
+"""Owner-imitator training segment: swaps in the tagged dataset + loss
+around the epoch loop (docs/New_phase_3.tex).
+
+Every loss term is evaluated on an expert's own raw output u_j; the PoU
+composition is readout only. Locality exchange happens through minted
+targets u* re-minted at every refresh (the epoch loop's resample arm):
+points redrawn, lambda stepped 1 -> lambda_min, targets re-baked from
+the LIVE weights, quasi-Newton optimizer state reset.
+"""
 
 import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader, TensorDataset
-from pathlib import Path
-from typing import Dict, Callable, Tuple
-import json
-import math
-import time
-import copy
-import numpy as np
+from typing import Dict
 
 from utils.logging_config import get_logger
 
 logger = get_logger(__name__)
 
-from trainer.plotting import (
-    plot_training_curves,
-    plot_per_expert_curves,
-)
-from trainer.utils import compute_infinity_norm_error
-from trainer.timing import EpochTimer
+from trainer.plotting import plot_per_expert_curves
 from trainer.training_context import TrainingContext, SegmentResult
-from models.atoe_leaves import AToELeaves
-from utils.dataset_gen import (
-    regenerate_training_data,
-    resample_residual_inplace,
-    _save_adaptive_sampling_heatmap,
-)
-from utils.dataset_plotting import save_spawn_prediction_plot
-from utils.config_validation import (
-    validate_problem_config,
-    validate_adaptive_staged_config,
-)
-from losses.causal_weighting import advance_causal_schedule, create_causal_state
-from losses.lra import LRAWeights
-import losses.ks_loss as _ks_loss_module
-from losses.split_loss import build_split_loss
+from losses.split_loss import build_owner_imitator_loss, _pde_spatial_order
 from adaptive.subdomain_data import (
-    build_subdomain_data, build_subdomain_static, KIND_NAMES,
+    build_owner_imitator_data, build_owner_imitator_static, mint_targets,
+    imit_order, KIND_NAMES, KIND_RESIDUAL, KIND_IMIT, _domain_box,
+    inflated_bounds,
 )
 
 from trainer.setup import _create_split_dataloader
@@ -54,166 +37,142 @@ def _run_split_segment(
     lr_override=None,
     min_epochs_override=None,
 ) -> SegmentResult:
-    """Swap to split-loss data/loss, run _train_segment, then restore originals.
+    """Swap to owner-imitator data/loss, run _train_segment, restore.
 
     Returns:
         SegmentResult from the inner _train_segment call.
     """
     model = ctx.model
     cfg = ctx.cfg
+    problem = cfg['problem']
 
-    # Snapshot the model BEFORE training so interface targets stay stable
-    # across the whole segment (and across resamples).
-    model_snapshot = copy.deepcopy(model)
-    model_snapshot.eval()
-    for p in model_snapshot.parameters():
-        p.requires_grad = False
-    logger.info(f"[SplitLoss] Created frozen model snapshot for interface targets")
-
-    # Identify the leaf experts being trained in this segment
     leaf_info = model.get_leaf_info()
     new_expert_indices = [idx for _, idx in leaf_info if idx >= 0]
-
     regions_list = model.regions
 
-    logger.info(f"[SplitLoss] Building subdomain data for {len(new_expert_indices)} "
-                f"new expert(s): {new_expert_indices}")
+    # The root supplies the lambda-weighted half of the minted targets.
+    root_model = model.base_model
+    assert all(not p.requires_grad for p in root_model.parameters()), (
+        "[OwnerImitator] base (root) model must be frozen in phase 3")
 
-    # The leaves tile the domain and share the base (root) as their common
-    # parent, so mint interface targets from the frozen base — good root
-    # predictions regardless of expert architecture.
-    interface_model = model_snapshot.base_model
-    logger.info("[SplitLoss] Interface targets minted from frozen base (root).")
+    q = imit_order(cfg)
+    m = _pde_spatial_order(problem)
+    oi_cfg = (ctx.adaptive_cfg.get('owner_imitator', {}) or {})
+    lambda_min = float(oi_cfg.get('mint_lambda_min', 0.0) or 0.0)
 
-    # Static faces (IC/BC/interface/continuity + minted targets) are constant
-    # within the segment: built once here, reused on every resample.
-    split_static = build_subdomain_static(
-        model_snapshot, new_expert_indices, regions_list, cfg,
-        ctx.device, seed=ctx.epoch,
-        interface_model=interface_model,
-    )
-    split_data = build_subdomain_data(
-        model_snapshot, new_expert_indices, regions_list, cfg,
-        ctx.device, seed=ctx.epoch,
-        interface_model=interface_model,
-        static=split_static,
-    )
+    # Refresh schedule: mirror the epoch loop's resample gate exactly
+    # (epoch > 1 and (epoch - 1) % resample_every == 0) over this
+    # segment's epoch range, so the lambda ladder lands on lambda_min at
+    # the last refresh.
+    seg_start = ctx.epoch
+    resample_every = ctx.resample_every
+    if resample_every and resample_every > 0:
+        n_refresh_total = sum(
+            1 for e in range(seg_start + 1, seg_start + epoch_budget + 1)
+            if e > 1 and (e - 1) % resample_every == 0)
+    else:
+        n_refresh_total = 0
+
+    _slot_names = (['value']
+                   + [f'u_x^{p}' if p > 1 else 'u_x' for p in range(1, q + 1)]
+                   + [f'u_t^{p}' if p > 1 else 'u_t' for p in range(1, q + 1)])
+    _ladder = [1.0] + [
+        max(lambda_min, 1.0 - k * (1.0 - lambda_min) / max(1, n_refresh_total))
+        for k in range(1, n_refresh_total + 1)]
+    logger.info(
+        f"[OwnerImitator] config: lambda_min={lambda_min}, "
+        f"q={q} (slots {_slot_names}; PDE order m={m}), "
+        f"R={resample_every} epochs, n_refresh_total={n_refresh_total}, "
+        f"lambda ladder {[round(v, 4) for v in _ladder]}")
+    logger.info(
+        f"[OwnerImitator] {len(new_expert_indices)} experts; every term "
+        f"on the expert's own output; composition u_theta is readout only")
+    if ctx.lra_weights is not None:
+        logger.warning("[OwnerImitator] LRA is enabled — untested with the "
+                       "owner-imitator loss component structure")
+
+    # ── Data: static IC/BC-or-PER rows (fixed) + dynamic draw ──
+    static = build_owner_imitator_static(
+        ctx.plain_train_data, new_expert_indices, regions_list, cfg,
+        ctx.device, seed=ctx.epoch)
+    split_data = build_owner_imitator_data(
+        new_expert_indices, regions_list, cfg, ctx.device,
+        seed=ctx.epoch, static=static)
+
+    # Initial mint at lambda=1: bit-for-bit root targets.
+    _stats = mint_targets(split_data, model, root_model, 1.0, q)
+    logger.info(
+        f"[OwnerImitator] initial mint at lambda=1.0 (== root targets): "
+        f"n_minted={_stats['n_minted']}, "
+        f"max|mint - root| = {_stats['mean_abs_dev_from_root']:.1e}")
 
     _log_subdomain_summary(new_expert_indices, regions_list, split_data, cfg)
 
     # Freeze/trainable confirmation
-    trainable = [n for n, p in model.named_parameters()
-                 if p.requires_grad]
-    frozen = [n for n, p in model.named_parameters()
-              if not p.requires_grad]
-    logger.info(
-        "[SplitLoss] Grouped composed-residual mode: PDE residual on the "
-        "blended PoU composition as a sum of per-group means (one per "
-        "expert solo zone + one collar mean); u0 guides on each expert's "
-        "exclusive-box interior faces only"
-    )
-    logger.info(
-        f"[SplitLoss] trainable params: {len(trainable)}, "
-        f"frozen params: {len(frozen)}"
-    )
+    trainable = [n for n, p in model.named_parameters() if p.requires_grad]
+    frozen = [n for n, p in model.named_parameters() if not p.requires_grad]
+    logger.info(f"[OwnerImitator] trainable params: {len(trainable)}, "
+                f"frozen params: {len(frozen)}")
 
     # Stash original context state
     orig_loss_fn = ctx.loss_fn
     orig_train_data = ctx.train_data
     orig_train_loader = ctx.train_loader
 
-    # Composition IC/BC batch: the plain training set's IC/BC rows with an
-    # all-false residual mask. The split loss runs the ORIGINAL global loss
-    # on it through the blended PoU composition — exact physics (periodic
-    # pairing included) enforced once, on the reported object, at full
-    # weight. (In time-marching windows these rows already carry the
-    # previous window's IC override.)
-    pd = ctx.plain_train_data
-    _sel = pd['mask']['IC'] | pd['mask']['BC']
-    ic_bc_batch = {
-        'x': pd['x'][_sel],
-        't': pd['t'][_sel],
-        'h_gt': pd['h_gt'][_sel],
-        'mask': {
-            'residual': torch.zeros(int(_sel.sum()), dtype=torch.bool,
-                                    device=pd['x'].device),
-            'IC': pd['mask']['IC'][_sel],
-            'BC': pd['mask']['BC'][_sel],
-        },
-    }
-    logger.info(f"[SplitLoss] composition IC/BC term: "
-                f"n_ic={int(ic_bc_batch['mask']['IC'].sum())}, "
-                f"n_bc={int(ic_bc_batch['mask']['BC'].sum())} "
-                f"(exact physics on the blended PoU, full weight)")
+    oi_loss = build_owner_imitator_loss(
+        model, cfg, orig_loss_fn=orig_loss_fn)
+    oi_loss._mint_lambda = 1.0
 
-    # Build split loss with original loss as fallback for eval batches and
-    # as the source of the composition IC/BC terms.
-    split_loss = build_split_loss(
-        model, cfg, orig_loss_fn=orig_loss_fn, ic_bc_batch=ic_bc_batch,
-    )
-
-    # D7: interface-weight anneal — lambda_Gamma scales linearly from 1.0
-    # to (1 - w) over this segment's epoch budget (0 = disabled). The epoch
-    # loop updates split_loss._interface_scale each epoch.
-    _anneal_w = float((ctx.adaptive_cfg.get('split_icbc', {}) or {}).get(
-        'interface_decrease_weight', 0.0) or 0.0)
-    split_loss._interface_anneal_w = _anneal_w
-    if _anneal_w > 0:
-        logger.info(f"[InterfaceAnneal] enabled: w={_anneal_w}, "
-                    f"lambda_Gamma 1.0 -> {1.0 - _anneal_w:.3g} over "
-                    f"{epoch_budget} epochs")
-    else:
-        logger.info("[InterfaceAnneal] disabled "
-                    "(interface_decrease_weight=0)")
-
-    # Swap to split data/loss
-    ctx.loss_fn = split_loss
+    # Swap to owner-imitator data/loss
+    ctx.loss_fn = oi_loss
     ctx.train_data = split_data
     ctx.train_loader = _create_split_dataloader(
-        split_data, segment_cfg.get('batch_size', cfg['batch_size']), shuffle=True,
+        split_data, segment_cfg.get('batch_size', cfg['batch_size']),
+        shuffle=True,
     )
     ctx._split_context = {
         'model': model,
-        'model_snapshot': model_snapshot,  # frozen snapshot reused on resample
+        'root_model': root_model,
         'new_expert_indices': new_expert_indices,
         'regions': regions_list,
-        'interface_model': interface_model,  # frozen base for interface targets
-        'static': split_static,  # cached faces + targets; resample redraws residuals only
+        'static': static,          # fixed rows; dynamic part redrawn on refresh
+        'lambda': 1.0,
+        'lambda_min': lambda_min,
+        'refresh_count': 0,
+        'n_refresh_total': n_refresh_total,
+        'imit_order': q,
     }
 
-    # D2 reporting: experts train on their inflated boxes (region + collar),
-    # exactly the support of their blending windows, so eval rel-L2, best-
-    # checkpoint selection, and pred_after_<segment>.png all use the blended
-    # POU composition — the metric curve matches the final model throughout.
-    logger.info("[SplitLoss] Eval/plots use the blended "
+    logger.info("[OwnerImitator] Eval/plots use the blended "
                 f"'{getattr(model, 'blending_mode', 'soft')}' PoU "
-                "composition (D2 reporting).")
+                "composition (readout).")
 
     res = _train_segment(ctx, segment_name, epoch_budget, segment_cfg,
                          lr_override=lr_override,
                          min_epochs_override=min_epochs_override)
 
-    # Save per-expert and composition loss histories into metrics
-    peh = getattr(split_loss, '_per_expert_history', {})
+    # Save per-expert loss histories into metrics
+    peh = getattr(oi_loss, '_per_expert_history', {})
     if peh:
-        if 'split_expert_losses' not in ctx.metrics:
-            ctx.metrics['split_expert_losses'] = {}
-        ctx.metrics['split_expert_losses'][segment_name] = peh
-    gh = getattr(split_loss, '_global_history', {})
-    if gh and any(gh.values()):
-        ctx.metrics.setdefault('split_composition_losses', {})[
-            segment_name] = gh
+        ctx.metrics.setdefault('split_expert_losses', {})[segment_name] = peh
 
-    # Per-expert training curves + region panel
-    def _to_numpy(x):
-        """Convert to numpy, handling both Tensors and arrays."""
-        if x is None:
+    # Per-expert training curves + sampling-map panel
+    def _to_numpy(v):
+        if v is None:
             return None
-        if isinstance(x, torch.Tensor):
-            return x.cpu().numpy()
-        return x  # already numpy
-    
+        if isinstance(v, torch.Tensor):
+            return v.cpu().numpy()
+        return v
+
     try:
+        pc = cfg[problem]
+        g_lo, g_hi = _domain_box(pc)
+        sigma_fraction = cfg['adaptive_pinn']['sigma_fraction']
+        inflated_boxes = {
+            eidx: inflated_bounds(regions_list[eidx], sigma_fraction,
+                                  g_lo, g_hi)
+            for eidx in new_expert_indices
+        }
         training_plots_dir = ctx.run_dir / 'training_plots'
         training_plots_dir.mkdir(exist_ok=True)
         plot_path = (training_plots_dir /
@@ -228,15 +187,12 @@ def _run_split_segment(
             grid_x=_to_numpy(ctx.gt_x),
             grid_t=_to_numpy(ctx.gt_t),
             segment_name=segment_name,
-            split_data=split_data,
+            split_data=ctx.train_data,   # last refresh's draw
+            inflated_boxes=inflated_boxes,
         )
-        logger.info(
-            f"[SplitPlot] Saved training_plots/{plot_path.name}"
-        )
+        logger.info(f"[OIPlot] Saved training_plots/{plot_path.name}")
     except Exception as e:
-        logger.warning(
-            f"[SplitPlot] Failed: {e}"
-        )
+        logger.warning(f"[OIPlot] Failed: {e}")
 
     # Restore original context
     ctx.loss_fn = orig_loss_fn
@@ -248,87 +204,46 @@ def _run_split_segment(
 
 
 def _log_subdomain_summary(new_expert_indices, regions, split_data, cfg):
-    """Log per-expert point summaries for the subdomain dataset.
+    """Per-expert point summary of the owner-imitator dataset.
 
-    Residual rows are one uniform draw over the whole domain, tagged with
-    the loss GROUP: the leaf whose exclusive (solo) box contains the
-    point, or -1 for collar points. The grouped residual takes one mean
-    per group at weight 1 each. Guide faces live on each expert's
-    exclusive box; swallowed leaves have none. The summary logs each
-    expert's exclusive box next to its hard region, its solo-group point
-    count, the per-kind face counts, and the collar-group size.
+    One line per expert: hard tile, inflated box, per-kind counts, and
+    the imitation rows' owner distribution — verifies the ownership
+    partition, the collar filtering, and that IC/BC/PER rows attach only
+    to boundary-touching tiles.
     """
-    from adaptive.subdomain_data import (
-        _domain_box, KIND_RESIDUAL, exclusive_bounds, is_swallowed,
-    )
-
     expert_ids = split_data['expert_id']
     kinds = split_data['kind']
-    cont_neighbors = split_data.get('cont_neighbor', None)
+    mint_owner = split_data['mint_owner']
 
     problem = cfg['problem']
     pc = cfg[problem]
-    spatial_dim = pc['spatial_dim']
     sigma_fraction = cfg['adaptive_pinn']['sigma_fraction']
     g_lo, g_hi = _domain_box(pc)
 
-    rmask_all = (kinds == KIND_RESIDUAL)
-    n_res_total = int(rmask_all.sum())
-    n_collar = int((rmask_all & (expert_ids == -1)).sum())
-    logger.info(f"[SplitData] grouped composed residual: {n_res_total} "
-                f"uniform points; collar group={n_collar} points, solo "
-                f"groups get one weight-1 mean per expert")
+    n_res_total = int((kinds == KIND_RESIDUAL).sum())
+    n_imit_total = int((kinds == KIND_IMIT).sum())
+    logger.info(f"[OIData] dataset: {int(kinds.shape[0])} rows total — "
+                f"{n_res_total} residual (owner-partitioned), "
+                f"{n_imit_total} imit (duplicated per covering expert)")
 
+    _fmt = lambda v: [round(float(x), 6) for x in v]
     for eidx in new_expert_indices:
         emask = (expert_ids == eidx)
-        n_total = emask.sum().item()
         region = regions[eidx]
-        excl_bl, excl_bu = exclusive_bounds(
-            eidx, new_expert_indices, regions, sigma_fraction, g_lo, g_hi)
-        swallowed = is_swallowed(excl_bl, excl_bu)
+        infl_lo, infl_hi = inflated_bounds(
+            region, sigma_fraction, g_lo, g_hi)
         counts = {}
         for k_val, k_name in KIND_NAMES.items():
-            counts[k_name] = ((kinds[emask] == k_val).sum().item() if n_total > 0 else 0)
-        n_solo = counts.get('residual', 0)
-
-        _fmt = lambda v: [round(float(x), 6) for x in v]
+            counts[k_name] = int((kinds[emask] == k_val).sum())
+        imit_mask = emask & (kinds == KIND_IMIT)
+        owners = mint_owner[imit_mask]
+        owner_counts = {int(o): int((owners == o).sum())
+                        for o in owners.unique().tolist()}
+        active_terms = [k for k, v in counts.items() if v > 0]
         logger.info(
-            f"[SplitData] expert={eidx} depth={region.depth} parent={region.parent_idx} "
-            f"hard=[{region.bounds_lower}..{region.bounds_upper}] "
-            f"exclusive=[{_fmt(excl_bl)}..{_fmt(excl_bu)}]"
-            f"{' SWALLOWED' if swallowed else ''} "
-            f"total={n_total} residual_solo_group={n_solo} {counts}"
+            f"[OIData] expert={eidx} depth={region.depth} "
+            f"tile=[{_fmt(region.bounds_lower)}..{_fmt(region.bounds_upper)}] "
+            f"inflated=[{_fmt(infl_lo)}..{_fmt(infl_hi)}] "
+            f"counts={counts} imit_owners={owner_counts} "
+            f"active_terms={active_terms}"
         )
-        if n_solo == 0 and not swallowed:
-            logger.warning(f"[SplitData] expert={eidx} solo group is EMPTY "
-                           f"this draw (no residual mean of its own until "
-                           f"the next resample)")
-        if swallowed:
-            logger.info(f"[SplitData] expert={eidx} is swallowed: no guide "
-                        f"faces (trained via composed residual only)")
-        else:
-            if counts.get('interface_t', 0) == 0:
-                logger.info(f"[SplitData] expert={eidx} has 0 t-interface "
-                            f"points (face on t_min: exact IC covers it)")
-            if counts.get('interface_x', 0) == 0:
-                logger.info(f"[SplitData] expert={eidx} has 0 x-interface "
-                            f"points (faces on the physical boundary: "
-                            f"exact BC covers them)")
-    
-    # Log continuity pair summary
-    if cont_neighbors is not None:
-        from adaptive.subdomain_data import KIND_CONTINUITY
-        cont_mask = (kinds == KIND_CONTINUITY)
-        n_cont_total = cont_mask.sum().item()
-        if n_cont_total > 0:
-            # Count unique pairs
-            unique_pairs = set()
-            for i in range(len(cont_neighbors)):
-                if kinds[i] == KIND_CONTINUITY:
-                    a = expert_ids[i].item()
-                    b = cont_neighbors[i].item()
-                    unique_pairs.add((min(a, b), max(a, b)))
-            logger.info(
-                f"[SplitData] Continuity: {n_cont_total} points across "
-                f"{len(unique_pairs)} neighbor pairs"
-            )

@@ -88,8 +88,11 @@ def validate_adaptive_staged_config(cfg: Dict[str, Any]) -> None:
       * Removed keys (``freeze_mode``, ``freeze_epochs_after_spawn``) raise.
 
     Optional AToE-Leaves keys:
+      * ``adaptive_pinn.owner_imitator`` (dict): phase-3 owner-imitator
+        training — ``enabled``, ``mint_lambda_min``,
+        ``imit_derivative_order``, ``imit_weights``.
       * ``loss_weights.continuity`` (float, default 1.0): weight for the
-        neighbor-continuity loss term in split_icbc training.
+        neighbor-continuity loss term in owner-imitator training.
 
     Raises:
         ValueError: on a missing required key or a present removed key.
@@ -105,6 +108,13 @@ def validate_adaptive_staged_config(cfg: Dict[str, Any]) -> None:
             errors.append(
                 f"adaptive_pinn.{k} was removed by the staged-training refactor "
                 f"(staged freezing is now per-level requires_grad). Remove it.")
+
+    if 'split_icbc' in adaptive_cfg:
+        errors.append(
+            "adaptive_pinn.split_icbc was replaced by "
+            "adaptive_pinn.owner_imitator (interface_decrease_weight is "
+            "gone; the mint homotopy floor is owner_imitator."
+            "mint_lambda_min). Rename the block.")
 
     problem = cfg.get('problem')
     problem_cfg = cfg.get(problem, {}) if problem else {}

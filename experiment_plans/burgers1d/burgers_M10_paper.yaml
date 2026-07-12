@@ -1,5 +1,5 @@
 # Source run (NCC-PINN): outputs/experiments/burgers/burgers_M10_20260704_151623
-# AToE-Leaves M=10 with split_icbc from the pretrained 60-wide root:
+# AToE-Leaves M=10 with owner_imitator (formerly split_icbc) from the pretrained 60-wide root:
 # phase-3 leaf training 40k epochs + joint fine-tune 40k epochs, float64,
 # Adam->SSBroyden@1000, lr 1e-3 flat (fine-tune lr 1e-4, 500-step warmup,
 # no L2SP). Residual-adaptive sampling ON, resample every 100 epochs.
@@ -380,7 +380,7 @@ base_config:
     enable_timing: false
     enable_gradient_diagnostics: false
     M_experts_num: 10
-    split_icbc:
+    owner_imitator:
       enabled: true
     initial_train:
       epochs: 40000

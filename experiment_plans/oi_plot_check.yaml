@@ -1,24 +1,18 @@
-experiment_name: allen_cahn_M8_owner_imitator
+experiment_name: oi_plot_check
 base_config:
   problem: allen_cahn
   model: AToELeaves
   activation: tanh
   precision: float64
-  # Phase 3 = OWNER-IMITATOR training (docs/New_phase_3.tex): each expert
-  # is owner (PDE residual + true IC/BC) on its hard tile and imitator
-  # (Sobolev matching of the minted target u*) on its collar; the PoU
-  # composition is readout only. 45k = 5k Adam + 40k SSBroyden; refresh
-  # (resample + re-mint + SSBroyden reset) every
-  # sampling.resample_every_epochs.
-  epochs: 45000
+  epochs: 2
   batch_size: 99999
   min_epochs: 1
-  eval_every: 1000
-  patience_intervals: 5
+  eval_every: 1
+  patience_intervals: 10
   patience_rel_delta: 0.001
   optimizer_1: adam
   optimizer_2: ssbroyden
-  optimizer_switch_epoch: 5000
+  optimizer_switch_epoch: 100
   lr: 0.001
   lr_schedule: none
   lr_decay_rate: 0.98
@@ -49,7 +43,7 @@ base_config:
   cuda: true
   eval_only: false
   resume_from: null
-  print_every: 1000
+  print_every: 1
   save_every: 999999
   seed: 42
   allen_cahn:
@@ -174,7 +168,7 @@ base_config:
       freeze_previous_windows: true
       m_distribution: quadratic
   burgers1d:
-    pretrained_base_checkpoint: null
+    pretrained_base_checkpoint: roots_checkpoints/burgers_root.pt
     spatial_dim: 1
     output_dim: 1
     spatial_domain:
@@ -361,16 +355,8 @@ base_config:
     sample_volume_ratio: 35
     n_initial_train: 256
     n_boundary_train: 256
-    # Owner-imitator refresh cadence R: at every resample the points are
-    # redrawn, lambda steps toward mint_lambda_min, minted targets are
-    # re-baked from the live weights, and SSBroyden state is RESET (each
-    # inner solve starts with empty curvature memory — unlike the old
-    # warm-start-across-resamples behavior). R=1000 -> 44 refreshes over
-    # 45k; 40 SSBroyden inner solves of 1000 epochs each. NOTE: patience
-    # interval = R, so patience_intervals: 5 = early stop after 5 flat
-    # 1000-epoch intervals (active).
-    resample_every_epochs: 1000
-    plot_samples_every: 1000
+    resample_every_epochs: 100
+    plot_samples_every: 100
   adaptive_pinn:
     enabled: true
     max_experts: 150
@@ -385,23 +371,12 @@ base_config:
     tree_min_samples_leaf: 50
     enable_timing: false
     enable_gradient_diagnostics: false
-    M_experts_num: 8
-    epsilon_node_acceptance: 0.00
-    # Owner-imitator phase 3 (docs/New_phase_3.tex): every loss term on
-    # the expert's OWN output (owner physics on its tile, Sobolev
-    # imitation of the minted target u* on its collar); the composition
-    # is readout only. Refresh cadence = sampling.resample_every_epochs.
+    M_experts_num: 4
+    epsilon_node_acceptance: 0.0
     owner_imitator:
       enabled: true
-      # Homotopy floor: lambda steps 1 -> mint_lambda_min linearly over
-      # the refresh events (1 = pure root anchoring, 0 = full owner
-      # exchange by the last refresh).
-      mint_lambda_min: 1.0
-      # Sobolev matching order q: imitation matches value + d^p/dx^p +
-      # d^p/dt^p for p <= q. Default 1 (= m-1 for the 2nd-order PDEs);
-      # raise toward m-1 for kdv/ks if seams underperform.
+      mint_lambda_min: 0.0
       imit_derivative_order: 1
-      # Optional per-slot weights w_alpha, length 2q+1; null = all 1.0.
       imit_weights: null
     initial_train:
       epochs: 45000
@@ -413,12 +388,8 @@ base_config:
       lr_decay_rate: 0.98
       lr_decay_steps: 1000
       lr_warmup_steps: 0
-    # Fine-tune 5k pure SSBroyden (no Adam stage; optimizer_2 null means
-    # no switch): classic PINN loss on u_theta. N1 proved the fine-tune is
-    # a no-op under the exact-object phase 3 (best at its FIRST epoch), so
-    # 5k is a polish budget, not a repair budget.
     fine_tune:
-      epochs: 5000
+      epochs: 1
       optimizer_1: ssbroyden
       optimizer_2: null
       optimizer_switch_epoch: 99999
@@ -429,24 +400,8 @@ base_config:
       lr_warmup_steps: 0
       l2sp_lambda: 0.0
       collar_data_ratio: 0.0
-# Round 5 (2026-07-12): OWNER-IMITATOR phase 3 (docs/New_phase_3.tex),
-# SANITY run. Every loss term on the expert's OWN raw output u_j: PDE
-# residual on its hard tile, true IC (t=0) / mirror-minted periodic
-# matching (value + u_x) on the BC dataset rows, and Sobolev imitation
-# (value + u_x + u_t, q=1) of the minted target
-# u* = lambda*u0 + (1-lambda)*sg[u_owner] on its collar. NO loss on the
-# composition - it is readout only; where imitation is tight the blend
-# degenerates to the piecewise-owner solution.
-#   OI1 SANITY: mint_lambda_min = 1 -> lambda stays 1, every mint IS the
-# root (expect mean|u* - root| = 0 in every refresh log line); no owner
-# exchange, pure root anchoring. Phase 3 = 5k Adam + 40k SSBroyden,
-# refresh every R=1000 (points redrawn + SSBroyden reset per refresh).
-# Same pretrained root (rel-L2 3.0e-5), M=8, fine-tune = 5k pure
-# SSBroyden (classic PINN on u_theta), no collar sampling.
-# Reference points: N1_clean 3.50e-5; N2 grouped 35k; R1 3.17e-5/2.97e-5;
-# root 3.0e-5; main hard-indicator phase 3 3.4e-6.
 experiments:
-- name: OI1_owner_imitator
+- name: smoke_allen_cahn
   problem: allen_cahn
   model: AToELeaves
   base_architecture:

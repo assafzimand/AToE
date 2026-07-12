@@ -36,8 +36,6 @@ from utils.config_validation import (
 from losses.causal_weighting import advance_causal_schedule, create_causal_state
 from losses.lra import LRAWeights
 import losses.ks_loss as _ks_loss_module
-from losses.split_loss import build_split_loss
-from adaptive.subdomain_data import build_subdomain_data, KIND_NAMES
 
 from trainer.setup import _setup_training, _NumpySafeEncoder
 from trainer.epoch_loop import _train_segment
@@ -181,7 +179,8 @@ def train_orchestrator(ctx: TrainingContext) -> None:
     node_to_expert: Dict = {}
 
     # ── Spawn all leaves at once, then joint Phase 3 ──
-    split_enabled = ctx.adaptive_cfg.get('split_icbc', {}).get('enabled', False)
+    split_enabled = (ctx.adaptive_cfg.get('owner_imitator', {})
+                     or {}).get('enabled', False)
     _before_spawn = _check_output_continuity(ctx, "before_spawn")
 
     total = 0

@@ -382,7 +382,7 @@ base_config:
     enable_timing: false
     enable_gradient_diagnostics: false
     M_experts_num: 0
-    split_icbc:
+    owner_imitator:
       enabled: true
     initial_train:
       epochs: 35000

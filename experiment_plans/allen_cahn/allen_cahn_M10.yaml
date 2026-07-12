@@ -1,6 +1,6 @@
 # Source run (NCC-PINN): outputs/experiments/allen_cahn/
 #   allen_cahn_tests_20260703_143902-CURRENT_PAPER
-# AToE-Leaves M=5 with split_icbc from the pretrained 70-wide root:
+# AToE-Leaves M=5 with owner_imitator (formerly split_icbc) from the pretrained 70-wide root:
 # phase-3 leaf training 35k epochs + joint fine-tune 35k epochs, float64,
 # Adam->SSBroyden@5000. Fine-tune lr 1e-4 with 500-step warmup, no L2SP.
 # PREREQUISITE: roots_checkpoints/allen_cahn_root.pt (converted state dict)
@@ -381,7 +381,7 @@ base_config:
     enable_timing: false
     enable_gradient_diagnostics: false
     M_experts_num: 10
-    split_icbc:
+    owner_imitator:
       enabled: true
     initial_train:
       epochs: 35000

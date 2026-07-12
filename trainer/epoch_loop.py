@@ -36,8 +36,7 @@ from utils.config_validation import (
 from losses.causal_weighting import advance_causal_schedule, create_causal_state
 from losses.lra import LRAWeights
 import losses.ks_loss as _ks_loss_module
-from losses.split_loss import build_split_loss
-from adaptive.subdomain_data import build_subdomain_data, KIND_NAMES
+from adaptive.subdomain_data import build_owner_imitator_data, mint_targets
 
 from trainer.setup import (
     _NumpySafeEncoder, _create_optimizer_by_name, _create_primary_optimizer,
@@ -211,14 +210,6 @@ def _train_segment(
         if hasattr(loss_fn, '_record_next'):
             loss_fn._record_next = True
 
-        # D7: interface-weight anneal — lambda_Gamma decays linearly from
-        # 1.0 to (1 - w) over this segment's epoch budget.
-        if getattr(loss_fn, '_interface_anneal_w', 0.0) > 0:
-            _aw = loss_fn._interface_anneal_w
-            _prog = min(1.0, max(0.0, (epoch - segment_start_epoch)
-                                 / max(1, epoch_budget)))
-            loss_fn._interface_scale = 1.0 - _aw * _prog
-
         # Enable residual caching for adaptive sampling if needed
         # Cache THIS epoch's residuals for NEXT epoch's resampling
         # (adaptive_sampling_enabled already set from problem_cfg above)
@@ -279,15 +270,33 @@ def _train_segment(
             resample_seed = base_seed + epoch
             _resampled_this_epoch = True
             if _split_ctx is not None:
-                logger.info(f"  [Resample-Split] Redrawing residual interiors at epoch {epoch}")
-                # Static faces + interface targets are cached for the segment;
-                # only the residual collocation points are redrawn.
-                train_data = build_subdomain_data(
-                    _split_ctx['model_snapshot'], _split_ctx['new_expert_indices'],
-                    _split_ctx['regions'], cfg, device, seed=resample_seed,
-                    interface_model=_split_ctx.get('interface_model'),
-                    static=_split_ctx.get('static'),
+                # ── Owner-imitator REFRESH (the tex's outer loop) ──
+                # (i) resample residual + collar points (IC/BC/PER static
+                # rows reused), (ii) lambda steps linearly toward
+                # lambda_min, (iii) ALL minted targets re-baked from the
+                # LIVE weights, (iv) quasi-Newton optimizer state reset
+                # (Adam state persists). Between refreshes the loss
+                # landscape is completely fixed.
+                _split_ctx['refresh_count'] += 1
+                _lam_prev = _split_ctx.get('lambda', 1.0)
+                _lam_min = _split_ctx.get('lambda_min', 0.0)
+                _n_total = max(1, _split_ctx.get('n_refresh_total', 1))
+                _lam = max(_lam_min,
+                           1.0 - _split_ctx['refresh_count']
+                           * (1.0 - _lam_min) / _n_total)
+                _split_ctx['lambda'] = _lam
+                train_data = build_owner_imitator_data(
+                    _split_ctx['new_expert_indices'],
+                    _split_ctx['regions'], cfg, device,
+                    seed=resample_seed, static=_split_ctx.get('static'),
                 )
+                _mint_stats = mint_targets(
+                    train_data, _split_ctx['model'],
+                    _split_ctx['root_model'], _lam,
+                    _split_ctx['imit_order'],
+                )
+                if hasattr(loss_fn, '_mint_lambda'):
+                    loss_fn._mint_lambda = _lam
                 ctx.train_data = train_data
                 _set_default_torch_device(device, full_batch=False)
                 train_loader = _create_split_dataloader(
@@ -300,9 +309,37 @@ def _train_segment(
                 _set_default_torch_device(
                     device,
                     full_batch=current_optimizer_name in ('LBFGS', 'SSBroyden'))
+                # Quasi-Newton curvature memory is invalid on the new
+                # deterministic landscape (new points AND new targets):
+                # recreate the optimizer. Adam moment state stays valid
+                # under resampling and is deliberately kept.
+                _opt_reset = current_optimizer_name in ('LBFGS', 'SSBroyden')
+                if _opt_reset:
+                    optimizer, current_optimizer_name = _create_optimizer_by_name(
+                        current_optimizer_name.lower(), model, seg_cfg)
+                logger.info(
+                    f"  [OwnerImitator] refresh #{_split_ctx['refresh_count']}"
+                    f"/{_n_total} at epoch {epoch}: "
+                    f"lambda {_lam_prev:.4f} -> {_lam:.4f} | "
+                    f"re-minted {_mint_stats['n_minted']} targets from LIVE "
+                    f"weights (mean|u* - root| = "
+                    f"{_mint_stats['mean_abs_dev_from_root']:.3e}) | "
+                    + (f"optimizer {current_optimizer_name} state RESET"
+                       if _opt_reset else
+                       f"optimizer {current_optimizer_name} state kept"))
                 metrics['resample_events'].append({
-                    'epoch': epoch, 'action': 'split_resampled',
+                    'epoch': epoch, 'action': 'oi_refresh',
+                    'lambda': _lam,
+                    'mint_dev_from_root':
+                        _mint_stats['mean_abs_dev_from_root'],
                     'optimizer': current_optimizer_name,
+                    'optimizer_reset': _opt_reset,
+                })
+                metrics['optimizer_snapshots'].append({
+                    'epoch': epoch,
+                    'event': 'oi_refresh',
+                    **_get_optimizer_snapshot(optimizer, lr_scheduler,
+                                              step_count),
                 })
                 # Diagnostic residual heatmap: drain the per-expert residual cache
                 # collected this epoch (union of all experts' local residual points).
@@ -822,16 +859,13 @@ def _train_segment(
                 _blend = None
             metrics.setdefault('eval_blending_mode', []).append(_blend)
 
-            # D7: interface-anneal scale at this eval (None outside split
+            # Owner-imitator mint lambda at this eval (None outside split
             # segments), aligned with 'epochs' like eval_blending_mode.
-            _if_scale = (getattr(loss_fn, '_interface_scale', None)
+            _mint_lam = ((getattr(ctx, '_split_context', None) or {})
+                         .get('lambda')
                          if getattr(ctx, '_split_context', None) is not None
                          else None)
-            metrics.setdefault('interface_scale', []).append(_if_scale)
-            if (_if_scale is not None
-                    and getattr(loss_fn, '_interface_anneal_w', 0.0) > 0):
-                logger.info(f"  [InterfaceAnneal] epoch={epoch} "
-                            f"scale={_if_scale:.4f}")
+            metrics.setdefault('mint_lambda', []).append(_mint_lam)
 
             # ── Term-wise loss components (from the same eval pass) ──
             metrics['loss_components']['epochs'].append(epoch)
@@ -857,17 +891,10 @@ def _train_segment(
                     logger.info(
                         f"  [SplitTerms] expert={_eidx} {_s}"
                     )
-                # Composition IC/BC terms (exact physics on the blended PoU)
-                # + the collar group's residual mean (the >=2-window set).
-                _gh = getattr(loss_fn, '_global_history', None)
-                if _gh and _gh.get('ic_comp'):
-                    _collar = (f" residual_collar={_gh['residual_collar'][-1]:.6e}"
-                               if _gh.get('residual_collar') else "")
+                if _mint_lam is not None:
                     logger.info(
-                        f"  [SplitTerms] composition "
-                        f"ic={_gh['ic_comp'][-1]:.6e} "
-                        f"bc={_gh['bc_comp'][-1]:.6e}{_collar}"
-                    )
+                        f"  [OwnerImitator] epoch={epoch} "
+                        f"mint lambda={_mint_lam:.4f}")
 
         # End epoch timing (handles printing based on print_every)
         timer.end_epoch()

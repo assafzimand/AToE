@@ -1,69 +1,52 @@
-"""Split loss: composed PDE residual + per-expert u0 face guides.
+"""Owner-imitator loss: every term on the expert's OWN raw output u_j.
 
-The exact-object scheme — every physics term is evaluated on the blended
-PoU composition u_theta (the reported object):
-  - PDE residual of u_theta on ONE uniform collocation set over the whole
-    domain, aggregated as a SUM OF PER-GROUP MEANS: one mean per expert's
-    exclusive (solo) zone plus one mean over the collar set. On a solo
-    zone u_theta == u_j, so that group is the expert's well-posed local
-    residual; in the collar group the gradients reach every active expert
-    through the window weights. Each group carries weight 1, so small
-    solo zones (the tree's high-detail regions) keep the per-region
-    up-weighting the pre-redesign per-expert loss had; a plain global
-    mean instead lets them drown (N1_clean run, 2026-07-11).
-  - The global loss's exact IC and BC terms, evaluated on the plain
-    training set's IC/BC rows through the composed model, at full,
-    un-annealed weight.
+The PoU composition u_theta is READOUT ONLY — no loss term is ever
+evaluated on it. Every expert has exactly one role at every point:
+OWNER (physics) on its hard tile, IMITATOR (distillation to the minted
+target u*) on its collar. Per expert j:
 
-Per-expert scaffolding, on the expert's OWN output:
-  - u0-guide matching on the interior faces of its EXCLUSIVE box
-    Omega_hat (value on the lower-t face; value + d/dx on x-faces for
-    problems whose global BC pairs u and u_x), scaled by the annealable
-    interface weight. Faces on t_min / the physical boundary carry no
-    guides (skipped at data build), and swallowed leaves (empty exclusive
-    box) have no guide rows at all — they train purely through the
-    composed residual, FBPINN-style.
-  - Neighbor-to-neighbor continuity on shared interior faces (optional).
+  L_j = w_res * L_res_j            PDE residual of u_j on X_res_j ⊂ Omega_j
+      + w_ic  * L_ic_j             ||u_j - g_ic||^2 on the tile's t=0 rows
+      + w_bc  * (L_bc_j + L_per_j) true Dirichlet data (non-periodic) OR
+                                   mirror-minted value+d/dx matching
+                                   (periodic), on the BC dataset rows
+      + L_imit_j                   sum_alpha w_alpha ||D^alpha u_j -
+                                   D^alpha u*||^2 on the collar rows
+      + w_cont * L_cont_j          optional neighbor continuity (kept,
+                                   weight 0 by default)
 
-Total loss:
-    L = w_res*( sum_j L_res(u_theta; solo_j) + L_res(u_theta; collar) )
-        + w_ic*L_IC(u_theta) + w_bc*L_BC(u_theta)
-        + sum_j [ s(e)*( w_ic*L_iface_t_j
-                         + w_bc*(L_iface_x_j + L_iface_x_deriv_j) )
-                  + w_cont*L_cont_j ]
-with s(e) the linear interface anneal (interface_decrease_weight).
+Total = sum_j L_j; the summands are mutually independent, so all experts
+train in parallel under one optimizer. The minted targets u* (values +
+axis derivatives, baked constants — see adaptive/subdomain_data.py
+mint_targets) carry the owner exchange; lambda lives only in the mint.
 """
 
 import torch
 import importlib
 from typing import Dict, Callable
 from adaptive.subdomain_data import (
-    KIND_RESIDUAL, KIND_INTERFACE_T, KIND_INTERFACE_X,
-    KIND_CONTINUITY, PERIODIC_PROBLEMS,
+    KIND_RESIDUAL, KIND_IC, KIND_BC, KIND_PER, KIND_IMIT,
+    KIND_CONTINUITY, PERIODIC_PROBLEMS,  # noqa: F401
+    _axis_derivative_stack, imit_order,
 )
 from utils.logging_config import get_logger
 
 logger = get_logger(__name__)
 
 
-def build_split_loss(
+def build_owner_imitator_loss(
     model,
     cfg: Dict,
     *,
     orig_loss_fn: Callable = None,
-    ic_bc_batch: Dict = None,
 ) -> Callable:
-    """Build a split loss for per-expert subdomain training.
+    """Build the owner-imitator loss for per-expert subdomain training.
 
-    Returns a callable ``loss_fn(model, batch)`` compatible
-    with ``_train_segment``.
-
-    ``orig_loss_fn`` serves two roles: fallback for eval batches missing
-    the split keys (expert_id, kind), and — via ``ic_bc_batch`` — the
-    source of the exact global IC/BC terms evaluated on the blended PoU
-    composition. ``ic_bc_batch`` is a plain-format batch holding ONLY the
-    training set's IC/BC rows (its residual mask is all-false, so the
-    global loss skips the residual term).
+    Returns a callable ``loss_fn(model, batch)`` compatible with
+    ``_train_segment``. ``orig_loss_fn`` is the fallback for batches
+    missing the split keys (``expert_id``/``kind``) — the rel-L2 eval
+    probe on the plain training set goes through it, so eval stays on
+    the composed readout's classic loss.
     """
     problem = cfg['problem']
     pc = cfg[problem]
@@ -73,131 +56,159 @@ def build_split_loss(
     w_bc = loss_weights['bc']
     w_cont = loss_weights.get('continuity', 1.0)
 
-    # Problems whose global BC pairs u AND u_x (periodic set): their x-face
-    # guides carry d/dx targets too, matched in the grad-enabled interface
-    # pass. Value-only-BC problems (burgers1d) match values only.
-    match_x_derivs = problem in PERIODIC_PROBLEMS
+    q = imit_order(cfg)
+    n_slots = 2 * q + 1
+    oi_cfg = (cfg.get('adaptive_pinn', {}).get('owner_imitator', {}) or {})
+    imit_weights = oi_cfg.get('imit_weights', None)
+    if imit_weights is None:
+        imit_weights = [1.0] * n_slots
+    imit_weights = [float(w) for w in imit_weights]
+    if len(imit_weights) != n_slots:
+        raise ValueError(
+            f"owner_imitator.imit_weights must have length 2q+1={n_slots} "
+            f"(q={q}); got {len(imit_weights)}")
 
     pde_res_fn, deriv_fn = _import_pde_helpers(problem)
     pde_params = _get_pde_params(problem, pc)
 
     per_expert_history: Dict[int, Dict[str, list]] = {}
-    # Composition IC/BC history (recorded once per epoch like the per-
-    # expert history; read by the [SplitTerms] eval log).
-    global_history: Dict[str, list] = {'ic_comp': [], 'bc_comp': []}
-    # Per-epoch residual cache: list of (x, t, r²) tuples (detached CPU tensors).
-    # Populated when split_loss_fn._cache_residuals is True; drained by the trainer
-    # to produce diagnostic heatmap plots (same as the non-split residual-cache path).
+    # Per-epoch residual cache: list of (x, t, r²) tuples (detached CPU
+    # tensors), one per expert. Populated when _cache_residuals is True;
+    # drained by the trainer for the diagnostic residual heatmap. The
+    # per-expert tiles partition the domain, so the union of the cached
+    # sets is exactly the full residual draw.
     residual_cache: list = []
 
-    def split_loss_fn(
-        model, batch, return_components=False, **kw
-    ):
+    def oi_loss_fn(model, batch, return_components=False, **kw):
         # Eval batches carry no split keys: fall back to the original loss
         if 'expert_id' not in batch or 'kind' not in batch:
             if orig_loss_fn is not None:
-                return orig_loss_fn(model, batch, return_components=return_components, **kw)
-            else:
-                # No fallback available, compute simple MSE
-                x = batch['x']
-                t = batch['t']
-                h_gt = batch['h_gt']
-                device = x.device
-                xt = torch.cat([x, t], dim=1)
-                h_pred = model(xt)
-                return torch.mean((h_pred - h_gt) ** 2)
-        
+                return orig_loss_fn(model, batch,
+                                    return_components=return_components,
+                                    **kw)
+            x = batch['x']
+            t = batch['t']
+            h_gt = batch['h_gt']
+            h_pred = model(torch.cat([x, t], dim=1))
+            return torch.mean((h_pred - h_gt) ** 2)
+
         x = batch['x']
         t = batch['t']
         h_gt = batch['h_gt']
-        h_x_gt = batch.get('h_x_gt', None)  # interface d/dx guide targets
+        mint = batch['mint']
         expert_ids = batch['expert_id']
         kinds = batch['kind']
         cont_neighbors = batch.get('cont_neighbor', None)
         cont_dims = batch.get('cont_dim', None)
         device = x.device
-        # D7: interface-weight anneal scale (updated per epoch by the
-        # trainer when interface_decrease_weight > 0; 1.0 otherwise).
-        interface_scale = split_loss_fn._interface_scale
 
         # Per-expert history is recorded once per epoch (the trainer arms
         # _record_next at each epoch start). Recording every closure call
         # cost ~7*K GPU syncs per evaluation and polluted the curves with
         # line-search evaluations.
-        record_now = split_loss_fn._record_next
+        record_now = oi_loss_fn._record_next
         if record_now:
-            split_loss_fn._record_next = False
+            oi_loss_fn._record_next = False
 
         unique_experts = [e for e in expert_ids.unique().tolist() if e >= 0]
         total_loss = torch.tensor(0.0, device=device)
         all_comps = {}
 
-        # ── PDE residual of the COMPOSITION on the uniform collocation set ──
-        # One forward through the blended PoU model, aggregated as a sum of
-        # per-group means: one mean per expert's solo zone (where
-        # u_theta == u_j — the well-posed local residual) plus one mean over
-        # the collar set. Weight 1 per group keeps the tree's small
-        # high-detail zones from drowning in a global average.
-        residual_term, residual_solo_means, residual_collar = \
-            _compute_composed_residual(
-                model, x, t, expert_ids, kinds,
-                pde_res_fn, deriv_fn, pde_params, problem,
-                residual_cache=(
-                    residual_cache
-                    if split_loss_fn._cache_residuals else None
-                ),
-            )
-        if residual_term is not None:
-            total_loss = total_loss + w_res * residual_term
-        if record_now and residual_collar is not None:
-            global_history.setdefault('residual_collar', []).append(
-                float(residual_collar))
-        if return_components:
-            all_comps['residual_term'] = residual_term
-            all_comps['residual_collar'] = residual_collar
-
         for eidx in unique_experts:
             emask = (expert_ids == eidx)
-            comps = _compute_expert_loss(
-                model, eidx,
-                x[emask], t[emask], h_gt[emask],
-                kinds[emask],
-                w_res, w_ic, w_bc, match_x_derivs,
-                device,
-                residual_diag=residual_solo_means.get(eidx),
-                h_x_gt=h_x_gt[emask] if h_x_gt is not None else None,
-                interface_scale=interface_scale,
-            )
-            # Only the guide terms enter the optimized loss per expert; the
-            # residual entered once above, through the composition.
-            total_loss = total_loss + comps['guides_scaled']
+            z = torch.tensor(0.0, device=device)
+            comps = {'residual': z.clone(), 'ic': z.clone(),
+                     'bc': z.clone(), 'per': z.clone(), 'imit': z.clone()}
+
+            # ── 1. PDE residual of u_j on its OWN tile rows ──
+            rmask = emask & (kinds == KIND_RESIDUAL)
+            if rmask.any():
+                xf = x[rmask].clone().detach().requires_grad_(True)
+                tf = t[rmask].clone().detach().requires_grad_(True)
+                u_e = model.forward_single_expert(
+                    eidx, torch.cat([xf, tf], dim=1))
+                if problem == 'schrodinger':
+                    # Complex field h = u + iv: residual is complex — r²
+                    # is the squared complex magnitude.
+                    u_c = u_e[:, 0]
+                    v_c = u_e[:, 1]
+                    h_t, h_x, h_xx = deriv_fn(u_c, v_c, xf, tf)
+                    h = torch.complex(u_c, v_c)
+                    res = pde_res_fn(h, h_t, h_xx)
+                    r2 = res.abs() ** 2
+                else:
+                    hf = u_e[:, 0]
+                    derivs = deriv_fn(hf, xf, tf)
+                    res = pde_res_fn(hf, *derivs, **pde_params)
+                    r2 = res ** 2
+                comps['residual'] = r2.mean()
+                if oi_loss_fn._cache_residuals:
+                    residual_cache.append((
+                        xf.detach().cpu(),
+                        tf.detach().cpu(),
+                        r2.detach().cpu(),
+                    ))
+
+            # ── 2 + 3. True IC / BC data, one plain forward per expert ──
+            imask = emask & (kinds == KIND_IC)
+            bmask = emask & (kinds == KIND_BC)
+            face_mask = imask | bmask
+            if face_mask.any():
+                xt_face = torch.cat([x[face_mask], t[face_mask]], dim=1)
+                u_face = model.forward_single_expert(eidx, xt_face)
+                se_face = (u_face - h_gt[face_mask]) ** 2
+                kinds_face = kinds[face_mask]
+                if imask.any():
+                    comps['ic'] = torch.mean(se_face[kinds_face == KIND_IC])
+                if bmask.any():
+                    comps['bc'] = torch.mean(se_face[kinds_face == KIND_BC])
+
+            # ── 4. Periodic BC via mirror-minted targets (value + d/dx) ──
+            pmask = emask & (kinds == KIND_PER)
+            if pmask.any():
+                x_p = x[pmask].clone().detach().requires_grad_(True)
+                t_p = t[pmask].clone().detach()
+                u_p = model.forward_single_expert(
+                    eidx, torch.cat([x_p, t_p], dim=1))
+                mint_p = mint[pmask]
+                n_out = u_p.shape[1]
+                val_mse = torch.mean((u_p - mint_p[:, 0, :]) ** 2)
+                d_loss = torch.tensor(0.0, device=device)
+                for c in range(n_out):
+                    g = torch.autograd.grad(
+                        u_p[:, c].sum(), x_p,
+                        create_graph=True, retain_graph=True,
+                    )[0][:, 0]
+                    d_loss = d_loss + torch.mean(
+                        (g - mint_p[:, 1, c]) ** 2)
+                comps['per'] = val_mse + d_loss / n_out
+
+            # ── 5. Imitation on the collar (Sobolev matching to u*) ──
+            mmask = emask & (kinds == KIND_IMIT)
+            if mmask.any():
+                x_m = x[mmask].clone().detach().requires_grad_(True)
+                t_m = t[mmask].clone().detach().requires_grad_(True)
+                u_m = model.forward_single_expert(
+                    eidx, torch.cat([x_m, t_m], dim=1))
+                stack = _axis_derivative_stack(u_m, x_m, t_m, q)
+                se = (stack - mint[mmask]) ** 2   # (n, 2q+1, C)
+                imit_loss = torch.tensor(0.0, device=device)
+                for a in range(n_slots):
+                    if imit_weights[a] != 0.0:
+                        imit_loss = imit_loss + (
+                            imit_weights[a] * se[:, a, :].mean())
+                comps['imit'] = imit_loss
+
+            comps['total'] = (w_res * comps['residual']
+                              + w_ic * comps['ic']
+                              + w_bc * (comps['bc'] + comps['per'])
+                              + comps['imit'])
+            total_loss = total_loss + comps['total']
             if record_now:
                 _record(per_expert_history, eidx, comps)
             if return_components:
-                all_comps[eidx] = comps
-
-        # ── Exact physics on the composition: global IC + BC on u_theta ──
-        # The global loss's own IC/BC terms (periodic pairing included),
-        # evaluated through the blended PoU composition on the plain
-        # training set's IC/BC rows, at FULL weight — the u0 face guides
-        # above are the annealable part, this is the ground truth.
-        if ic_bc_batch is not None and orig_loss_fn is not None:
-            comps_g = orig_loss_fn(model, ic_bc_batch,
-                                   return_components=True,
-                                   update_causal_state=False)
-            ic_comp = comps_g.get('ic', torch.tensor(0.0, device=device))
-            bc_comp = comps_g.get('bc', torch.tensor(0.0, device=device))
-            total_loss = total_loss + w_ic * ic_comp + w_bc * bc_comp
-            if record_now:
-                global_history['ic_comp'].append(
-                    float(ic_comp.detach()) if torch.is_tensor(ic_comp)
-                    else float(ic_comp))
-                global_history['bc_comp'].append(
-                    float(bc_comp.detach()) if torch.is_tensor(bc_comp)
-                    else float(bc_comp))
-            if return_components:
-                all_comps['composition'] = {'ic_comp': ic_comp,
-                                            'bc_comp': bc_comp}
+                for k, v in comps.items():
+                    all_comps[f'e{eidx}_{k}'] = v
 
         # ── Continuity loss: neighbor-to-neighbor on shared interior faces ──
         # Skipped entirely (not computed, not recorded/plotted) when its
@@ -208,198 +219,31 @@ def build_split_loss(
                 cont_neighbors, cont_dims, deriv_fn,
                 pde_params, device, problem,
             )
-            if logger.isEnabledFor(10):  # DEBUG
-                logger.debug(
-                    f"[SplitLoss] Continuity contrib: "
-                    f"{cont_loss.item():.6e}"
-                )
             total_loss = total_loss + w_cont * cont_loss
-            # Record continuity per expert (same per-epoch cadence)
             if record_now:
                 for eidx, cont_val in cont_per_expert.items():
                     _record_continuity(per_expert_history, eidx, cont_val)
+            if return_components:
+                all_comps['continuity'] = cont_loss
 
         if return_components:
             return all_comps
         return total_loss
 
-    split_loss_fn._per_expert_history = per_expert_history
-    split_loss_fn._global_history = global_history
-    split_loss_fn._residual_cache = residual_cache
-    split_loss_fn._cache_residuals = False  # trainer sets True when a plot is due
-    split_loss_fn._record_next = True  # trainer re-arms once per epoch
-    # Interface-weight anneal — the trainer sets _interface_anneal_w
-    # from config and updates _interface_scale each epoch.
-    split_loss_fn._interface_scale = 1.0
-    split_loss_fn._interface_anneal_w = 0.0
-    return split_loss_fn
+    oi_loss_fn._per_expert_history = per_expert_history
+    oi_loss_fn._residual_cache = residual_cache
+    oi_loss_fn._cache_residuals = False  # trainer sets True when a plot is due
+    oi_loss_fn._record_next = True  # trainer re-arms once per epoch
+    oi_loss_fn._mint_lambda = 1.0   # updated at each refresh (logging only)
+    return oi_loss_fn
 
 
-def _compute_composed_residual(
-    model, x, t, expert_ids, kinds,
-    pde_res_fn, deriv_fn, pde_params, problem,
-    residual_cache=None,
-):
-    """PDE residual of the blended PoU composition on the residual rows.
-
-    One forward through the composed model over all residual points; the
-    PDE derivatives (window derivatives included) are computed w.r.t. a
-    single ``(xf, tf)`` leaf pair. The optimized term is a SUM OF
-    PER-GROUP MEANS over the ``expert_id`` grouping tag: one mean per
-    expert's solo zone (tag = expert index; there u_theta == u_j) plus
-    one mean over the collar set (tag = -1). Each group carries weight 1.
-
-    Returns:
-        (residual_term, solo_means, collar_mean) where residual_term is
-        the optimized sum-of-means tensor (None when there are no
-        residual rows), solo_means maps expert_idx -> DETACHED mean r²
-        over its solo points (per-expert curve diagnostics), and
-        collar_mean is the detached collar-group mean (None if no collar
-        rows).
-    """
-    rmask = (kinds == KIND_RESIDUAL)
-    if rmask.sum() == 0:
-        return None, {}, None
-
-    xf = x[rmask].clone().detach().requires_grad_(True)
-    tf = t[rmask].clone().detach().requires_grad_(True)
-    xt = torch.cat([xf, tf], dim=1)
-    u_all = model(xt)
-
-    if problem == 'schrodinger':
-        # Complex field h = u + iv: deriv_fn(u, v, x, t) -> complex derivatives,
-        # residual is complex — r² is the squared complex magnitude.
-        u_c = u_all[:, 0]
-        v_c = u_all[:, 1]
-        h_t, h_x, h_xx = deriv_fn(u_c, v_c, xf, tf)
-        h = torch.complex(u_c, v_c)
-        res = pde_res_fn(h, h_t, h_xx)
-        r2 = res.abs() ** 2
-    else:
-        hf = u_all[:, 0]
-        derivs = deriv_fn(hf, xf, tf)
-        res = pde_res_fn(hf, *derivs, **pde_params)
-        r2 = res ** 2
-
-    if residual_cache is not None:
-        residual_cache.append((
-            xf.detach().cpu(),
-            tf.detach().cpu(),
-            r2.detach().cpu(),
-        ))
-
-    groups = expert_ids[rmask]
-    residual_term = None
-    solo_means = {}
-    collar_mean = None
-    for gidx in groups.unique().tolist():
-        gmean = r2[groups == gidx].mean()
-        residual_term = gmean if residual_term is None else residual_term + gmean
-        if gidx >= 0:
-            solo_means[int(gidx)] = gmean.detach()
-        else:
-            collar_mean = gmean.detach()
-
-    return residual_term, solo_means, collar_mean
-
-
-def _compute_expert_loss(
-    model, expert_idx, x, t, h_gt, kinds,
-    w_res, w_ic, w_bc, match_x_derivs, device,
-    residual_diag=None,
-    h_x_gt=None,
-    interface_scale=1.0,
-):
-    """Per-expert u0-guide terms, on the expert's own output (no PoU).
-
-    The guide faces sit on the interior boundary of the expert's
-    exclusive box (data build skips t_min / physical-boundary faces and
-    swallowed leaves entirely):
-      * ``interface_t`` — lower-t face, value matching, one plain forward;
-      * ``interface_x`` — x-faces, value matching, plus d(u_j)/dx matched
-        to the minted d(u_0)/dx targets (``interface_x_deriv``) when the
-        problem's global BC pairs u and u_x (``match_x_derivs``) — that
-        pass is grad-enabled; value-only problems keep it in the plain
-        forward.
-
-    ``interface_scale`` multiplies ALL guide terms (the exact IC/BC live
-    on the composition, at full weight, outside this function).
-
-    ``residual_diag`` is the DETACHED composed-residual mean over this
-    expert's SOLO-zone points (its group mean in the grouped residual) —
-    recorded in ``comps['residual']`` and folded into ``comps['total']``
-    for the per-expert curves, but never added to the optimized loss here
-    (the residual enters through the grouped composition term). Only
-    ``comps['guides_scaled']`` carries gradient out of this function.
-    """
-    z = torch.tensor(0.0, device=device)
-    comps = {
-        'residual': residual_diag if residual_diag is not None else z.clone(),
-        'interface_t': z.clone(),
-        'interface_x': z.clone(),
-        'interface_x_deriv': z.clone(),
-    }
-
-    deriv_pass = match_x_derivs and h_x_gt is not None
-
-    # Kinds handled by the single plain (no input-grad) face forward.
-    face_kinds = [('interface_t', KIND_INTERFACE_T)]
-    if not deriv_pass:
-        face_kinds.append(('interface_x', KIND_INTERFACE_X))
-
-    face_mask = torch.zeros_like(kinds, dtype=torch.bool)
-    for _, kval in face_kinds:
-        face_mask |= (kinds == kval)
-
-    if face_mask.any():
-        xt_face = torch.cat([x[face_mask], t[face_mask]], dim=1)
-        u_face = model.forward_single_expert(expert_idx, xt_face)
-        se_face = (u_face - h_gt[face_mask]) ** 2
-        kinds_face = kinds[face_mask]
-        for key, kval in face_kinds:
-            kmask = (kinds_face == kval)
-            if kmask.any():
-                comps[key] = torch.mean(se_face[kmask])
-
-    # ── x-faces with value + d/dx guide matching (grad-enabled pass) ──
-    if deriv_pass:
-        ifm_x = (kinds == KIND_INTERFACE_X)
-        if ifm_x.any():
-            x_if = x[ifm_x].clone().detach().requires_grad_(True)
-            t_if = t[ifm_x].clone().detach()
-            u_if = model.forward_single_expert(
-                expert_idx, torch.cat([x_if, t_if], dim=1))
-            comps['interface_x'] = torch.mean((u_if - h_gt[ifm_x]) ** 2)
-            n_out = u_if.shape[1]
-            d_loss = torch.tensor(0.0, device=device)
-            for c in range(n_out):
-                g = torch.autograd.grad(
-                    u_if[:, c].sum(), x_if,
-                    create_graph=True, retain_graph=True,
-                )[0][:, 0]
-                d_loss = d_loss + torch.mean(
-                    (g - h_x_gt[ifm_x][:, c]) ** 2)
-            # Mean over output components (matches the value term's
-            # mean-over-all-elements convention).
-            comps['interface_x_deriv'] = d_loss / n_out
-
-    comps['guides_scaled'] = interface_scale * (
-        w_ic * comps['interface_t']
-        + w_bc * (comps['interface_x'] + comps['interface_x_deriv'])
-    )
-    # Recording-only local total (residual part is detached diagnostics).
-    comps['total'] = w_res * comps['residual'] + comps['guides_scaled']
-    return comps
+_TERM_KEYS = ['residual', 'ic', 'bc', 'per', 'imit', 'total', 'continuity']
 
 
 def _record(history, expert_idx, comps):
     if expert_idx not in history:
-        history[expert_idx] = {
-            k: [] for k in [
-                'residual', 'interface_t', 'interface_x',
-                'interface_x_deriv', 'total', 'continuity',
-            ]
-        }
+        history[expert_idx] = {k: [] for k in _TERM_KEYS}
     for k in history[expert_idx]:
         if k in comps:
             val = comps[k]
@@ -411,12 +255,7 @@ def _record(history, expert_idx, comps):
 def _record_continuity(history, expert_idx, cont_val):
     """Record continuity loss for an expert (separate from main _record)."""
     if expert_idx not in history:
-        history[expert_idx] = {
-            k: [] for k in [
-                'residual', 'interface_t', 'interface_x',
-                'interface_x_deriv', 'total', 'continuity',
-            ]
-        }
+        history[expert_idx] = {k: [] for k in _TERM_KEYS}
     # Append to continuity; if list is shorter, pad with 0
     cont_list = history[expert_idx]['continuity']
     while len(cont_list) < len(history[expert_idx]['total']) - 1:
@@ -429,7 +268,7 @@ def _compute_continuity_loss(
     deriv_fn, pde_params, device, problem,
 ):
     """Compute continuity loss on shared interior faces between neighbors.
-    
+
     For each pair (a, b) of face-neighbor experts, enforces agreement of:
     - Value: u_a = u_b
     - First derivative: ∂u_a/∂d = ∂u_b/∂d (where d is face-normal dim)
@@ -522,7 +361,8 @@ def _compute_continuity_loss(
     return total_loss, cont_per_expert
 
 
-# Highest spatial derivative order per PDE (drives continuity matching depth).
+# Highest spatial derivative order per PDE (drives continuity matching depth
+# and is the reference point m for the imitation order q <= m-1).
 _PDE_SPATIAL_ORDER = {
     'allen_cahn': 2,
     'burgers1d': 2,
@@ -535,7 +375,7 @@ _PDE_SPATIAL_ORDER = {
 def _pde_spatial_order(problem: str) -> int:
     if problem not in _PDE_SPATIAL_ORDER:
         raise ValueError(
-            f"split loss has no PDE order mapping for '{problem}' "
+            f"owner-imitator loss has no PDE order mapping for '{problem}' "
             f"(known: {sorted(_PDE_SPATIAL_ORDER)})")
     return _PDE_SPATIAL_ORDER[problem]
 
@@ -562,4 +402,5 @@ def _get_pde_params(problem: str, pc: Dict) -> Dict:
         }
     if problem == 'schrodinger':
         return {}  # fixed coefficients (1/2 and 1)
-    raise ValueError(f"split loss has no PDE params mapping for '{problem}'")
+    raise ValueError(f"owner-imitator loss has no PDE params mapping for "
+                     f"'{problem}'")

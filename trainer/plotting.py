@@ -212,8 +212,9 @@ def plot_per_expert_curves(
     grid_t=None,
     segment_name: str = '',
     split_data: dict = None,
+    inflated_boxes: dict = None,
 ) -> None:
-    """Per-expert term-wise loss + region-on-GT panel.
+    """Per-expert term-wise loss + sampling-map-on-GT panel.
 
     Args:
         per_expert_history: ``{expert_idx: {term: [values]}}``
@@ -223,10 +224,15 @@ def plot_per_expert_curves(
         gt_grid: optional ground-truth 2-D array
         grid_x, grid_t: 1-D coordinate arrays for gt_grid
         segment_name: label for the figure title
-        split_data: optional subdomain dataset dict with keys
-            ``x``, ``t``, ``expert_id``, ``kind``.  When provided, the
-            non-residual points (IC/interface/BC) are overlaid as a scatter
-            on the bottom region panel, colour-coded by kind.
+        split_data: optional owner-imitator dataset dict with keys
+            ``x``, ``t``, ``expert_id``, ``kind`` (+ ``mint_owner``,
+            ``mint_x``). When provided, the bottom region panel becomes a
+            sampling map: residual points, IC/BC/PER markers (with the
+            PER mirror segment), and the IMIT collar points colour-coded
+            by their mint owner, whose tile is outlined in the matching
+            colour.
+        inflated_boxes: optional ``{eidx: (lo, hi)}`` of the experts'
+            inflated boxes (window supports), drawn as dashed rectangles.
     """
     import matplotlib.patches as patches
 
@@ -238,37 +244,66 @@ def plot_per_expert_curves(
     if n_experts == 0:
         return
 
-    # Pre-process split_data into per-expert numpy arrays keyed by kind
-    # KIND codes match adaptive/subdomain_data.py
-    _KIND_IFACE_T = 2
-    _KIND_IFACE_X = 3
-    _icbc_kinds = {
-        _KIND_IFACE_T: ('Interface t-face', '#9b59b6', 's', 18),
-        _KIND_IFACE_X: ('Interface x-face', '#f39c12', '^', 18),
+    # Pre-process split_data into per-expert numpy arrays keyed by kind.
+    # KIND codes match adaptive/subdomain_data.py:
+    # 0 residual, 1 ic, 2 bc, 3 per, 4 imit (5 continuity, not drawn).
+    _K_RES, _K_IC, _K_BC, _K_PER, _K_IMIT = 0, 1, 2, 3, 4
+    _PT_SIZE = 9  # one size for every sample marker (publication style)
+    _point_kinds = {
+        _K_IC:  ('IC', '#3498db', 's', _PT_SIZE),
+        _K_BC:  ('BC', '#f39c12', '^', _PT_SIZE),
+        _K_PER: ('periodic face', '#e84393', '^', _PT_SIZE),
     }
-    _sd_by_expert: dict = {}   # {eidx: {kind_code: (x_arr, t_arr)}}
+    _MAX_RES_PTS = 400
+    _MAX_IMIT_PTS = 300
+    # {eidx: {'kinds': {kcode: (x, t)}, 'res': (x, t),
+    #         'imit': (x, t, owners), 'per_mirror': (x, t)}}
+    _sd_by_expert: dict = {}
     if split_data is not None:
         try:
             import torch
-            sd_x   = split_data['x']
-            sd_t   = split_data['t']
+            sd_x = split_data['x']
+            sd_t = split_data['t']
             sd_eid = split_data['expert_id']
-            sd_k   = split_data['kind']
+            sd_k = split_data['kind']
+            sd_mo = split_data.get('mint_owner', None)
+            sd_mx = split_data.get('mint_x', None)
             if isinstance(sd_x, torch.Tensor):
-                sd_x   = sd_x.cpu().numpy()
-                sd_t   = sd_t.cpu().numpy()
+                sd_x = sd_x.cpu().numpy()
+                sd_t = sd_t.cpu().numpy()
                 sd_eid = sd_eid.cpu().numpy()
-                sd_k   = sd_k.cpu().numpy()
+                sd_k = sd_k.cpu().numpy()
+                sd_mo = sd_mo.cpu().numpy() if sd_mo is not None else None
+                sd_mx = sd_mx.cpu().numpy() if sd_mx is not None else None
+
+            def _subsample(mask, cap):
+                idx = np.nonzero(mask)[0]
+                if len(idx) > cap:
+                    idx = np.random.default_rng(0).choice(
+                        idx, size=cap, replace=False)
+                return idx
+
             for eidx in expert_ids:
                 emask = (sd_eid == eidx)
-                _sd_by_expert[eidx] = {}
-                for kcode in _icbc_kinds:
+                entry = {'kinds': {}}
+                for kcode in _point_kinds:
                     kmask = emask & (sd_k == kcode)
                     if kmask.any():
-                        _sd_by_expert[eidx][kcode] = (
-                            sd_x[kmask, 0],
-                            sd_t[kmask, 0],
-                        )
+                        entry['kinds'][kcode] = (sd_x[kmask, 0],
+                                                 sd_t[kmask, 0])
+                        if kcode == _K_PER and sd_mx is not None:
+                            entry['per_mirror'] = (sd_mx[kmask, 0],
+                                                   sd_t[kmask, 0])
+                ridx = _subsample(emask & (sd_k == _K_RES), _MAX_RES_PTS)
+                if len(ridx):
+                    entry['res'] = (sd_x[ridx, 0], sd_t[ridx, 0])
+                if sd_mo is not None:
+                    midx = _subsample(emask & (sd_k == _K_IMIT),
+                                      _MAX_IMIT_PTS)
+                    if len(midx):
+                        entry['imit'] = (sd_x[midx, 0], sd_t[midx, 0],
+                                         sd_mo[midx])
+                _sd_by_expert[eidx] = entry
         except Exception:
             _sd_by_expert = {}
 
@@ -280,12 +315,17 @@ def plot_per_expert_curves(
 
     term_colors = {
         'residual': '#e74c3c',
-        'interface_t': '#9b59b6',
-        'interface_x': '#f39c12',
-        'interface_x_deriv': '#e84393',
+        'ic': '#3498db',
+        'bc': '#f39c12',
+        'per': '#e84393',
+        'imit': '#9b59b6',
         'continuity': '#e67e22',  # orange for continuity term
         'total': '#2c3e50',
     }
+
+    # Owner colours for the imitation scatter (stable per owner index).
+    _owner_cmap = plt.get_cmap('tab10')
+    _owner_color = lambda k: _owner_cmap(int(k) % 10)
 
     def _draw_curve_panel(ax, eidx, title=None):
         """Term-wise loss curves for one expert."""
@@ -372,17 +412,58 @@ def plot_per_expert_curves(
             ax2.set_xlim(lo[0] - pad * xr, hi[0] + pad * xr)
             ax2.set_ylim(lo[-1] - pad * tr, hi[-1] + pad * tr)
 
-        # Scatter IC/BC interface samples for this expert
-        if eidx in _sd_by_expert:
-            for kcode, (label, color, marker, ms) in _icbc_kinds.items():
-                if kcode in _sd_by_expert[eidx]:
-                    xs, ts = _sd_by_expert[eidx][kcode]
-                    ax2.scatter(
-                        xs, ts,
-                        s=ms, c=color, marker=marker,
-                        label=label, zorder=20, alpha=0.8,
-                        linewidths=0,
-                    )
+        # Support region (window support = subdomain + collar), dashed.
+        if inflated_boxes and eidx in inflated_boxes:
+            ib_lo, ib_hi = inflated_boxes[eidx]
+            rect_i = patches.Rectangle(
+                (ib_lo[0], ib_lo[-1]),
+                ib_hi[0] - ib_lo[0],
+                ib_hi[-1] - ib_lo[-1],
+                linewidth=1.5,
+                linestyle='--',
+                edgecolor='red',
+                facecolor='none',
+                label='support region',
+                zorder=11,
+            )
+            ax2.add_patch(rect_i)
+
+        # Sampling map for this expert
+        entry = _sd_by_expert.get(eidx, {})
+        if 'res' in entry:
+            xs, ts = entry['res']
+            ax2.scatter(xs, ts, s=_PT_SIZE, c='0.25', marker='.',
+                        label='residual (subdomain)', zorder=15,
+                        alpha=0.35, linewidths=0)
+        for kcode, (label, color, marker, ms) in _point_kinds.items():
+            if kcode in entry.get('kinds', {}):
+                xs, ts = entry['kinds'][kcode]
+                ax2.scatter(xs, ts, s=ms, c=color, marker=marker,
+                            label=label, zorder=20, alpha=0.85,
+                            linewidths=0)
+        if 'per_mirror' in entry:
+            xs, ts = entry['per_mirror']
+            ax2.scatter(xs, ts, s=_PT_SIZE, c='#e84393', marker='x',
+                        label='periodic mirror', zorder=20, alpha=0.85,
+                        linewidths=0.8)
+        if 'imit' in entry:
+            xs, ts, owners = entry['imit']
+            for k in np.unique(owners):
+                omask = (owners == k)
+                col = _owner_color(k)
+                ax2.scatter(xs[omask], ts[omask], s=_PT_SIZE, color=col,
+                            marker='o', label='imitation (owner)',
+                            zorder=18, alpha=0.7, linewidths=0)
+                # Outline the owner's tile in the matching colour.
+                if 0 <= int(k) < len(regions):
+                    rk = regions[int(k)]
+                    ax2.add_patch(patches.Rectangle(
+                        (rk.bounds_lower[0], rk.bounds_lower[-1]),
+                        rk.bounds_upper[0] - rk.bounds_lower[0],
+                        rk.bounds_upper[-1] - rk.bounds_lower[-1],
+                        linewidth=1.8, linestyle=':',
+                        edgecolor=col, facecolor='none', zorder=12,
+                    ))
 
         ax2.set_xlabel('x', fontsize=11)
         ax2.set_ylabel('t', fontsize=11)
@@ -393,10 +474,11 @@ def plot_per_expert_curves(
         _draw_curve_panel(axes[0, col], eidx, title=f'Expert {eidx}')
         _draw_region_panel(axes[1, col], eidx, title=f'Region E{eidx}')
 
-    # Shared figure-level legends (deduplicated across panels) instead of
-    # one repeated legend per panel; no suptitle — segment/expert counts
-    # belong in the filename and the paper caption.
-    def _fig_legend(row_axes, loc_y):
+    # Shared figure-level legends (deduplicated across panels), placed
+    # fully OUTSIDE the axes (above / below the figure — save_png uses
+    # bbox_inches='tight' so they are kept); no suptitle — segment/expert
+    # counts belong in the filename and the paper caption.
+    def _fig_legend(row_axes, loc, loc_y):
         seen = {}
         for ax_ in row_axes:
             h_, l_ = ax_.get_legend_handles_labels()
@@ -404,11 +486,11 @@ def plot_per_expert_curves(
                 seen.setdefault(l, h)
         if seen:
             fig.legend(seen.values(), seen.keys(), ncol=len(seen),
-                       fontsize=10, loc='upper center',
+                       fontsize=10, loc=loc,
                        bbox_to_anchor=(0.5, loc_y), frameon=True)
 
-    _fig_legend(axes[0, :], 1.06)   # loss terms
-    _fig_legend(axes[1, :], 0.52)   # IC/BC scatter kinds
+    _fig_legend(axes[0, :], 'lower center', 1.005)  # loss terms (above)
+    _fig_legend(axes[1, :], 'upper center', -0.005)  # sample kinds (below)
 
     plt.tight_layout()
     from utils.plot_io import save_png
@@ -421,10 +503,25 @@ def plot_per_expert_curves(
         fig_e, (axc, axr) = plt.subplots(1, 2, figsize=(11, 4.5))
         _draw_curve_panel(axc, eidx)
         _draw_region_panel(axr, eidx)
-        if axc.get_legend_handles_labels()[0]:
-            axc.legend(fontsize=9, frameon=True)
-        if axr.get_legend_handles_labels()[0]:
-            axr.legend(fontsize=9, frameon=True, loc='upper right')
+
+        def _below_legend(ax_, max_ncol=None):
+            """Horizontal deduplicated legend below the axes, never over
+            the panel content. ``max_ncol`` wraps wide legends so they
+            stay within their own panel's width."""
+            h_, l_ = ax_.get_legend_handles_labels()
+            if not h_:
+                return
+            seen = {}
+            for h, l in zip(h_, l_):
+                seen.setdefault(l, h)
+            ncol = len(seen) if max_ncol is None else min(max_ncol,
+                                                          len(seen))
+            ax_.legend(seen.values(), seen.keys(), fontsize=8,
+                       frameon=True, loc='upper center',
+                       bbox_to_anchor=(0.5, -0.14), ncol=ncol)
+
+        _below_legend(axc)             # short term names: one row fits
+        _below_legend(axr, max_ncol=3)  # longer labels: wrap to 2 rows
         plt.tight_layout()
         save_png(
             save_path.with_name(

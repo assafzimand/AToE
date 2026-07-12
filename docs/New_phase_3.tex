@@ -1,0 +1,184 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+
+\newcommand{\sg}{\mathrm{sg}}
+
+\begin{document}
+
+\section*{Owner--Imitator Training with POU Readout}
+
+\subsection*{Geometry and readout}
+The tiles $\{\Omega_j\}_{j\in\mathcal L}$ are the regions of the leaves
+$\mathcal L$ of the full binary decision tree; as leaves of a full
+binary subdivision they tile $\Omega$. Every point $X \in \Omega$
+therefore has a unique \emph{owner}
+\begin{equation}
+k(X) \in \mathcal L
+\quad\text{defined by}\quad
+X \in \Omega_{k(X)} .
+\end{equation}
+Each expert $u_j$ carries a smoothstep window $\Psi_j$ supported on the
+inflated box $\widetilde\Omega_j \supset \Omega_j$; the fat band
+$\widetilde\Omega_j \setminus \Omega_j$ (width $\delta$) is its
+\emph{collar}, on which $j$ is never the owner. The global model is the
+normalized POU composition, used as \emph{readout only} --- no loss term
+is ever evaluated on it:
+\begin{equation}
+u_\theta(X) \;=\; \sum_{j\in\mathcal L} \tilde\Psi_j(X)\, u_j(X),
+\qquad
+\tilde\Psi_j = \frac{\Psi_j}{\sum_{i\in\mathcal L}\Psi_i}.
+\label{eq:comp}
+\end{equation}
+
+\subsection*{Loss}
+Every expert has exactly one role at every point: \emph{owner}
+(physics) on its tile, \emph{imitator} (distillation) elsewhere. The
+loss of this stage is, for each expert $j$,
+\begin{equation}
+\mathcal L_j
+= \mathcal L^{res}_j + \mathcal L^{ic}_j + \mathcal L^{bc}_j
++ \mathcal L^{per}_j + \mathcal L^{imit}_j ,
+\label{eq:loss}
+\end{equation}
+with each term a mean over a sample set drawn from its region:
+\begin{align}
+\mathcal L^{res}_j
+&= \frac{1}{|X^{res}_j|} \sum_{X \in X^{res}_j}
+   \bigl\| \mathcal N[u_j](X) \bigr\|^2 ,
+&& X^{res}_j \subset \Omega_j ,
+\label{eq:term_res}\\
+\mathcal L^{ic}_j
+&= \frac{1}{|X^{ic}_j|} \sum_{X \in X^{ic}_j}
+   \bigl\| u_j(X) - g_{ic}(X) \bigr\|^2 ,
+&& X^{ic}_j \subset \Omega_j \cap \{t = 0\} ,
+\label{eq:term_ic}\\
+\mathcal L^{bc}_j
+&= \frac{1}{|X^{bc}_j|} \sum_{X \in X^{bc}_j}
+   \bigl\| \mathcal B[u_j](X) - g_{bc}(X) \bigr\|^2 ,
+&& X^{bc}_j \subset \partial\Omega_j \cap \partial\Omega_{non\text{-}per} ,
+\label{eq:term_bc}\\
+\mathcal L^{per}_j
+&= \frac{1}{|X^{per}_j|} \sum_{X \in X^{per}_j}
+   \sum_{\alpha \in \mathcal A_{per}}
+   \bigl\| D^\alpha u_j(X) - D^\alpha u^\star_\lambda(\sigma(X))
+   \bigr\|^2 ,
+&& X^{per}_j \subset \partial\Omega_j \cap \partial\Omega_{per} ,
+\label{eq:term_per}\\
+\mathcal L^{imit}_j
+&= \frac{1}{|X^{imit}_j|} \sum_{X \in X^{imit}_j}
+   \sum_{|\alpha| \le m-1} w_\alpha
+   \bigl\| D^\alpha u_j(X) - D^\alpha u^\star_\lambda(X) \bigr\|^2 ,
+&& X^{imit}_j \subset \widetilde\Omega_j \setminus \Omega_j .
+\label{eq:term_imit}
+\end{align}
+Here $g_{ic}, g_{bc}$ are the given initial/boundary data,
+$\mathcal B$ the (Dirichlet or Neumann) boundary operator,
+$\sigma(X)$ the mirror map of the periodic boundary
+(e.g.\ $\sigma(x_{\min},t) = (x_{\max},t)$),
+$\mathcal A_{per}$ the derivative set of the global periodic condition,
+and $m$ the PDE order (set in config): both minted terms match values
+\emph{and derivatives up to order $m-1$}. The IC/BC/periodic terms apply
+only to experts whose tile meets the corresponding portion of
+$\partial\Omega$. The total loss is
+$\sum_{j\in\mathcal L} \mathcal L_j$; the summands are mutually
+independent, so all experts train in parallel under one optimizer.
+
+\subsection*{Minted target}
+Both minted terms use the same homotopy,
+\begin{equation}
+u^\star_\lambda(X)
+= \lambda\, u_0(X)
++ (1-\lambda)\;\sg\!\bigl[\, u_{k(X)}(X) \,\bigr],
+\label{eq:mint}
+\end{equation}
+where $k(X)$ is the owner --- the tile owner on the collar, the mirror
+expert on the periodic boundary --- and $\sg[\cdot]$ is a stop-gradient
+snapshot: targets (values and derivatives, computed by autodiff through
+the frozen snapshot) are constant data between refreshes and never move
+with the weights. $\lambda$ decreases linearly from $1$ to a
+configurable floor $\lambda_{\min} \in [0,1]$ over the refresh events:
+$\lambda_{\min} = 1$ is pure root anchoring; $\lambda_{\min} = 0$ is the
+full exchange in which each imitator copies the current owner.
+
+\subsection*{Why the smooth readout inherits the hard accuracy}
+Wherever imitation is tight, the blend \emph{degenerates} to the owner:
+at a seam, $u_\theta = \tilde\Psi_j u_j + \tilde\Psi_k u_k \to u_k$
+whenever $u_j \to u_k$ on the overlap, independently of the window
+values. The POU never averages two different solutions (no
+nonlinear-superposition issue --- locally it represents a single
+function); it returns the piecewise-owner solution, $C^N$-smooth by
+construction. The blend's residual excess at a seam is bounded by
+$\sum_{i=1}^{m} \varepsilon_{m-i}\,\delta^{-i}$, with $\varepsilon_p$
+the imitation error in the $p$-th derivative --- which is why the
+minted terms match derivatives up to $m-1$: value-only imitation would
+leave the $\varepsilon_0\,\delta^{-m}$ term, fatal for high-order PDEs.
+
+\subsection*{Training}
+One optimizer over the summed loss \eqref{eq:loss}, switching from Adam
+to SSBroyden with Strong Wolfe line search. Every $R$ epochs
+(\texttt{resample\_every}), three things happen together:
+\begin{enumerate}
+\item residual, collar, and boundary points are resampled;
+\item the snapshots of all owners are updated to the current weights,
+and all minted targets \eqref{eq:mint} are re-evaluated;
+\item $\lambda$ takes one linear step toward $\lambda_{\min}$.
+\end{enumerate}
+Between refreshes the loss landscape is fixed. The interaction with the
+optimizers follows established practice for quasi-Newton PINN training.
+Random resampling benefits first-order methods but is known to be
+incompatible with running full-batch quasi-Newton updates, which rely on
+past trajectories for their curvature estimates; the standard remedies
+in the SSBroyden/L-BFGS literature are either (i) a single fixed batch
+for the entire quasi-Newton phase, or (ii) a two-loop structure in which
+an outer loop resamples the points and each inner loop is a
+deterministic solve on the resulting fixed batch. Our refresh loop is
+exactly the two-loop pattern, with the outer iteration additionally
+updating the snapshots and $\lambda$. Hence:
+\begin{itemize}
+\item \textbf{Every refresh restarts the SSBroyden state} (the inner
+solve begins with empty quasi-Newton memory on the new deterministic
+landscape); Adam state may simply continue. $R$ must therefore be large
+enough for each inner solve to be productive --- on the order of several
+thousand iterations during the SSBroyden phase --- while during the Adam
+phase $R$ may be small.
+\item \textbf{Refreshing from partially converged owners is inexact
+(Jacobi) Schwarz} --- convergent, but with very small $R$ the minted
+targets carry transient noise; the same lower bound on $R$ covers this.
+\end{itemize}
+The refresh loop is the Schwarz mechanism in disguise: an owner's
+weakest region is the rim of its own tile, and the data it exports to
+its neighbors' collars comes from that rim; at each refresh the roles
+reverse, and each expert's accurate interior supplies the neighbor's
+rim. The first phase ($\lambda = 1$) anchors everyone to the root;
+successive refreshes let seam quality contract below the root's error.
+
+\begin{algorithm}[H]
+\caption{Owner--imitator training of AToE experts (fine-tune excluded)}
+\begin{algorithmic}[1]
+\Require converged root $u_0$; tiles $\{\Omega_j\}$ (tree leaves),
+windows $\{\Psi_j\}$ (collar width $\delta$); PDE order $m$; epochs $E$,
+\texttt{resample\_every} $R$; $\lambda$ schedule $1 \to \lambda_{\min}$
+(linear over refreshes); Adam$\to$SSBroyden switch point
+\State Initialize experts; per-leaf input normalization
+\State Sample all point sets; snapshot all parameters; mint targets
+(values $+$ derivatives up to $m-1$) at $\lambda = 1$
+\Comment{$\equiv$ mint to $u_0$}
+\For{epoch $= 1,\dots,E$} \Comment{one optimizer, all experts in
+parallel}
+  \State step on $\sum_j \mathcal L_j$ \eqref{eq:loss}
+  (Adam, then SSBroyden after the switch)
+  \If{epoch $\bmod R = 0$}
+    \State resample points; snapshot all parameters; step $\lambda$;
+    re-mint all targets \eqref{eq:mint}
+    \State reset SSBroyden memory (Adam state may persist)
+  \EndIf
+\EndFor
+\Ensure smooth readout $u_\theta$ \eqref{eq:comp}, collapsing to the
+piecewise-owner solution wherever imitation is tight
+\end{algorithmic}
+\end{algorithm}
+
+\end{document}

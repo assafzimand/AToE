@@ -36,8 +36,6 @@ from utils.config_validation import (
 from losses.causal_weighting import advance_causal_schedule, create_causal_state
 from losses.lra import LRAWeights
 import losses.ks_loss as _ks_loss_module
-from losses.split_loss import build_split_loss
-from adaptive.subdomain_data import build_subdomain_data, KIND_NAMES
 
 
 def _override_ic_for_time_marching(
@@ -453,23 +451,16 @@ def _create_split_dataloader(
     batch_size: int,
     shuffle: bool,
 ) -> DataLoader:
-    """Create DataLoader for split-loss subdomain data (expert_id + kind + h_x_gt + continuity schema)."""
-    dataset = TensorDataset(
-        data['x'], data['t'], data['h_gt'], data['h_x_gt'],
-        data['expert_id'], data['kind'],
-        data['cont_neighbor'], data['cont_dim'],
-    )
+    """Create DataLoader for owner-imitator subdomain data
+    (expert_id + kind + mint targets + continuity schema)."""
+    _cols = ['x', 't', 'h_gt', 'mint', 'expert_id', 'kind',
+             'mint_owner', 'mint_x', 'cont_neighbor', 'cont_dim']
+    dataset = TensorDataset(*(data[c] for c in _cols))
 
     def collate_fn(batch_list):
         return {
-            'x': torch.stack([b[0] for b in batch_list]),
-            't': torch.stack([b[1] for b in batch_list]),
-            'h_gt': torch.stack([b[2] for b in batch_list]),
-            'h_x_gt': torch.stack([b[3] for b in batch_list]),
-            'expert_id': torch.stack([b[4] for b in batch_list]),
-            'kind': torch.stack([b[5] for b in batch_list]),
-            'cont_neighbor': torch.stack([b[6] for b in batch_list]),
-            'cont_dim': torch.stack([b[7] for b in batch_list]),
+            col: torch.stack([b[i] for b in batch_list])
+            for i, col in enumerate(_cols)
         }
 
     return DataLoader(
@@ -1129,10 +1120,15 @@ def _setup_training(
         _pln = adaptive_cfg.get('per_leaf_normalization', True)
         logger.info(f"  Per-leaf input normalization: "
                     f"{'enabled' if _pln else 'disabled'}")
-        _idw = float((adaptive_cfg.get('split_icbc', {}) or {}).get(
-            'interface_decrease_weight', 0.0) or 0.0)
-        logger.info("  Interface-weight anneal: "
-                    + (f"enabled (w={_idw})" if _idw > 0 else "disabled"))
+        _oi = adaptive_cfg.get('owner_imitator', {}) or {}
+        if _oi.get('enabled', False):
+            logger.info(
+                f"  Owner-imitator phase 3: enabled "
+                f"(mint_lambda_min={_oi.get('mint_lambda_min', 0.0)}, "
+                f"imit_derivative_order={_oi.get('imit_derivative_order', 1)}, "
+                f"refresh=resample cadence)")
+        else:
+            logger.info("  Owner-imitator phase 3: disabled")
         _cdr = float((adaptive_cfg.get('fine_tune', {}) or {}).get(
             'collar_data_ratio', 0.0) or 0.0)
         logger.info("  Fine-tune collar sampling: "
