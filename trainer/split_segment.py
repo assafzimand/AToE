@@ -59,30 +59,44 @@ def _run_split_segment(
     m = _pde_spatial_order(problem)
     oi_cfg = (ctx.adaptive_cfg.get('owner_imitator', {}) or {})
     lambda_min = float(oi_cfg.get('mint_lambda_min', 0.0) or 0.0)
+    epochs_on_min = int(oi_cfg.get('epochs_on_min_lambda', 0) or 0)
 
     # Refresh schedule: mirror the epoch loop's resample gate exactly
     # (epoch > 1 and (epoch - 1) % resample_every == 0) over this
-    # segment's epoch range, so the lambda ladder lands on lambda_min at
-    # the last refresh.
+    # segment's epoch range. The linear 1 -> lambda_min ramp spans only
+    # the refreshes up to (segment end - epochs_on_min_lambda); the
+    # remaining refreshes hold lambda_min (pure exchange window).
     seg_start = ctx.epoch
     resample_every = ctx.resample_every
     if resample_every and resample_every > 0:
-        n_refresh_total = sum(
-            1 for e in range(seg_start + 1, seg_start + epoch_budget + 1)
-            if e > 1 and (e - 1) % resample_every == 0)
+        _refresh_epochs = [
+            e for e in range(seg_start + 1, seg_start + epoch_budget + 1)
+            if e > 1 and (e - 1) % resample_every == 0]
+        n_refresh_total = len(_refresh_epochs)
+        ramp_end = seg_start + epoch_budget - epochs_on_min
+        n_ramp_refreshes = sum(1 for e in _refresh_epochs if e <= ramp_end)
     else:
         n_refresh_total = 0
+        n_ramp_refreshes = 0
+    if n_refresh_total > 0 and n_ramp_refreshes == 0:
+        logger.warning(
+            "[OwnerImitator] epochs_on_min_lambda leaves no refreshes in "
+            "the ramp window — lambda jumps to lambda_min at the first "
+            "refresh.")
 
     _slot_names = (['value']
                    + [f'u_x^{p}' if p > 1 else 'u_x' for p in range(1, q + 1)]
                    + [f'u_t^{p}' if p > 1 else 'u_t' for p in range(1, q + 1)])
     _ladder = [1.0] + [
-        max(lambda_min, 1.0 - k * (1.0 - lambda_min) / max(1, n_refresh_total))
+        max(lambda_min,
+            1.0 - k * (1.0 - lambda_min) / max(1, n_ramp_refreshes))
         for k in range(1, n_refresh_total + 1)]
     logger.info(
         f"[OwnerImitator] config: lambda_min={lambda_min}, "
+        f"epochs_on_min_lambda={epochs_on_min} "
+        f"(ramp over {n_ramp_refreshes}/{n_refresh_total} refreshes), "
         f"q={q} (slots {_slot_names}; PDE order m={m}), "
-        f"R={resample_every} epochs, n_refresh_total={n_refresh_total}, "
+        f"R={resample_every} epochs, "
         f"lambda ladder {[round(v, 4) for v in _ladder]}")
     logger.info(
         f"[OwnerImitator] {len(new_expert_indices)} experts; every term "
@@ -140,6 +154,7 @@ def _run_split_segment(
         'lambda_min': lambda_min,
         'refresh_count': 0,
         'n_refresh_total': n_refresh_total,
+        'n_ramp_refreshes': n_ramp_refreshes,
         'imit_order': q,
     }
 

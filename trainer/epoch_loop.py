@@ -281,9 +281,12 @@ def _train_segment(
                 _lam_prev = _split_ctx.get('lambda', 1.0)
                 _lam_min = _split_ctx.get('lambda_min', 0.0)
                 _n_total = max(1, _split_ctx.get('n_refresh_total', 1))
+                # Ramp denominator: refreshes inside the ramp window only
+                # (epochs_on_min_lambda holds lambda_min after it).
+                _n_ramp = max(1, _split_ctx.get('n_ramp_refreshes', _n_total))
                 _lam = max(_lam_min,
                            1.0 - _split_ctx['refresh_count']
-                           * (1.0 - _lam_min) / _n_total)
+                           * (1.0 - _lam_min) / _n_ramp)
                 _split_ctx['lambda'] = _lam
                 train_data = build_owner_imitator_data(
                     _split_ctx['new_expert_indices'],

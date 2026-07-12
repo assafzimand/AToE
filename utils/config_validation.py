@@ -90,7 +90,8 @@ def validate_adaptive_staged_config(cfg: Dict[str, Any]) -> None:
     Optional AToE-Leaves keys:
       * ``adaptive_pinn.owner_imitator`` (dict): phase-3 owner-imitator
         training — ``enabled``, ``mint_lambda_min``,
-        ``imit_derivative_order``, ``imit_weights``.
+        ``epochs_on_min_lambda``, ``imit_derivative_order``,
+        ``imit_weights``.
       * ``loss_weights.continuity`` (float, default 1.0): weight for the
         neighbor-continuity loss term in owner-imitator training.
 
