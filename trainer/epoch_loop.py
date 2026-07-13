@@ -226,9 +226,10 @@ def _train_segment(
                 model._adaptive_sampling_activated = True
                 logger.info(f"  [Adaptive Sampling] Residual caching active from epoch {epoch}")
 
-        # Enable residual caching in split_loss_fn for diagnostic heatmap plots.
-        # (The model-level cache is not populated in the split path; the loss fn
-        # owns the cache instead.)
+        # Enable residual caching in split_loss_fn for diagnostic heatmap plots
+        # and — when adaptive sampling is on — for the next epoch's adaptive
+        # residual redraw. (The model-level cache is not populated in the split
+        # path; the loss fn owns the cache instead.)
         _split_loss_fn = loss_fn if hasattr(loss_fn, '_residual_cache') else None
         _will_cache_split = (
             _split_loss_fn is not None
@@ -236,10 +237,22 @@ def _train_segment(
             and epoch > 0 and epoch % plot_samples_every == 0
             and _problem_spatial_dim == 1
         )
+        _will_cache_split_resample = (
+            _split_loss_fn is not None
+            and adaptive_sampling_enabled
+            and resample_every > 0
+            and epoch > 0 and epoch % resample_every == 0
+        )
         if _split_loss_fn is not None:
-            _split_loss_fn._cache_residuals = _will_cache_split
-            if _will_cache_split:
+            _cache_split_now = _will_cache_split or _will_cache_split_resample
+            _split_loss_fn._cache_residuals = _cache_split_now
+            if _cache_split_now:
                 _split_loss_fn._residual_cache.clear()
+            if _will_cache_split_resample and not hasattr(
+                    _split_loss_fn, '_adaptive_sampling_activated'):
+                _split_loss_fn._adaptive_sampling_activated = True
+                logger.info(f"  [Adaptive Sampling] Split residual caching "
+                            f"active from epoch {epoch}")
 
         # Resample training data periodically (in-memory, no disk I/O).
         # The cadence applies to ALL optimizers, full-batch quasi-Newton
@@ -258,7 +271,17 @@ def _train_segment(
             resample_seed = base_seed + epoch
             _resampled_this_epoch = True
             if _split_ctx is not None:
-                logger.info(f"  [Resample-Split] Redrawing residual interiors at epoch {epoch}")
+                # Adaptive sampling: hand last epoch's per-expert residual
+                # cache to the sampler (uniform/adaptive mix, same as the
+                # non-split path). Empty/absent cache → pure uniform draw.
+                _split_cached = (list(_split_loss_fn._residual_cache)
+                                 if (adaptive_sampling_enabled
+                                     and _split_loss_fn is not None
+                                     and _split_loss_fn._residual_cache)
+                                 else None)
+                _mode = 'adaptive' if _split_cached else 'uniform'
+                logger.info(f"  [Resample-Split] Redrawing residual interiors "
+                            f"({_mode}) at epoch {epoch}")
                 # Static faces + interface targets are cached for the segment;
                 # only the residual collocation points are redrawn.
                 train_data = build_subdomain_data(
@@ -266,7 +289,11 @@ def _train_segment(
                     _split_ctx['regions'], cfg, device, seed=resample_seed,
                     interface_model=_split_ctx.get('interface_model'),
                     static=_split_ctx.get('static'),
+                    cached_residuals=_split_cached,
+                    run_dir=run_dir, epoch=epoch,
                 )
+                if _split_cached is not None:
+                    _split_loss_fn._residual_cache.clear()
                 ctx.train_data = train_data
                 _set_default_torch_device(device, full_batch=False)
                 train_loader = _create_split_dataloader(
@@ -285,7 +312,10 @@ def _train_segment(
                 })
                 # Diagnostic residual heatmap: drain the per-expert residual cache
                 # collected this epoch (union of all experts' local residual points).
-                if (_split_loss_fn is not None
+                # With adaptive sampling on, the sampler already saved the richer
+                # heatmap (cache + sampled points) above — skip the plain one.
+                if (not adaptive_sampling_enabled
+                        and _split_loss_fn is not None
                         and _split_loss_fn._residual_cache
                         and _problem_spatial_dim == 1
                         and (epoch - 1) % plot_samples_every == 0):

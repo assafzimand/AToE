@@ -1,0 +1,410 @@
+activation: tanh
+adam:
+  betas:
+  - 0.9
+  - 0.999
+  eps: 1.0e-08
+adaptive_pinn:
+  AToE_threshold_capacity: null
+  M_experts_num: 8
+  blending_mode: soft
+  enable_gradient_diagnostics: false
+  enable_timing: false
+  enabled: true
+  epsilon_node_acceptance: 0.0
+  expert_type: mlp
+  fine_tune:
+    epochs: 15
+    l2sp_lambda: 0.0
+    lr: 0.0001
+    lr_decay_rate: 0.98
+    lr_decay_steps: 1000
+    lr_schedule: none
+    lr_warmup_steps: 0
+    optimizer_1: adam
+    optimizer_2: ssbroyden
+    optimizer_switch_epoch: 5000
+  initial_train:
+    epochs: 5
+    lr: 0.001
+    lr_decay_rate: 0.98
+    lr_decay_steps: 1000
+    lr_schedule: none
+    lr_warmup_steps: 0
+    optimizer_1: adam
+    optimizer_2: ssbroyden
+    optimizer_switch_epoch: 5000
+  max_experts: 150
+  sigma_fraction: 0.2
+  split_icbc:
+    enabled: true
+  tree_max_depth: 15
+  tree_min_samples_leaf: 50
+  variable_for_expert_size: norm
+  variable_for_node_accept: norm
+allen_cahn:
+  D: 0.0001
+  adaptive_sampling:
+    adaptive_ratio: 0.5
+    enabled: true
+    phi: quadratic
+    phi_epsilon: 1.0
+    phi_power: 2.0
+  causal_training:
+    enabled: false
+    min_weight_threshold: 0.99
+    num_chunks: 32
+    tol_schedule:
+    - 0.01
+    - 0.1
+    - 1.0
+  expert_grad_clip_norm: null
+  fourier_features:
+    dim: 10
+    enabled: false
+    periodic: false
+    scale: 3.0
+  grad_clip_norm: null
+  init:
+    hidden: default
+    ls_use_bias: false
+    output: default
+  loss_weights:
+    bc: 1.0
+    continuity: 0.0
+    ic: 1.0
+    residual: 1.0
+  lra:
+    alpha: 0.1
+    enabled: false
+    epsilon: 1.0e-05
+    scheme: grad_norm
+    update_every: 100
+  new_norm_threshold: 0.04
+  output_dim: 1
+  pretrained_base_checkpoint: roots_checkpoints\allen_cahn_root.pt
+  rwf:
+    enabled: false
+    mean: 1.0
+    std: 0.1
+  spatial_dim: 1
+  spatial_domain:
+  - - -1.0
+    - 1.0
+  temporal_domain:
+  - 0.0
+  - 1.0
+  time_marching:
+    enabled: false
+    freeze_previous_windows: true
+    m_distribution: quadratic
+    num_windows: 5
+  tree_smoothness_threshold: 0.5
+  wavelet_threshold: 0.002
+  window_smoothness_order: 2
+  window_type: smoothstep
+base_architecture:
+- 2
+- 60
+- 60
+- 60
+- 60
+- 1
+batch_size: 99999
+burgers1d:
+  adaptive_sampling:
+    adaptive_ratio: 0.5
+    enabled: false
+    phi: quadratic
+    phi_epsilon: 1.0
+    phi_power: 2.0
+  causal_training:
+    enabled: false
+    min_weight_threshold: 0.99
+    num_chunks: 32
+    tol_schedule:
+    - 0.01
+    - 0.1
+    - 1.0
+  expert_grad_clip_norm: null
+  fourier_features:
+    dim: 128
+    enabled: false
+    periodic: false
+    scale: 1.0
+  grad_clip_norm: null
+  init:
+    hidden: default
+    ls_use_bias: false
+    output: default
+  loss_weights:
+    bc: 1.0
+    continuity: 0.0
+    ic: 1.0
+    residual: 1.0
+  lra:
+    alpha: 0.1
+    enabled: false
+    epsilon: 1.0e-05
+    scheme: grad_norm
+    update_every: 100
+  new_norm_threshold: 0.015
+  nu: 0.01
+  output_dim: 1
+  pretrained_base_checkpoint: null
+  rwf:
+    enabled: false
+    mean: 1.0
+    std: 0.1
+  spatial_dim: 1
+  spatial_domain:
+  - - -1.0
+    - 1.0
+  temporal_domain:
+  - 0.0
+  - 1.0
+  time_marching:
+    enabled: false
+    freeze_previous_windows: true
+    m_distribution: quadratic
+    num_windows: 5
+  tree_smoothness_threshold: 0.5
+  wavelet_threshold: 0.001
+  window_smoothness_order: 2
+  window_type: smoothstep
+cuda: true
+epochs: 25
+eval_every: 25
+eval_only: false
+experiment_tag: allen_cahn
+experts_architecture:
+- 2
+- 20
+- 20
+- 20
+- 1
+kdv:
+  adaptive_sampling:
+    adaptive_ratio: 0.3
+    enabled: false
+    phi: quadratic
+    phi_epsilon: 1.0
+    phi_power: 2.0
+  causal_training:
+    enabled: false
+    min_weight_threshold: 0.99
+    num_chunks: 16
+    tol_schedule:
+    - 0.01
+  expert_grad_clip_norm: null
+  fourier_features:
+    dim: 10
+    enabled: false
+    periodic: false
+    scale: 2.0
+  grad_clip_norm: null
+  init:
+    hidden: default
+    ls_use_bias: false
+    output: default
+  loss_weights:
+    bc: 1.0
+    continuity: 0.0
+    ic: 1.0
+    residual: 1.0
+  lra:
+    alpha: 0.1
+    enabled: false
+    epsilon: 1.0e-05
+    scheme: grad_norm
+    update_every: 1000
+  mu: 0.022
+  new_norm_threshold: 0.2
+  output_dim: 1
+  pretrained_base_checkpoint: null
+  rwf:
+    enabled: false
+    mean: 1.0
+    std: 0.1
+  spatial_dim: 1
+  spatial_domain:
+  - - -1.0
+    - 1.0
+  temporal_domain:
+  - 0.0
+  - 1.0
+  time_marching:
+    enabled: false
+    freeze_previous_windows: true
+    m_distribution: quadratic
+    num_windows: 5
+  tree_smoothness_threshold: 0.4
+  wavelet_threshold: 0.0025
+  window_smoothness_order: 3
+  window_type: smoothstep
+ks:
+  adaptive_sampling:
+    adaptive_ratio: 0.5
+    enabled: false
+    phi: quadratic
+    phi_epsilon: 1.0
+    phi_power: 2.0
+  alpha: 6.25
+  beta: 0.390625
+  causal_training:
+    enabled: false
+    min_weight_threshold: 0.99
+    num_chunks: 32
+    tol_schedule:
+    - 0.01
+    - 0.1
+    - 1
+  expert_grad_clip_norm: null
+  fourier_features:
+    dim: 10
+    enabled: false
+    periodic: false
+    scale: 1.0
+  gamma: 0.00152587890625
+  grad_clip_norm: null
+  init:
+    hidden: default
+    ls_use_bias: false
+    output: default
+  loss_weights:
+    bc: 1.0
+    continuity: 0.0
+    ic: 1.0
+    residual: 1.0
+  lra:
+    alpha: 0.1
+    enabled: false
+    epsilon: 1.0e-05
+    scheme: grad_norm
+    update_every: 100
+  new_norm_threshold: 10.0
+  output_dim: 1
+  pretrained_base_checkpoint: null
+  rwf:
+    enabled: false
+    mean: 1.0
+    std: 0.1
+  spatial_dim: 1
+  spatial_domain:
+  - - 0.0
+    - 6.283185307179586
+  temporal_domain:
+  - 0.0
+  - 1.0
+  time_marching:
+    enabled: false
+    freeze_previous_windows: true
+    m_distribution: quadratic
+    num_windows: 10
+  tree_smoothness_threshold: 0.3
+  wavelet_threshold: 0.04
+  window_smoothness_order: 4
+  window_type: smoothstep
+lbfgs:
+  history_size: 100
+  line_search: strong_wolfe
+  lr: 1.0
+  max_iter: 1
+  tolerance_change: 0.0
+  tolerance_grad: 0.0
+lr: 0.001
+lr_decay_rate: 0.98
+lr_decay_steps: 1000
+lr_schedule: none
+lr_warmup_start_factor: 0.01
+lr_warmup_steps: 0
+min_epochs: 1
+model: AToELeaves
+name: allen_cahn
+optimizer_1: adam
+optimizer_2: ssbroyden
+optimizer_switch_epoch: 5000
+patience_intervals: 10
+patience_rel_delta: 0.001
+precision: float64
+print_every: 25
+problem: allen_cahn
+resume_from: null
+sampling:
+  n_boundary_train: 256
+  n_initial_train: 256
+  n_residual_train: 2000
+  plot_samples_every: 10
+  resample_every_epochs: 10
+  sample_volume_ratio: 35
+save_every: 999999
+schrodinger:
+  adaptive_sampling:
+    adaptive_ratio: 0.3
+    enabled: false
+    phi: quadratic
+    phi_epsilon: 1.0
+    phi_power: 2.0
+  causal_training:
+    enabled: false
+    min_weight_threshold: 0.99
+    num_chunks: 32
+    tol_schedule:
+    - 0.01
+    - 0.1
+    - 1.0
+  expert_grad_clip_norm: null
+  fourier_features:
+    dim: 128
+    enabled: false
+    periodic: false
+    scale: 1.0
+  grad_clip_norm: null
+  init:
+    hidden: default
+    ls_use_bias: false
+    output: default
+  loss_weights:
+    bc: 1.0
+    continuity: 0.0
+    ic: 1.0
+    residual: 1.0
+  lra:
+    alpha: 0.1
+    enabled: false
+    epsilon: 1.0e-05
+    scheme: grad_norm
+    update_every: 100
+  new_norm_threshold: 2.0
+  output_dim: 2
+  pretrained_base_checkpoint: null
+  rwf:
+    enabled: false
+    mean: 1.0
+    std: 0.1
+  spatial_dim: 1
+  spatial_domain:
+  - - -5.0
+    - 5.0
+  temporal_domain:
+  - 0.0
+  - 1.5707963267948966
+  time_marching:
+    enabled: false
+    freeze_previous_windows: true
+    m_distribution: quadratic
+    num_windows: 5
+  tree_smoothness_threshold: 0.7
+  wavelet_threshold: 0.1
+  window_smoothness_order: 2
+  window_type: smoothstep
+seed: 42
+soap:
+  betas:
+  - 0.95
+  - 0.95
+  precondition_frequency: 10
+  weight_decay: 0.0
+ssbroyden:
+  lr: 1.0
+  tolerance_grad: 1.0e-10

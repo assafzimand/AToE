@@ -1,26 +1,18 @@
-# Source run (NCC-PINN): outputs/experiments/burgers/burgers_M10_20260704_151623
-# AToE-Leaves M=10 with split_icbc from the pretrained 60-wide root:
-# phase-3 leaf training 40k epochs + joint fine-tune 40k epochs, float64,
-# Adam->SSBroyden@1000, lr 1e-3 flat (fine-tune lr 1e-4, 500-step warmup,
-# no L2SP). Residual-adaptive sampling ON, resample every 100 epochs.
-# Native-grid rel-L2 of the source run's final model: 1.43e-7.
-# PREREQUISITE: roots_checkpoints/burgers_root.pt (already in this repo).
-# Mimicry notes: same patience translation (patience_evals=5 x eval_every=1000).
-experiment_name: burgers_M8_paper
+experiment_name: allen_cahn_M8
 base_config:
-  problem: burgers1d
+  problem: allen_cahn
   model: AToELeaves
   activation: tanh
   precision: float64
-  epochs: 40000
+  epochs: 45000
   batch_size: 99999
   min_epochs: 1
-  eval_every: 1000
-  patience_evals: 5
-  patience_rel_delta: 0.01
+  eval_every: 500
+  patience_intervals: 10
+  patience_rel_delta: 0.001
   optimizer_1: adam
   optimizer_2: ssbroyden
-  optimizer_switch_epoch: 1000
+  optimizer_switch_epoch: 5000
   lr: 0.001
   lr_schedule: none
   lr_decay_rate: 0.98
@@ -55,7 +47,7 @@ base_config:
   save_every: 999999
   seed: 42
   allen_cahn:
-    pretrained_base_checkpoint: roots_checkpoints/allen_cahn_root.pt
+    pretrained_base_checkpoint: roots_checkpoints\allen_cahn_root.pt
     spatial_dim: 1
     output_dim: 1
     spatial_domain:
@@ -195,7 +187,7 @@ base_config:
       residual: 1.0
       ic: 1.0
       bc: 1.0
-      continuity: 1.0
+      continuity: 0.0
     causal_training:
       enabled: false
       num_chunks: 32
@@ -354,17 +346,16 @@ base_config:
     grad_clip_norm: null
     expert_grad_clip_norm: null
     time_marching:
-      enabled: true
-      num_windows: 20
+      enabled: false
+      num_windows: 10
       freeze_previous_windows: true
       m_distribution: quadratic
   sampling:
-    n_residual_train: 4096
+    n_residual_train: 10000
     sample_volume_ratio: 35
     n_initial_train: 256
     n_boundary_train: 256
-    eval_train_ratio: 0.25
-    resample_every_epochs: 100
+    resample_every_epochs: 500
     plot_samples_every: 1000
   adaptive_pinn:
     enabled: true
@@ -380,32 +371,49 @@ base_config:
     enable_timing: false
     enable_gradient_diagnostics: false
     M_experts_num: 8
+    epsilon_node_acceptance: 0.00
     split_icbc:
       enabled: true
     initial_train:
-      epochs: 40000
+      epochs: 45000
       optimizer_1: adam
       optimizer_2: ssbroyden
-      optimizer_switch_epoch: 1000
+      optimizer_switch_epoch: 5000
       lr: 0.001
       lr_schedule: none
       lr_decay_rate: 0.98
       lr_decay_steps: 1000
       lr_warmup_steps: 0
     fine_tune:
-      epochs: 40000
+      epochs: 45000
       optimizer_1: adam
       optimizer_2: ssbroyden
-      optimizer_switch_epoch: 1000
+      optimizer_switch_epoch: 5000
       lr: 0.0001
       lr_schedule: none
       lr_decay_rate: 0.98
       lr_decay_steps: 1000
-      lr_warmup_steps: 500
+      lr_warmup_steps: 0
       l2sp_lambda: 0.0
 experiments:
-- name: M_8
-  problem: burgers1d
+# - name: burgers
+#   problem: burgers1d
+#   model: AToELeaves
+#   base_architecture:
+#   - 2
+#   - 60
+#   - 60
+#   - 60
+#   - 60
+#   - 1
+#   experts_architecture:
+#   - 2
+#   - 20
+#   - 20
+#   - 20
+#   - 1
+- name: allen_cahn
+  problem: allen_cahn
   model: AToELeaves
   base_architecture:
   - 2
@@ -420,3 +428,19 @@ experiments:
   - 20
   - 20
   - 1
+# - name: schrodinger
+#   problem: schrodinger
+#   model: AToELeaves
+#   base_architecture:
+#   - 2
+#   - 60
+#   - 60
+#   - 60
+#   - 60
+#   - 2
+#   experts_architecture:
+#   - 2
+#   - 20
+#   - 20
+#   - 20
+#   - 2

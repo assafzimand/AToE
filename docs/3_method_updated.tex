@@ -1,4 +1,4 @@
-\section{The adaptive PINN method}
+\section{The Adaptive Tree of Experts (AToE) PINN method}
 \label{sec:method}
 
 \subsection{Overview of the Method}
@@ -7,15 +7,9 @@
 The tree based structure described in
 Section~\ref{sec:background} form a natural starting point for a wide range of domain decomposition
 designs that combine local models into a Mixture of Experts (MoE). In this
-section we present the method adopted in this work, which we refer to as
+section we present such a method which we refer to as
 AToE (Adaptive Tree of Experts). Section~\ref{sec:additional_methods}
-describes additional variants of the main algorithm. Throughout, we
-deliberately keep the training scheme as clean as possible in order to
-demonstrate the advantages of the method itself. The enhancement techniques
-mentioned in Section~\ref{sec:introduction} and described in more detail in
-Section~\ref{sec:additional_methods} may be applied on top of it and can
-further improve results, as illustrated by several examples in
-Section~\ref{sec:experiments}.
+describes additional variants of the main AToE algorithm that  can further improve its performance, as illustrated by several examples in Section~\ref{sec:experiments}.
 
 \noindent The full procedure is summarized in Algorithm~\ref{alg:atoe}, Where each of
 its stages is described in detail in the subsections that follow.
@@ -39,11 +33,11 @@ its stages is described in detail in the subsections that follow.
 
 \vspace{0.5em}
 
-\subsection{Root Model Training}
+\subsection{Learning the initial network}
 \label{sec:root_training}
 
-The root model $u_0$ follows the classic PINN formulation described in
-Section~\ref{sec:background}. For the second order benchmarks we use an MLP
+The architecture and training process of the initial model $u_0$ follows the classic PINN formulation described in
+Section~\ref{sec:background}. However, since its only purpose is to serve as a starting point for the AToE algorithm, we use a relatively small network. For the second order benchmarks we use an MLP
 with 4 hidden layers of 60 neurons. For the third and fourth order benchmarks
 we use the same architecture combined with a time marching mechanism: the time
 axis is split into windows (4 for KdV, 10 for KS), each window is trained in
@@ -61,12 +55,10 @@ double precision, as suggested in~\cite{kiyani2025optimizer}.
 
 The goal of the decomposition is to partition the domain into regions that
 reflect the local complexity of the solution. A geometric wavelet tree
-$\mathcal{T}$ is constructed from the converged root approximation $u_0$ and
+$\mathcal{T}$ is constructed from the initial approximation $u_0$ and
 compressed using an $M$-term approximation, retaining the $M$ nodes with the
-largest geometric wavelet norms $\|\psi_\Omega\|$. To preserve a clean
-hierarchical structure, both the ancestors and the siblings of the selected
-nodes are always retained, so that the accepted regions form a complete binary
-tree in which every point of the domain is covered.
+largest geometric wavelet norms $\|\psi_\Omega\|_2$. To preserve a clean
+hierarchical structure, both the ancestors and the siblings of the selected nodes are always retained, so that the accepted regions form a complete binary tree.
 
 \noindent When time-marching is employed, the global budget $M$ is distributed
 across the windows according to a prescribed allocation strategy (e.g.,
@@ -367,8 +359,8 @@ $[a_{i,j} - \delta_{i,j}, b_{i,j} + \delta_{i,j}]$.
 \noindent The region indicator function is therefore the tensor product of the
 one dimensional windows over all dimensions:
 \begin{equation}
-\Psi_{\Omega_i}(X) = \prod_{j=1}^{d} \omega_{i,j}(x_j),
-\qquad X = (x_1,\ldots,x_d),
+\Psi_{\Omega_i}(X) = \prod_{j=1}^{d+1} \omega_{i,j}(x_j),
+\qquad X = (x_1,\ldots,x_{d+1}),
 \label{eq:smoothstep_windows}
 \end{equation}
 

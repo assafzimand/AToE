@@ -14,7 +14,7 @@ Used by the split-loss training path for AToE-Leaves.
 import torch
 from typing import Dict, List
 from adaptive.indicators import RegionDescriptor  # noqa: F401
-from utils.dataset_gen import _analytic_ic
+from utils.dataset_gen import _analytic_ic, sample_residual_points
 from utils.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -61,11 +61,17 @@ def sample_subdomain_residuals(
     cfg: Dict,
     device: torch.device,
     seed: int = 0,
+    cached_residuals: list = None,
+    run_dir=None,
+    epoch=None,
 ) -> Dict[str, torch.Tensor]:
     """Draw fresh residual collocation points tagged per owning expert.
 
-    A global uniform draw over the domain is filtered into each expert's
-    region, so the point density matches a plain uniform collocation set.
+    A global draw over the domain is filtered into each expert's region, so
+    the point density matches a plain collocation set. The draw is uniform,
+    or a uniform/adaptive mix when the problem's adaptive_sampling is enabled
+    and ``cached_residuals`` (previous-epoch (x, t, r²) tuples from the split
+    loss) is supplied — same mechanism as the non-split path.
     This is the only part of the split dataset that changes on resample.
     """
     torch.manual_seed(seed)
@@ -73,18 +79,19 @@ def sample_subdomain_residuals(
     problem = cfg['problem']
     pc = cfg[problem]
     spatial_dim = pc['spatial_dim']
-    spatial_domain = pc['spatial_domain']
-    t_min_global, t_max_global = pc['temporal_domain']
     output_dim = pc['output_dim']
     n_res_total = cfg.get('sampling', {}).get('n_residual_train', 10000)
 
-    x_g = torch.zeros(n_res_total, spatial_dim, device=device)
-    t_g = torch.zeros(n_res_total, 1, device=device)
-    for d in range(spatial_dim):
-        lo, hi = spatial_domain[d]
-        x_g[:, d] = torch.rand(n_res_total, device=device) * (hi - lo) + lo
-    t_g[:, 0] = (torch.rand(n_res_total, device=device)
-                 * (t_max_global - t_min_global) + t_min_global)
+    if cached_residuals:
+        # Split-loss cache tensors live on CPU; the sampler mixes them with
+        # freshly drawn points on the training device.
+        cached_residuals = [
+            (x.to(device), t.to(device), r2.to(device))
+            for x, t, r2 in cached_residuals
+        ]
+    x_g, t_g = sample_residual_points(
+        cfg, device, n_res_total, cached_residuals,
+        run_dir=run_dir, epoch=epoch)
 
     xs, ts, gs, eids, ks, bc_fids = [], [], [], [], [], []
     for eidx in new_expert_indices:
@@ -273,6 +280,9 @@ def build_subdomain_data(
     seed: int = 0,
     interface_model: torch.nn.Module = None,
     static: Dict[str, torch.Tensor] = None,
+    cached_residuals: list = None,
+    run_dir=None,
+    epoch=None,
 ) -> Dict[str, torch.Tensor]:
     """Build per-expert dataset for split-loss training.
 
@@ -288,6 +298,11 @@ def build_subdomain_data(
             :func:`build_subdomain_static`). Pass the cached value on
             resample so only residual interiors are redrawn; when None the
             static part is built here.
+        cached_residuals: Optional previous-epoch (x, t, r²) tuples from the
+            split loss; enables the adaptive residual draw (see
+            :func:`sample_subdomain_residuals`).
+        run_dir, epoch: Forwarded to the adaptive sampler for its
+            diagnostic heatmap.
     """
     problem = cfg['problem']
     pc = cfg[problem]
@@ -295,7 +310,8 @@ def build_subdomain_data(
         return _empty(pc['spatial_dim'], pc['output_dim'], device)
 
     residuals = sample_subdomain_residuals(
-        new_expert_indices, regions, cfg, device, seed=seed)
+        new_expert_indices, regions, cfg, device, seed=seed,
+        cached_residuals=cached_residuals, run_dir=run_dir, epoch=epoch)
 
     if static is None:
         static = build_subdomain_static(

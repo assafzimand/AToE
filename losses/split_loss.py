@@ -59,7 +59,8 @@ def build_split_loss(
     per_expert_history: Dict[int, Dict[str, list]] = {}
     # Per-epoch residual cache: list of (x, t, r²) tuples (detached CPU tensors).
     # Populated when split_loss_fn._cache_residuals is True; drained by the trainer
-    # to produce diagnostic heatmap plots (same as the non-split residual-cache path).
+    # for diagnostic heatmap plots and for the adaptive residual redraw at split
+    # resamples (same roles as the non-split model-level residual cache).
     residual_cache: list = []
 
     def split_loss_fn(
