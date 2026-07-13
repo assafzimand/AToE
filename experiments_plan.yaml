@@ -355,6 +355,7 @@ base_config:
     sample_volume_ratio: 35
     n_initial_train: 256
     n_boundary_train: 256
+    collar_data_ratio: 0.0
     resample_every_epochs: 500
     plot_samples_every: 1000
   adaptive_pinn:

@@ -199,6 +199,174 @@ def _compute_phi_pdf(residuals: torch.Tensor, phi_cfg: Dict) -> torch.Tensor:
     return w / w.sum()
 
 
+def build_collar_info(leaf_regions, sigma_fraction: float, plot: bool = False) -> Dict:
+    """Pack leaf-region geometry for collar sampling.
+
+    The collar is the set of points covered by >= 2 leaf indicator supports
+    Ω̃_j = ∏_d [a_d − δ_d, b_d + δ_d] with δ_d = max(σ_frac·(b_d − a_d), 1e-6)
+    (matching BatchedIndicators' smoothstep support).
+
+    Args:
+        leaf_regions: RegionDescriptors of the LEAF experts only.
+        sigma_fraction: The model's collar fraction (adaptive_pinn.sigma_fraction).
+        plot: Whether the caller wants the collar diagnostic plot this resample.
+    """
+    lower = torch.tensor([list(r.bounds_lower) for r in leaf_regions],
+                         dtype=torch.get_default_dtype())
+    upper = torch.tensor([list(r.bounds_upper) for r in leaf_regions],
+                         dtype=torch.get_default_dtype())
+    return {
+        'bounds_lower': lower,
+        'bounds_upper': upper,
+        'sigma_fraction': float(sigma_fraction),
+        'plot': bool(plot),
+    }
+
+
+def _collar_support_bounds(collar_info: Dict, device) -> tuple:
+    """Expanded (support) bounds of each leaf window: (lower−δ, upper+δ), each (K, D)."""
+    lower = collar_info['bounds_lower'].to(device)
+    upper = collar_info['bounds_upper'].to(device)
+    delta = (collar_info['sigma_fraction'] * (upper - lower)).clamp(min=1e-6)
+    return lower - delta, upper + delta
+
+
+def _support_overlap_count(pts: torch.Tensor, lo_exp: torch.Tensor,
+                           hi_exp: torch.Tensor) -> torch.Tensor:
+    """Number of leaf supports containing each point. pts (N, D) → (N,) int."""
+    inside = ((pts.unsqueeze(1) >= lo_exp.unsqueeze(0))
+              & (pts.unsqueeze(1) <= hi_exp.unsqueeze(0))).all(dim=2)  # (N, K)
+    return inside.sum(dim=1)
+
+
+def _sample_collar_points(
+    n_points: int,
+    collar_info: Dict,
+    config: Dict,
+    device: torch.device,
+) -> tuple:
+    """Uniform draw restricted to the collar (>= 2 overlapping leaf supports).
+
+    Rejection sampling from the uniform domain draw; if the collar volume is
+    too small to fill the quota in 50 rounds, the remainder is drawn uniformly
+    over the whole domain (with a warning).
+    """
+    problem = config['problem']
+    pc = config[problem]
+    spatial_dim = pc['spatial_dim']
+    spatial_domain = pc['spatial_domain']
+    t_min, t_max = pc['temporal_domain']
+
+    lo_exp, hi_exp = _collar_support_bounds(collar_info, device)
+
+    def _uniform_draw(n):
+        x = torch.zeros(n, spatial_dim, device=device)
+        for d in range(spatial_dim):
+            lo, hi = spatial_domain[d]
+            x[:, d] = torch.rand(n, device=device) * (hi - lo) + lo
+        t = torch.rand(n, 1, device=device) * (t_max - t_min) + t_min
+        return x, t
+
+    xs, ts = [], []
+    n_left = n_points
+    for _ in range(50):
+        n_draw = max(2048, 4 * n_left)
+        x, t = _uniform_draw(n_draw)
+        counts = _support_overlap_count(torch.cat([x, t], dim=1), lo_exp, hi_exp)
+        keep = counts >= 2
+        n_keep = int(keep.sum().item())
+        if n_keep > 0:
+            take = min(n_keep, n_left)
+            xs.append(x[keep][:take])
+            ts.append(t[keep][:take])
+            n_left -= take
+        if n_left <= 0:
+            break
+    if n_left > 0:
+        logger.warning(f"  [Collar] Drew only {n_points - n_left}/{n_points} "
+                       f"collar points after 50 rounds; filling remainder "
+                       f"uniformly over the domain.")
+        x, t = _uniform_draw(n_left)
+        xs.append(x)
+        ts.append(t)
+    return torch.cat(xs, dim=0), torch.cat(ts, dim=0)
+
+
+def _save_collar_sampling_plot(blocks: Dict, collar_info: Dict,
+                               run_dir, epoch, config: Dict) -> None:
+    """Plot the collar region + all residual samples color-coded by source.
+
+    Shows the leaf tiles (black rectangles), the collar (shaded: >= 2
+    overlapping supports), and the uniform / adaptive / collar sample blocks.
+    1D-spatial problems only.
+
+    Args:
+        blocks: {'uniform'|'adaptive'|'collar': (x, t) tensors or None}.
+    """
+    try:
+        import matplotlib.pyplot as plt
+        import numpy as np
+        from matplotlib.patches import Rectangle
+        from pathlib import Path
+
+        output_dir = Path(run_dir) / "collar_sampling"
+        output_dir.mkdir(exist_ok=True, parents=True)
+
+        pc = config[config['problem']]
+        x_lo, x_hi = pc['spatial_domain'][0]
+        t_min, t_max = pc['temporal_domain']
+
+        lower = collar_info['bounds_lower'].cpu().numpy()
+        upper = collar_info['bounds_upper'].cpu().numpy()
+        delta = np.maximum(collar_info['sigma_fraction'] * (upper - lower), 1e-6)
+        lo_exp = lower - delta
+        hi_exp = upper + delta
+
+        gx = np.linspace(x_lo, x_hi, 400)
+        gt = np.linspace(t_min, t_max, 400)
+        XX, TT = np.meshgrid(gx, gt)
+        pts = np.stack([XX.ravel(), TT.ravel()], axis=1)  # (N, 2)
+        inside = ((pts[:, None, :] >= lo_exp[None]) &
+                  (pts[:, None, :] <= hi_exp[None])).all(axis=2)  # (N, K)
+        collar_mask = (inside.sum(axis=1) >= 2).reshape(XX.shape)
+
+        fig, ax = plt.subplots(figsize=(8, 6))
+        ax.contourf(XX, TT, collar_mask.astype(float),
+                    levels=[0.5, 1.5], colors=['#ff9999'], alpha=0.45)
+        for k in range(lower.shape[0]):
+            ax.add_patch(Rectangle(
+                (lower[k, 0], lower[k, 1]),
+                upper[k, 0] - lower[k, 0], upper[k, 1] - lower[k, 1],
+                fill=False, edgecolor='black', linewidth=0.8))
+
+        styles = {
+            'uniform': ('0.55', 2, 0.35),
+            'adaptive': ('tab:blue', 3, 0.5),
+            'collar': ('tab:red', 3, 0.6),
+        }
+        for label, xt in blocks.items():
+            if xt is None or xt[0] is None or xt[0].shape[0] == 0:
+                continue
+            x_np = xt[0][:, 0].detach().cpu().numpy()
+            t_np = xt[1][:, 0].detach().cpu().numpy()
+            c, s, a = styles.get(label, ('tab:green', 2, 0.4))
+            ax.scatter(x_np, t_np, c=c, s=s, alpha=a,
+                       label=f'{label} ({len(x_np)})')
+
+        ax.set_xlim(x_lo, x_hi)
+        ax.set_ylim(t_min, t_max)
+        ax.set_xlabel('x')
+        ax.set_ylabel('t')
+        ax.set_title(f'Collar sampling (epoch {epoch})')
+        ax.legend(loc='upper right', markerscale=3)
+        plt.tight_layout()
+        plt.savefig(output_dir / f"collar_epoch_{epoch}.png",
+                    dpi=100, bbox_inches='tight')
+        plt.close(fig)
+    except Exception as e:
+        logger.info(f"  [Warning] Failed to save collar sampling plot: {e}")
+
+
 def _filter_cache_to_region(cached_residuals: list, region) -> list:
     """Filter (x, t, r²) cache tuples to points within region's spatial+temporal bounds."""
     filtered = []
@@ -562,8 +730,15 @@ def sample_residual_points(
     run_dir=None,
     epoch=None,
     causal_state: dict = None,
+    collar_info: Dict = None,
 ):
     """Sample n_res residual (x, t) pairs.
+
+    The total is split into up to three blocks (each ratio taken out of the
+    same n_res budget): uniform over the domain, adaptive (residual-weighted,
+    when adaptive_sampling is enabled and a cache is supplied), and collar
+    (uniform within the >= 2-overlapping-supports region, when
+    sampling.collar_data_ratio > 0 and ``collar_info`` is supplied).
 
     Returns:
         Tuple (x_res, t_res) each of shape (n_res, spatial_dim/1).
@@ -585,33 +760,58 @@ def sample_residual_points(
         'phi_power': as_cfg['phi_power'],
     }
 
+    collar_ratio = (config.get('sampling', {}) or {}).get(
+        'collar_data_ratio', 0.0) or 0.0
+    collar_active = collar_info is not None and collar_ratio > 0
+
+    n_adaptive = int(n_res * as_ratio) if as_enabled else 0
+    n_collar = int(n_res * collar_ratio) if collar_active else 0
+    if n_adaptive + n_collar > n_res:
+        logger.warning(f"  [Sampling] adaptive_ratio + collar_data_ratio > 1; "
+                       f"trimming collar share to fit n_res={n_res}.")
+        n_collar = max(0, n_res - n_adaptive)
+    n_uniform = n_res - n_adaptive - n_collar
+
     x_res = torch.zeros(n_res, spatial_dim, device=device)
     t_res = torch.zeros(n_res, 1, device=device)
     idx = 0
 
-    if as_enabled:
-        n_adaptive = int(n_res * as_ratio)
-        n_uniform = n_res - n_adaptive
-        for d in range(spatial_dim):
-            lo, hi = spatial_domain[d]
-            x_res[idx:idx + n_uniform, d] = (
-                torch.rand(n_uniform, device=device) * (hi - lo) + lo
-            )
-        t_res[idx:idx + n_uniform, 0] = (
-            torch.rand(n_uniform, device=device) * (t_max - t_min) + t_min
+    for d in range(spatial_dim):
+        lo, hi = spatial_domain[d]
+        x_res[idx:idx + n_uniform, d] = (
+            torch.rand(n_uniform, device=device) * (hi - lo) + lo
         )
-        idx += n_uniform
+    t_res[idx:idx + n_uniform, 0] = (
+        torch.rand(n_uniform, device=device) * (t_max - t_min) + t_min
+    )
+    idx += n_uniform
 
+    if n_adaptive > 0:
         x_adap, t_adap = _sample_adaptive_residual_points(
             cached_residuals, config, device, n_adaptive, phi_cfg,
             run_dir, epoch, causal_state=causal_state)
         x_res[idx:idx + n_adaptive] = x_adap
         t_res[idx:idx + n_adaptive] = t_adap
-    else:
-        for d in range(spatial_dim):
-            lo, hi = spatial_domain[d]
-            x_res[:, d] = torch.rand(n_res, device=device) * (hi - lo) + lo
-        t_res[:, 0] = torch.rand(n_res, device=device) * (t_max - t_min) + t_min
+        idx += n_adaptive
+
+    if n_collar > 0:
+        x_col, t_col = _sample_collar_points(
+            n_collar, collar_info, config, device)
+        x_res[idx:idx + n_collar] = x_col
+        t_res[idx:idx + n_collar] = t_col
+        logger.info(f"  [Resample] Collar: {n_collar} points "
+                    f"(uniform={n_uniform}, adaptive={n_adaptive})")
+        if (collar_info.get('plot') and run_dir is not None
+                and epoch is not None and spatial_dim == 1):
+            _save_collar_sampling_plot(
+                {
+                    'uniform': (x_res[:n_uniform], t_res[:n_uniform]),
+                    'adaptive': ((x_res[n_uniform:n_uniform + n_adaptive],
+                                  t_res[n_uniform:n_uniform + n_adaptive])
+                                 if n_adaptive > 0 else None),
+                    'collar': (x_col, t_col),
+                },
+                collar_info, run_dir, epoch, config)
 
     return x_res, t_res
 
@@ -625,6 +825,7 @@ def resample_residual_inplace(
     run_dir=None,
     epoch=None,
     causal_state: dict = None,
+    collar_info: Dict = None,
 ) -> Dict:
     """Update only the residual rows in train_data with freshly sampled points.
 
@@ -639,7 +840,7 @@ def resample_residual_inplace(
     torch.manual_seed(resample_seed)
     x_res, t_res = sample_residual_points(
         config, device, n_res, cached_residuals,
-        run_dir, epoch, causal_state)
+        run_dir, epoch, causal_state, collar_info=collar_info)
     train_data['x'][res_mask] = x_res
     train_data['t'][res_mask] = t_res
     return train_data

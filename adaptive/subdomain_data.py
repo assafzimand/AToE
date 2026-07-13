@@ -64,6 +64,7 @@ def sample_subdomain_residuals(
     cached_residuals: list = None,
     run_dir=None,
     epoch=None,
+    collar_info: Dict = None,
 ) -> Dict[str, torch.Tensor]:
     """Draw fresh residual collocation points tagged per owning expert.
 
@@ -91,7 +92,7 @@ def sample_subdomain_residuals(
         ]
     x_g, t_g = sample_residual_points(
         cfg, device, n_res_total, cached_residuals,
-        run_dir=run_dir, epoch=epoch)
+        run_dir=run_dir, epoch=epoch, collar_info=collar_info)
 
     xs, ts, gs, eids, ks, bc_fids = [], [], [], [], [], []
     for eidx in new_expert_indices:
@@ -283,6 +284,7 @@ def build_subdomain_data(
     cached_residuals: list = None,
     run_dir=None,
     epoch=None,
+    collar_info: Dict = None,
 ) -> Dict[str, torch.Tensor]:
     """Build per-expert dataset for split-loss training.
 
@@ -303,6 +305,8 @@ def build_subdomain_data(
             :func:`sample_subdomain_residuals`).
         run_dir, epoch: Forwarded to the adaptive sampler for its
             diagnostic heatmap.
+        collar_info: Optional collar geometry (utils.dataset_gen.build_collar_info);
+            enables the collar share of the residual draw.
     """
     problem = cfg['problem']
     pc = cfg[problem]
@@ -311,7 +315,8 @@ def build_subdomain_data(
 
     residuals = sample_subdomain_residuals(
         new_expert_indices, regions, cfg, device, seed=seed,
-        cached_residuals=cached_residuals, run_dir=run_dir, epoch=epoch)
+        cached_residuals=cached_residuals, run_dir=run_dir, epoch=epoch,
+        collar_info=collar_info)
 
     if static is None:
         static = build_subdomain_static(

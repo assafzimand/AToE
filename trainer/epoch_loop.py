@@ -198,61 +198,11 @@ def _train_segment(
         ctx.epoch = epoch  # keep ctx in sync for the orchestrator's emergency save
         timer.start_epoch(epoch, num_experts=model.num_experts if (is_adaptive and hasattr(model, 'num_experts')) else 0)
 
-        # Enable residual caching for adaptive sampling if needed
-        # Cache THIS epoch's residuals for NEXT epoch's resampling
-        # (adaptive_sampling_enabled already set from problem_cfg above)
         causal_state = getattr(loss_fn, 'causal_state', None)
-        
-        will_cache_for_resample = (
-            adaptive_sampling_enabled
-            and resample_every > 0
-            and epoch > 0 and epoch % resample_every == 0
-        )
-        # Cache residuals for the diagnostic heatmap even when adaptive sampling is
-        # off. Cadence is controlled by sampling.plot_samples_every (independent of
-        # the resample cadence; defaults to it).
         _problem_spatial_dim = problem_cfg['spatial_dim']
-        will_cache_for_plot = (
-            not adaptive_sampling_enabled
-            and plot_samples_every > 0
-            and epoch > 0 and epoch % plot_samples_every == 0
-            and _problem_spatial_dim == 1
-        )
-        if will_cache_for_resample or will_cache_for_plot:
-            model._residual_cache = []
-            model._residual_cache_enabled = True
-            # Log when adaptive sampling first activates
-            if will_cache_for_resample and not hasattr(model, '_adaptive_sampling_activated'):
-                model._adaptive_sampling_activated = True
-                logger.info(f"  [Adaptive Sampling] Residual caching active from epoch {epoch}")
-
-        # Enable residual caching in split_loss_fn for diagnostic heatmap plots
-        # and — when adaptive sampling is on — for the next epoch's adaptive
-        # residual redraw. (The model-level cache is not populated in the split
-        # path; the loss fn owns the cache instead.)
+        # Split loss fn owns its own residual cache (the model-level cache is
+        # not populated in the split path).
         _split_loss_fn = loss_fn if hasattr(loss_fn, '_residual_cache') else None
-        _will_cache_split = (
-            _split_loss_fn is not None
-            and plot_samples_every > 0
-            and epoch > 0 and epoch % plot_samples_every == 0
-            and _problem_spatial_dim == 1
-        )
-        _will_cache_split_resample = (
-            _split_loss_fn is not None
-            and adaptive_sampling_enabled
-            and resample_every > 0
-            and epoch > 0 and epoch % resample_every == 0
-        )
-        if _split_loss_fn is not None:
-            _cache_split_now = _will_cache_split or _will_cache_split_resample
-            _split_loss_fn._cache_residuals = _cache_split_now
-            if _cache_split_now:
-                _split_loss_fn._residual_cache.clear()
-            if _will_cache_split_resample and not hasattr(
-                    _split_loss_fn, '_adaptive_sampling_activated'):
-                _split_loss_fn._adaptive_sampling_activated = True
-                logger.info(f"  [Adaptive Sampling] Split residual caching "
-                            f"active from epoch {epoch}")
 
         # Resample training data periodically (in-memory, no disk I/O).
         # The cadence applies to ALL optimizers, full-batch quasi-Newton
@@ -270,6 +220,24 @@ def _train_segment(
         if resample_every > 0 and epoch > 1 and (epoch - 1) % resample_every == 0:
             resample_seed = base_seed + epoch
             _resampled_this_epoch = True
+            # Collar sampling (phase 3 + fine-tune only, i.e. whenever leaf
+            # experts exist): draw sampling.collar_data_ratio of the residual
+            # budget uniformly from the >= 2-overlapping-supports region.
+            _collar_info = None
+            _collar_ratio = (cfg.get('sampling', {}) or {}).get(
+                'collar_data_ratio', 0.0) or 0.0
+            if (_collar_ratio > 0 and hasattr(model, 'regions')
+                    and hasattr(model, 'leaf_indices')):
+                _leaf_idx = [i for i in sorted(model.leaf_indices) if i >= 0]
+                if len(_leaf_idx) >= 2:
+                    from utils.dataset_gen import build_collar_info
+                    _collar_info = build_collar_info(
+                        [model.regions[i] for i in _leaf_idx],
+                        getattr(model, 'sigma_fraction', 0.2),
+                        plot=(plot_samples_every > 0
+                              and (epoch - 1) % plot_samples_every == 0
+                              and _problem_spatial_dim == 1),
+                    )
             if _split_ctx is not None:
                 # Adaptive sampling: hand last epoch's per-expert residual
                 # cache to the sampler (uniform/adaptive mix, same as the
@@ -291,6 +259,7 @@ def _train_segment(
                     static=_split_ctx.get('static'),
                     cached_residuals=_split_cached,
                     run_dir=run_dir, epoch=epoch,
+                    collar_info=_collar_info,
                 )
                 if _split_cached is not None:
                     _split_loss_fn._residual_cache.clear()
@@ -354,6 +323,7 @@ def _train_segment(
                     run_dir=run_dir,
                     epoch=epoch,
                     causal_state=causal_state,
+                    collar_info=_collar_info,
                 )
                 metrics['resample_events'].append({
                     'epoch': epoch,
@@ -365,6 +335,58 @@ def _train_segment(
                     'event': 'resample',
                     **_get_optimizer_snapshot(optimizer, lr_scheduler, step_count),
                 })
+
+        # ── Arm residual caching for THIS epoch (consumed at the NEXT
+        # resample). Must run AFTER the resample block: arming clears the
+        # cache, and with resample_every == 1 the arming epoch and the
+        # consuming epoch coincide — arming first would wipe the cache the
+        # resample is about to use.
+        will_cache_for_resample = (
+            adaptive_sampling_enabled
+            and resample_every > 0
+            and epoch > 0 and epoch % resample_every == 0
+        )
+        # Cache residuals for the diagnostic heatmap even when adaptive sampling is
+        # off. Cadence is controlled by sampling.plot_samples_every (independent of
+        # the resample cadence; defaults to it).
+        will_cache_for_plot = (
+            not adaptive_sampling_enabled
+            and plot_samples_every > 0
+            and epoch > 0 and epoch % plot_samples_every == 0
+            and _problem_spatial_dim == 1
+        )
+        if will_cache_for_resample or will_cache_for_plot:
+            model._residual_cache = []
+            model._residual_cache_enabled = True
+            # Log when adaptive sampling first activates
+            if will_cache_for_resample and not hasattr(model, '_adaptive_sampling_activated'):
+                model._adaptive_sampling_activated = True
+                logger.info(f"  [Adaptive Sampling] Residual caching active from epoch {epoch}")
+
+        # Same for the split-loss cache: diagnostic heatmaps and — when
+        # adaptive sampling is on — the next split resample's adaptive redraw.
+        _will_cache_split = (
+            _split_loss_fn is not None
+            and plot_samples_every > 0
+            and epoch > 0 and epoch % plot_samples_every == 0
+            and _problem_spatial_dim == 1
+        )
+        _will_cache_split_resample = (
+            _split_loss_fn is not None
+            and adaptive_sampling_enabled
+            and resample_every > 0
+            and epoch > 0 and epoch % resample_every == 0
+        )
+        if _split_loss_fn is not None:
+            _cache_split_now = _will_cache_split or _will_cache_split_resample
+            _split_loss_fn._cache_residuals = _cache_split_now
+            if _cache_split_now:
+                _split_loss_fn._residual_cache.clear()
+            if _will_cache_split_resample and not hasattr(
+                    _split_loss_fn, '_adaptive_sampling_activated'):
+                _split_loss_fn._adaptive_sampling_activated = True
+                logger.info(f"  [Adaptive Sampling] Split residual caching "
+                            f"active from epoch {epoch}")
 
         # Train phase
         model.train()

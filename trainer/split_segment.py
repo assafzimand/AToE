@@ -92,11 +92,26 @@ def _run_split_segment(
         ctx.device, seed=ctx.epoch,
         interface_model=interface_model,
     )
+    # Collar sampling for the segment's initial residual draw (resamples
+    # rebuild their own collar_info in the epoch loop).
+    collar_info = None
+    _collar_ratio = (cfg.get('sampling', {}) or {}).get(
+        'collar_data_ratio', 0.0) or 0.0
+    if _collar_ratio > 0 and len(new_expert_indices) >= 2:
+        from utils.dataset_gen import build_collar_info
+        _spatial_dim = cfg[cfg['problem']]['spatial_dim']
+        collar_info = build_collar_info(
+            [regions_list[i] for i in new_expert_indices],
+            getattr(model, 'sigma_fraction', 0.2),
+            plot=(_spatial_dim == 1),
+        )
     split_data = build_subdomain_data(
         model_snapshot, new_expert_indices, regions_list, cfg,
         ctx.device, seed=ctx.epoch,
         interface_model=interface_model,
         static=split_static,
+        collar_info=collar_info,
+        run_dir=ctx.run_dir, epoch=ctx.epoch,
     )
 
     _log_subdomain_summary(new_expert_indices, regions_list, split_data)
