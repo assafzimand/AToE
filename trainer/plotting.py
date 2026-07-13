@@ -131,13 +131,19 @@ def plot_training_curves(
         _rl2 = metrics.get('rel_l2', metrics.get('eval_rel_l2', []))
         ax.plot(eval_epochs, _rl2, 'r-',
                 label='Rel. $L^2$ error', linewidth=2, alpha=0.8)
-        # Root rel-L2 baseline (horizontal black line). Only shown when the
-        # root was LOADED from a checkpoint: if it was trained in this
-        # session, the curve itself already contains the root phase.
+        # Baseline (horizontal black line): the loaded phase-3 expert
+        # checkpoint's rel-L2 when the run started from
+        # pretrained_local_expert_checkpoint; otherwise the root's rel-L2,
+        # shown only when the root was LOADED from a checkpoint (if it was
+        # trained in this session, the curve already contains that phase).
+        experts_rel_l2 = metrics.get('pretrained_experts_rel_l2')
         root_rel_l2 = metrics.get('root_rel_l2')
-        _show_root = (root_rel_l2 is not None and root_rel_l2 > 0
-                      and metrics.get('root_loaded_from_checkpoint', False))
-        if _show_root:
+        if experts_rel_l2 is not None and experts_rel_l2 > 0:
+            ax.axhline(y=experts_rel_l2, color='black', linestyle='-',
+                       linewidth=1.5, alpha=0.8,
+                       label=f'Phase-3 ckpt ({experts_rel_l2:.2e})')
+        elif (root_rel_l2 is not None and root_rel_l2 > 0
+              and metrics.get('root_loaded_from_checkpoint', False)):
             ax.axhline(y=root_rel_l2, color='black', linestyle='-',
                        linewidth=1.5, alpha=0.8,
                        label=f'Root ({root_rel_l2:.2e})')

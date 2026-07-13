@@ -682,6 +682,37 @@ def _load_pretrained_base(model: nn.Module, ckpt_path: str, cfg: Dict) -> None:
         model.batched_models.sync_from_models(model.base_model, model.experts)
 
 
+def _load_pretrained_experts(model: nn.Module, ckpt_path: str, cfg: Dict) -> None:
+    """Load a FULL AToE-Leaves state (base + leaf experts + regions) from a
+    checkpoint — the ``pretrained_local_expert_checkpoint`` flow.
+
+    The checkpoint must carry ``adaptive_state`` (any checkpoint saved by
+    ``_save_checkpoint`` for an adaptive model, e.g. ``best_model_phase3.pt``).
+    Root and Phase 3 are then skipped by the orchestrator and training goes
+    straight to fine-tune.
+    """
+    from pathlib import Path as _Path
+    p = _Path(ckpt_path)
+    if not p.exists():
+        raise FileNotFoundError(
+            f"pretrained_local_expert_checkpoint not found: {ckpt_path}")
+    ckpt = torch.load(p, map_location='cpu', weights_only=False)
+    adaptive_state = ckpt.get('adaptive_state') if isinstance(ckpt, dict) else None
+    if not adaptive_state or not adaptive_state.get('experts'):
+        raise ValueError(
+            f"pretrained_local_expert_checkpoint {ckpt_path} has no "
+            f"'adaptive_state' with experts — need a full AToE checkpoint "
+            f"(e.g. best_model_phase3.pt), not a plain base checkpoint.")
+    model.load_state_dict_extended(adaptive_state)
+    n_params = sum(q.numel() for q in model.parameters())
+    logger.info(f"  [PretrainedExperts] Loaded base + {len(model.experts)} "
+                f"expert(s) from {ckpt_path} ({n_params} params, "
+                f"leaves={sorted(model.leaf_indices)})")
+    if ckpt.get('rel_l2') is not None:
+        logger.info(f"  [PretrainedExperts] Checkpoint's recorded rel-L2: "
+                    f"{ckpt['rel_l2']:.6e} (epoch {ckpt.get('epoch')})")
+
+
 def _setup_training(
     model: nn.Module,
     loss_fn: Callable,
@@ -822,6 +853,8 @@ def _setup_training(
     is_adaptive_init = adaptive_cfg_init['enabled']
     initial_train_cfg = adaptive_cfg_init.get('initial_train', None)
     pretrained_base_checkpoint = problem_cfg.get('pretrained_base_checkpoint', None)
+    pretrained_local_expert_checkpoint = problem_cfg.get(
+        'pretrained_local_expert_checkpoint', None)
     _pretrained_force_spawn = False  # set True to force first-epoch spawn (checkpoint flow)
 
     if not is_adaptive_init:
@@ -831,6 +864,26 @@ def _setup_training(
         phase3_epochs = 0
         current_phase = 0
         use_three_phase = False
+    elif pretrained_local_expert_checkpoint is not None:
+        # Full leaf-expert model supplied as a checkpoint (end-of-phase-3
+        # state): root AND phase 3 are skipped; only fine-tune runs.
+        if adaptive_cfg_init.get('fine_tune', None) is None:
+            raise ValueError(
+                "adaptive_pinn.fine_tune is required when "
+                "pretrained_local_expert_checkpoint is set (it is the only "
+                "segment that runs).")
+        _load_pretrained_experts(model, pretrained_local_expert_checkpoint, cfg)
+        active_cfg = cfg
+        epochs = cfg['epochs']
+        phase3_epochs = 0
+        current_phase = 3
+        use_three_phase = True
+        if pretrained_base_checkpoint is not None:
+            logger.info("  [3-Phase] pretrained_base_checkpoint ignored — the "
+                        "expert checkpoint already contains the base.")
+        logger.info(f"\n  [3-Phase] Phases 1+3 skipped: full leaf-expert model "
+                    f"loaded from {pretrained_local_expert_checkpoint}")
+        logger.info("  [3-Phase] Only the fine-tune segment will run.")
     elif pretrained_base_checkpoint is not None:
         # Phase 1 supplied as a checkpoint: load the base, skip Phase-1 training,
         # force the spawn on the first loop epoch, then transition to Phase 3.
@@ -1151,8 +1204,8 @@ def _setup_training(
     from trainer.init import apply_hidden_init, apply_output_init
     _init_target = model.base_model if is_adaptive else model
     _init_cfg = cfg.get('init', {})
-    if pretrained_base_checkpoint is not None:
-        logger.info("[Init] Skipped — base loaded from pretrained checkpoint.")
+    if pretrained_base_checkpoint is not None or pretrained_local_expert_checkpoint is not None:
+        logger.info("[Init] Skipped — weights loaded from pretrained checkpoint.")
     elif _init_cfg.get('hidden', 'default') != 'default' or _init_cfg.get('output', 'default') != 'default':
         logger.info("[Init] Applying smart initialization to base model...")
         # parent_weights is expert-only; the base model uses glorot instead
@@ -1207,6 +1260,7 @@ def _setup_training(
         is_adaptive=is_adaptive,
         initial_train_cfg=initial_train_cfg,
         pretrained_base_checkpoint=pretrained_base_checkpoint,
+        pretrained_local_expert_checkpoint=pretrained_local_expert_checkpoint,
         _pretrained_force_spawn=_pretrained_force_spawn,
         region_detector=region_detector,
         max_experts=max_experts,

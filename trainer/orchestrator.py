@@ -128,6 +128,13 @@ def train_orchestrator(ctx: TrainingContext) -> None:
         ctx.total_epochs = ctx.epoch
         return
 
+    # ── Pretrained leaf-expert checkpoint: skip root + phase 3, fine-tune only ──
+    if ctx.pretrained_local_expert_checkpoint is not None:
+        _prepare_pretrained_experts_baseline(ctx)
+        _run_fine_tune(ctx)
+        ctx.total_epochs = ctx.epoch
+        return
+
     # ── Root / base training (Phase 1) ──
     if ctx.pretrained_base_checkpoint is not None:
         logger.info("[Orchestrator] Root skipped — base loaded from "
@@ -208,54 +215,107 @@ def train_orchestrator(ctx: TrainingContext) -> None:
         res = _train_segment(ctx, 'phase3', cfg['epochs'], cfg)
 
     # ── Final joint fine-tune with the PoU-composed loss ──
-    fine_tune_cfg = ctx.adaptive_cfg.get('fine_tune', None)
-    if fine_tune_cfg:
-        blending = model.blending_mode if hasattr(model, 'blending_mode') else 'soft'
-        logger.info("[FineTune] Unfreezing ALL params for final joint fine-tune.")
-        logger.info(f"[FineTune] Using composed loss with blending_mode='{blending}' (matches inference)")
-        _set_trainable(model, 'all')
-
-        # Ensure split_context is cleared so eval uses configured blending_mode
-        ctx._split_context = None
-
-        # L2-SP anchoring: snapshot weights and wrap loss
-        l2sp_lambda = fine_tune_cfg.get('l2sp_lambda', 0.0)
-        orig_loss_fn = ctx.loss_fn
-        if l2sp_lambda > 0:
-            ctx._l2sp_anchor = {
-                name: p.clone().detach()
-                for name, p in model.named_parameters()
-                if p.requires_grad
-            }
-            _anchor = ctx._l2sp_anchor
-            _lam = l2sp_lambda
-
-            def _l2sp_loss(model, batch, **kw):
-                loss = orig_loss_fn(model, batch, **kw)
-                if isinstance(loss, dict) or kw.get('return_components', False):
-                    return loss
-                penalty = sum(
-                    (p - _anchor[n]).pow(2).sum()
-                    for n, p in model.named_parameters()
-                    if n in _anchor
-                )
-                return loss + (_lam / 2.0) * penalty
-
-            ctx.loss_fn = _l2sp_loss
-            logger.info(f"[L2-SP] Anchoring enabled with lambda={l2sp_lambda}")
-
-        ft_cfg = dict(cfg)
-        ft_cfg.update(fine_tune_cfg)
-        ft_min = fine_tune_cfg.get('min_epochs', ctx.min_epochs)
-        res = _train_segment(ctx, 'fine_tune', fine_tune_cfg['epochs'], ft_cfg,
-                       min_epochs_override=ft_min)
-
-        # Restore original loss function
-        if l2sp_lambda > 0:
-            ctx.loss_fn = orig_loss_fn
-            ctx._l2sp_anchor = None
+    _run_fine_tune(ctx)
 
     ctx.total_epochs = ctx.epoch
+
+
+def _prepare_pretrained_experts_baseline(ctx: TrainingContext) -> None:
+    """Log + record baselines for the pretrained-leaf-experts flow.
+
+    Stores ``metrics['pretrained_experts_rel_l2']`` (hard-indicator rel-L2,
+    the metric the checkpoint was selected on) — drawn by the training-curve
+    plot as the baseline line instead of the root's — plus the soft-PoU
+    rel-L2 for reference.
+    """
+    model = ctx.model
+    cfg = ctx.cfg
+    logger.info("[Orchestrator] Root + Phase 3 skipped — full leaf-expert "
+                f"model loaded from {ctx.pretrained_local_expert_checkpoint}")
+    ctx.metrics['pretrained_experts_checkpoint'] = str(
+        ctx.pretrained_local_expert_checkpoint)
+    # Not a root baseline: keep the root line off the training curve.
+    ctx.metrics['root_loaded_from_checkpoint'] = False
+
+    # Indicators were synced at load time (possibly pre-device-move); re-sync
+    # on the model's current device before any composed forward.
+    if hasattr(model, 'sync_batched_indicators'):
+        model.sync_batched_indicators()
+
+    try:
+        orig_mode = getattr(model, 'blending_mode', None)
+        if orig_mode is not None:
+            model.blending_mode = 'hard'
+        m_hard = compute_native_grid_metrics(model, cfg, ctx.device)
+        if orig_mode is not None:
+            model.blending_mode = orig_mode
+        m_soft = compute_native_grid_metrics(model, cfg, ctx.device)
+        if m_hard is not None:
+            ctx.metrics['pretrained_experts_rel_l2'] = m_hard['rel_l2']
+        if m_soft is not None:
+            ctx.metrics['pretrained_experts_rel_l2_soft'] = m_soft['rel_l2']
+        logger.info(f"[Orchestrator] Loaded-experts rel-L2 (grid): "
+                    f"hard={m_hard['rel_l2'] if m_hard else float('nan'):.6e} "
+                    f"(training-curve baseline), "
+                    f"soft={m_soft['rel_l2'] if m_soft else float('nan'):.6e}")
+    except Exception as _e:
+        logger.info(f"[Orchestrator] Could not compute loaded-experts rel-L2: {_e}")
+
+    _plot_after_spawn(ctx, f"epoch_{ctx.epoch}")
+
+
+def _run_fine_tune(ctx: TrainingContext) -> None:
+    """Joint fine-tune of the full PoU composition under the global loss."""
+    model = ctx.model
+    cfg = ctx.cfg
+    fine_tune_cfg = ctx.adaptive_cfg.get('fine_tune', None)
+    if not fine_tune_cfg:
+        return
+
+    blending = model.blending_mode if hasattr(model, 'blending_mode') else 'soft'
+    logger.info("[FineTune] Unfreezing ALL params for final joint fine-tune.")
+    logger.info(f"[FineTune] Using composed loss with blending_mode='{blending}' (matches inference)")
+    _set_trainable(model, 'all')
+
+    # Ensure split_context is cleared so eval uses configured blending_mode
+    ctx._split_context = None
+
+    # L2-SP anchoring: snapshot weights and wrap loss
+    l2sp_lambda = fine_tune_cfg.get('l2sp_lambda', 0.0)
+    orig_loss_fn = ctx.loss_fn
+    if l2sp_lambda > 0:
+        ctx._l2sp_anchor = {
+            name: p.clone().detach()
+            for name, p in model.named_parameters()
+            if p.requires_grad
+        }
+        _anchor = ctx._l2sp_anchor
+        _lam = l2sp_lambda
+
+        def _l2sp_loss(model, batch, **kw):
+            loss = orig_loss_fn(model, batch, **kw)
+            if isinstance(loss, dict) or kw.get('return_components', False):
+                return loss
+            penalty = sum(
+                (p - _anchor[n]).pow(2).sum()
+                for n, p in model.named_parameters()
+                if n in _anchor
+            )
+            return loss + (_lam / 2.0) * penalty
+
+        ctx.loss_fn = _l2sp_loss
+        logger.info(f"[L2-SP] Anchoring enabled with lambda={l2sp_lambda}")
+
+    ft_cfg = dict(cfg)
+    ft_cfg.update(fine_tune_cfg)
+    ft_min = fine_tune_cfg.get('min_epochs', ctx.min_epochs)
+    res = _train_segment(ctx, 'fine_tune', fine_tune_cfg['epochs'], ft_cfg,
+                   min_epochs_override=ft_min)
+
+    # Restore original loss function
+    if l2sp_lambda > 0:
+        ctx.loss_fn = orig_loss_fn
+        ctx._l2sp_anchor = None
 
 
 def _set_trainable(model: nn.Module, which: str, verbose: bool = True) -> int:

@@ -102,6 +102,7 @@ class TrainingContext:
     is_adaptive: bool = False
     initial_train_cfg: Any = None
     pretrained_base_checkpoint: Any = None
+    pretrained_local_expert_checkpoint: Any = None
     _pretrained_force_spawn: bool = False
     region_detector: Any = None
     max_experts: int = 0
