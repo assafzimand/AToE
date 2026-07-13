@@ -1,4 +1,4 @@
-experiment_name: allen_cahn_M8
+experiment_name: allen_cahn_ft_sigma_collar_sweep
 base_config:
   problem: allen_cahn
   model: AToELeaves
@@ -391,10 +391,10 @@ base_config:
       lr_decay_steps: 1000
       lr_warmup_steps: 0
     fine_tune:
-      epochs: 45000
-      optimizer_1: adam
-      optimizer_2: ssbroyden
-      optimizer_switch_epoch: 5000
+      epochs: 30000
+      optimizer_1: ssbroyden
+      optimizer_2: null
+      optimizer_switch_epoch: 99999
       lr: 0.0001
       lr_schedule: none
       lr_decay_rate: 0.98
@@ -402,51 +402,58 @@ base_config:
       lr_warmup_steps: 0
       l2sp_lambda: 0.0
 experiments:
-# - name: burgers
-#   problem: burgers1d
-#   model: AToELeaves
-#   base_architecture:
-#   - 2
-#   - 60
-#   - 60
-#   - 60
-#   - 60
-#   - 1
-#   experts_architecture:
-#   - 2
-#   - 20
-#   - 20
-#   - 20
-#   - 1
-- name: allen_cahn
+
+- name: sig0p10_collar0p3
   problem: allen_cahn
   model: AToELeaves
-  base_architecture:
-  - 2
-  - 60
-  - 60
-  - 60
-  - 60
-  - 1
-  experts_architecture:
-  - 2
-  - 20
-  - 20
-  - 20
-  - 1
-# - name: schrodinger
-#   problem: schrodinger
-#   model: AToELeaves
-#   base_architecture:
-#   - 2
-#   - 60
-#   - 60
-#   - 60
-#   - 60
-#   - 2
-#   experts_architecture:
-#   - 2
-#   - 20
-#   - 20
-#   - 20
-#   - 2
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    sigma_fraction: 0.1
+  sampling:
+    collar_data_ratio: 0.3
+- name: sig0p10_nocollar
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    sigma_fraction: 0.1
+  sampling:
+    collar_data_ratio: 0.0
+- name: sig0p05_collar0p3
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    sigma_fraction: 0.05
+  sampling:
+    collar_data_ratio: 0.3
+- name: sig0p05_nocollar
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    sigma_fraction: 0.05
+  sampling:
+    collar_data_ratio: 0.0
+- name: sig0p03_collar0p3
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    sigma_fraction: 0.03
+  sampling:
+    collar_data_ratio: 0.3
+- name: sig0p03_nocollar
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    sigma_fraction: 0.03
+  sampling:
+    collar_data_ratio: 0.0
