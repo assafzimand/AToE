@@ -101,8 +101,14 @@ def imit_order(cfg: Dict) -> int:
 
 
 def n_mint_slots(cfg: Dict) -> int:
-    """Mint slot count A = 2q+1: [value, dx^1..dx^q, dt^1..dt^q]."""
-    return 2 * imit_order(cfg) + 1
+    """Mint slot count A = 2*max(q,1)+1: [value, dx^1..dx^q, dt^1..dt^q].
+
+    The stack is minted with at least order 1 even when q=0, because the
+    periodic-BC term structurally needs the mirror d/dx target (slot 1)
+    regardless of the imitation order; the imitation term only reads its
+    own first 2q+1 slots.
+    """
+    return 2 * max(imit_order(cfg), 1) + 1
 
 
 def _in_box_mask(x: torch.Tensor, t: torch.Tensor, lo, hi,
@@ -532,10 +538,13 @@ def mint_targets(
     if n_minted == 0:
         return {'n_minted': 0, 'mean_abs_dev_from_root': 0.0}
 
+    # Stack order is at least 1 even when q=0: the PER term needs the
+    # mirror d/dx target (slot 1) independent of the imitation order.
+    q_stack = max(q, 1)
     mint = data['mint']
-    assert mint.shape[1] == 2 * q + 1, (
+    assert mint.shape[1] == 2 * q_stack + 1, (
         f"mint slot mismatch: tensor has {mint.shape[1]} slots, "
-        f"expected {2 * q + 1} (q={q})")
+        f"expected {2 * q_stack + 1} (q={q})")
     row_idx = rows.nonzero(as_tuple=True)[0]
     mx = data['mint_x'][row_idx]
     mt = data['t'][row_idx]
@@ -545,7 +554,7 @@ def mint_targets(
         x_l = x_pts.clone().detach().requires_grad_(True)
         t_l = t_pts.clone().detach().requires_grad_(True)
         u = forward_fn(torch.cat([x_l, t_l], dim=1))
-        return _axis_derivative_stack(u, x_l, t_l, q).detach()
+        return _axis_derivative_stack(u, x_l, t_l, q_stack).detach()
 
     root_stack = _stack_of(root_model, mx, mt)
 

@@ -191,7 +191,9 @@ def build_owner_imitator_loss(
                 u_m = model.forward_single_expert(
                     eidx, torch.cat([x_m, t_m], dim=1))
                 stack = _axis_derivative_stack(u_m, x_m, t_m, q)
-                se = (stack - mint[mmask]) ** 2   # (n, 2q+1, C)
+                # The mint stack is baked at order max(q,1) (the PER term
+                # needs slot 1); imitation reads only its own 2q+1 slots.
+                se = (stack - mint[mmask][:, :n_slots]) ** 2   # (n, 2q+1, C)
                 imit_loss = torch.tensor(0.0, device=device)
                 for a in range(n_slots):
                     if imit_weights[a] != 0.0:
