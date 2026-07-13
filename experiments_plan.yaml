@@ -47,8 +47,8 @@ base_config:
   save_every: 999999
   seed: 42
   allen_cahn:
-    pretrained_local_expert_checkpoint: roots_checkpoints\allen_cahn_experts.pt
-    pretrained_base_checkpoint: roots_checkpoints\allen_cahn_root.pt
+    pretrained_local_expert_checkpoint: roots_checkpoints/allen_cahn_experts.pt
+    pretrained_base_checkpoint: roots_checkpoints/allen_cahn_root.pt
     spatial_dim: 1
     output_dim: 1
     spatial_domain:
