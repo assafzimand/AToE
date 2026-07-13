@@ -1,4 +1,4 @@
-experiment_name: allen_cahn_M8_owner_imitator
+experiment_name: allen_cahn_M8_owner_imitator_balance
 base_config:
   problem: allen_cahn
   model: AToELeaves
@@ -365,11 +365,12 @@ base_config:
     # redrawn, lambda steps toward mint_lambda_min, minted targets are
     # re-baked from the live weights, and SSBroyden state is RESET (each
     # inner solve starts with empty curvature memory — unlike the old
-    # warm-start-across-resamples behavior). R=1000 -> 34 refreshes over
-    # 35k; 30 SSBroyden inner solves of 1000 epochs each. NOTE: patience
-    # interval = R, so patience_intervals: 5 = early stop after 5 flat
-    # 1000-epoch intervals (active).
-    resample_every_epochs: 1000
+    # warm-start-across-resamples behavior). R=2500 -> 13 refreshes over
+    # 35k: fewer, DEEPER inner solves (R=1000 blocks were cold-started
+    # quasi-Newton runs too shallow to converge each inner problem).
+    # NOTE: patience interval = R, so patience_intervals: 5 = 12.5k flat
+    # epochs — early stop is effectively off in this segment.
+    resample_every_epochs: 2500
     plot_samples_every: 1000
   adaptive_pinn:
     enabled: true
@@ -399,16 +400,26 @@ base_config:
       mint_lambda_min: 0.0
       # The linear ramp completes epochs_on_min_lambda epochs before the
       # segment ends; the remaining refreshes hold lambda_min (pure
-      # exchange window). 5000 with R=1000 -> ramp over refreshes
-      # 1..29 (epochs 1001..29001), then 5 refreshes at lambda_min.
+      # exchange window). 20000 with R=2500 -> ramp over refreshes 1..5
+      # (lambda 0.8/0.6/0.4/0.2/0.0, done at epoch 12501), then 8
+      # refreshes at lambda_min = 8 real Jacobi-Schwarz exchanges. OI1
+      # showed the experts glue to the root by ~6k anyway — the long
+      # ramp spent refreshes protecting nothing.
       # 0 = old behavior (ramp spans all refreshes).
-      epochs_on_min_lambda: 5000
-      # Sobolev matching order q: imitation matches value + d^p/dx^p +
-      # d^p/dt^p for p <= q. Default 1 (= m-1 for the 2nd-order PDEs);
-      # raise toward m-1 for kdv/ks if seams underperform.
-      imit_derivative_order: 1
-      # Optional per-slot weights w_alpha, length 2q+1; null = all 1.0.
-      imit_weights: null
+      epochs_on_min_lambda: 20000
+      # Sobolev matching order q: 0 = imitation matches neighbor VALUES
+      # only. OI1 diagnosis: with q=1 the unweighted u_x/u_t slots
+      # concentrate the imitation gradient on the sharp x=+-0.5
+      # interfaces where the root's derivative is worst (E0/E1 = worst
+      # own-tile RMS in the model); seams hold only ~5% of the error,
+      # so derivative matching wasn't earning its keep.
+      imit_derivative_order: 0
+      # Per-slot weights w_alpha, length 2q+1; null = all 1.0. With q=0
+      # this is THE imitation term weight: 0.3 flips the endgame from
+      # imit = 2.4x all physics terms (the consensus anchor that locked
+      # OI1 at the root) to ~0.7x, while early distillation at lambda=1
+      # (27x dominant) stays comfortably dominant.
+      imit_weights: [0.3]
     initial_train:
       epochs: 45000
       optimizer_1: adam
@@ -435,28 +446,30 @@ base_config:
       lr_warmup_steps: 0
       l2sp_lambda: 0.0
       collar_data_ratio: 0.0
-# Round 6 (2026-07-13): OWNER-IMITATOR phase 3 (docs/New_phase_3.tex),
-# lambda_min = 0 runs (full owner exchange). Every loss term on the
-# expert's OWN raw output u_j: PDE residual on its hard tile, true IC
-# (t=0) / mirror-minted periodic matching (value + u_x) on the BC
-# dataset rows, and Sobolev imitation (value + u_x + u_t, q=1) of the
-# minted target u* = lambda*u0 + (1-lambda)*sg[u_owner] on its collar.
-# NO loss on the composition - it is readout only.
-#   Phase 3 = 5k Adam + 30k SSBroyden, refresh every R=1000 (34
-# refreshes); lambda ramps 1 -> 0 over refreshes 1..29 (epoch 29001),
-# then epochs_on_min_lambda=5000 holds lambda=0 for the last 5 refreshes
-# (pure Jacobi-Schwarz exchange window). Watch mean|u* - root| in the
-# refresh logs - it must grow from 0 as the owners depart from the root.
-#   OI1: M=8 headline (lambda 0 vs the completed lambda=1 sanity, same
-# tree). OI2: M=5 capacity point. OI3: same phase 3 as OI1 (also a
-# reproducibility check, seed 42) but fine-tune 10k with
-# collar_data_ratio 0.8 (80% of fine-tune residual points on the
-# collars) - probes whether collar-focused fine-tune matters.
-# Reference points: OI1 SANITY (lambda=1) phase3 3.74e-5 / FT 3.35e-5;
-# N1_clean 3.50e-5; R1 3.17e-5/2.97e-5; root 3.0e-5; main
+# Round 7 (2026-07-13): IMITATION REBALANCE. Round-6 diagnosis (OI1-OI3
+# + hard-indicator re-eval): mechanics all correct, but (a) the
+# imitation term ended at 2.4x ALL physics terms combined with a floor
+# set by target inconsistency (~5e-5 RMS = the error plateau) - late
+# gradients said "track the consensus", locking every expert at the
+# root; (b) with q=1 the unweighted u_x/u_t slots focused that anchor
+# on the x=+-0.5 interfaces (E0/E1 worst experts); (c) hard vs soft
+# readout differ by ~1% - seams/blending are NOT the problem, error is
+# tile-interior; (d) mean|u*-root| froze at ~1.7e-4 from refresh #6 -
+# the exchange window never exchanged anything new.
+#   Diff vs OI1 is exactly {q=0, w_imit=0.3, lambda=0 by ep 12501,
+# R=2500}: value-only imitation as a soft tether, physics dominates the
+# endgame, 8 deep 2500-epoch SSBroyden exchanges at lambda=0. Physics
+# recipe untouched (res=ic=bc=1, uniform 10k points - same as root).
+#   Success signals: pre-refresh imit plateau BELOW the physics sum;
+# mean|u*-root| GROWING across the lambda=0 refreshes; E0/E1 own-tile
+# RMS (scripts/eval_phase3_hard_indicators.py) dropping toward the
+# ~5e-6 of the good experts.
+# Reference points: root 3.0e-5; OI1 SANITY (lambda=1) phase3 3.74e-5 /
+# FT 3.35e-5; OI1 (lambda->0) phase3 4.05e-5 / FT 3.50e-5; OI2 (M=5)
+# 4.78e-5/3.90e-5; OI3 (collar FT 0.8) 2.96e-5 (only sub-root); main
 # hard-indicator phase 3 3.4e-6.
 experiments:
-- name: OI1_owner_imitator
+- name: OI4_imit_rebalanced
   problem: allen_cahn
   model: AToELeaves
   base_architecture:
@@ -476,44 +489,44 @@ experiments:
     fine_tune:
       collar_data_ratio: 0.0
 
-- name: OI2_owner_imitator_M5
-  problem: allen_cahn
-  model: AToELeaves
-  base_architecture:
-  - 2
-  - 60
-  - 60
-  - 60
-  - 60
-  - 1
-  experts_architecture:
-  - 2
-  - 20
-  - 20
-  - 20
-  - 1
-  adaptive_pinn:
-    M_experts_num: 5
-    fine_tune:
-      collar_data_ratio: 0.0
+# - name: OI2_owner_imitator_M5
+#   problem: allen_cahn
+#   model: AToELeaves
+#   base_architecture:
+#   - 2
+#   - 60
+#   - 60
+#   - 60
+#   - 60
+#   - 1
+#   experts_architecture:
+#   - 2
+#   - 20
+#   - 20
+#   - 20
+#   - 1
+#   adaptive_pinn:
+#     M_experts_num: 5
+#     fine_tune:
+#       collar_data_ratio: 0.0
 
-- name: OI3_owner_imitator_collar
-  problem: allen_cahn
-  model: AToELeaves
-  base_architecture:
-  - 2
-  - 60
-  - 60
-  - 60
-  - 60
-  - 1
-  experts_architecture:
-  - 2
-  - 20
-  - 20
-  - 20
-  - 1
-  adaptive_pinn:
-    fine_tune:
-      collar_data_ratio: 0.8
-      epochs: 10000
+# - name: OI3_owner_imitator_collar
+#   problem: allen_cahn
+#   model: AToELeaves
+#   base_architecture:
+#   - 2
+#   - 60
+#   - 60
+#   - 60
+#   - 60
+#   - 1
+#   experts_architecture:
+#   - 2
+#   - 20
+#   - 20
+#   - 20
+#   - 1
+#   adaptive_pinn:
+#     fine_tune:
+#       collar_data_ratio: 0.8
+#       epochs: 10000
