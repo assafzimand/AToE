@@ -6,7 +6,7 @@
 # Native-grid rel-L2 of the source run's final model: 1.43e-7.
 # PREREQUISITE: roots_checkpoints/burgers_root.pt (already in this repo).
 # Mimicry notes: same patience translation (patience_evals=5 x eval_every=1000).
-experiment_name: burgers_M10_paper
+experiment_name: burgers_M8_paper
 base_config:
   problem: burgers1d
   model: AToELeaves
@@ -176,7 +176,7 @@ base_config:
       freeze_previous_windows: true
       m_distribution: quadratic
   burgers1d:
-    pretrained_base_checkpoint: roots_checkpoints/burgers_root.pt
+    pretrained_base_checkpoint: null
     spatial_dim: 1
     output_dim: 1
     spatial_domain:
@@ -224,7 +224,7 @@ base_config:
       scheme: grad_norm
       epsilon: 1.0e-05
     adaptive_sampling:
-      enabled: true
+      enabled: false
       adaptive_ratio: 0.5
       phi: quadratic
       phi_epsilon: 1.0
@@ -379,7 +379,7 @@ base_config:
     tree_min_samples_leaf: 50
     enable_timing: false
     enable_gradient_diagnostics: false
-    M_experts_num: 10
+    M_experts_num: 8
     split_icbc:
       enabled: true
     initial_train:
@@ -404,7 +404,7 @@ base_config:
       lr_warmup_steps: 500
       l2sp_lambda: 0.0
 experiments:
-- name: M_10
+- name: M_8
   problem: burgers1d
   model: AToELeaves
   base_architecture:
