@@ -1129,7 +1129,7 @@ def _train_segment(
         rel_l2, inf_norm = _reconcile_segment_best(
             model, optimizer, current_optimizer_name, segment_name, epoch,
             train_loss, best_rel_l2, _best_epoch, best_checkpoint_path,
-            cfg, metrics, device)
+            cfg, metrics, device, ctx=ctx)
         best_rel_l2 = min(best_rel_l2, rel_l2) if math.isfinite(rel_l2) else best_rel_l2
 
     # ── Write reassigned segment state back to ctx ──
@@ -1180,7 +1180,7 @@ def _reconcile_segment_best(model, optimizer, optimizer_name: str,
                             segment_name: str, epoch: int, train_loss: float,
                             best_rel_l2: float, best_epoch,
                             best_checkpoint_path, cfg: Dict, metrics: Dict,
-                            device) -> tuple:
+                            device, ctx=None) -> tuple:
     """End-of-segment reconciliation: keep the segment's best model.
 
     Recomputes the in-memory (end-of-segment) rel-L2 fresh on the solver
@@ -1211,6 +1211,11 @@ def _reconcile_segment_best(model, optimizer, optimizer_name: str,
     )
 
     if restore_best:
+        # The end-of-segment weights are about to be discarded in favor of
+        # the best checkpoint — save their prediction plot first so both
+        # states are visible (name marks it as the non-kept final model).
+        if ctx is not None:
+            _save_segment_pred_plot(ctx, f"{segment_name}_final_not_best")
         try:
             ckpt = torch.load(best_checkpoint_path, map_location=device,
                               weights_only=False)
@@ -1272,7 +1277,7 @@ def _save_segment_pred_plot(ctx: TrainingContext, segment_name: str) -> None:
         save_spawn_prediction_plot(
             model=ctx.model,
             domain_bounds=ctx.domain_bounds,
-            gt_grid=gt_grid,
+            gt_grid=ctx.gt_grid,
             grid_x=ctx.gt_x,
             grid_t=ctx.gt_t,
             # {relL2} placeholder is filled in by the renderer
