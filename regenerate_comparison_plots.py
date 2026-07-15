@@ -145,10 +145,18 @@ def _regen_segment_plots(result_path: Path, helpers) -> None:
             if segment.startswith('phase3') and hasattr(model, 'blending_mode'):
                 model.blending_mode = 'hard'
             out_dir.mkdir(parents=True, exist_ok=True)
+            # Replace (not duplicate) the in-training 'best' plot: remove any
+            # existing best-tagged / legacy-named renders for this segment.
+            for _old in list(out_dir.glob(f'pred_after_{segment}_best_*.png')) \
+                    + list(out_dir.glob(f'pred_after_{segment}_ep*.png')):
+                try:
+                    _old.unlink()
+                except OSError:
+                    pass
             plot_predictions_and_error_maps(
                 model, out_dir, cfg,
-                filename=f'pred_after_{segment}_ep{epoch}_relL2_{{relL2}}.png')
-            print(f"  [SegmentPlots] regenerated pred_after_{segment} "
+                filename=f'pred_after_{segment}_best_ep{epoch}_relL2_{{relL2}}.png')
+            print(f"  [SegmentPlots] regenerated pred_after_{segment}_best "
                   f"(epoch {epoch})")
         except Exception as _seg_err:
             print(f"  [SegmentPlots] {segment}: failed — {_seg_err}")

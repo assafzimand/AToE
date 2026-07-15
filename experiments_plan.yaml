@@ -1,4 +1,4 @@
-experiment_name: allen_cahn_ft_fixes
+experiment_name: allen_cahn_ft_l2sp_strong
 base_config:
   problem: allen_cahn
   model: AToELeaves
@@ -403,30 +403,26 @@ base_config:
       l2sp_lambda: 0.0
 experiments:
 
-# Fine-tune fixes sweep. Control = sig0p03_nocollar from the previous sweep
-# (plain fine-tune: degrades 6.4e-6 -> ~2e-5 within ~1k epochs).
-# Base: sigma 0.03, resample 500, no collar, SSBroyden-only, 5k epochs.
-- name: sig0p03_rs50
+# Strong-anchor probe: can SSBroyden reduce collar residual while l2sp pins
+# the weights near the phase-3 solution? RAD 0.5 + per-expert region reports
+# instrument where residual mass and rel-L2 move. Control: earlier
+# sig0p03 runs (l2sp 1e-4 / 1e-2 drifted; plain fine-tune degraded).
+- name: sig0p03_l2sp10_rad0p5_rs100
   problem: allen_cahn
   model: AToELeaves
   base_architecture: [2, 60, 60, 60, 60, 1]
   experts_architecture: [2, 20, 20, 20, 1]
   adaptive_pinn:
     sigma_fraction: 0.03
+    fine_tune:
+      l2sp_lambda: 10.0
   sampling:
-    resample_every_epochs: 50
-- name: sig0p03_rad0p5
-  problem: allen_cahn
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    sigma_fraction: 0.03
+    resample_every_epochs: 100
   allen_cahn:
     adaptive_sampling:
       enabled: true
       adaptive_ratio: 0.5
-- name: sig0p03_l2sp1e-4
+- name: sig0p03_l2sp0p1_rad0p5_rs100
   problem: allen_cahn
   model: AToELeaves
   base_architecture: [2, 60, 60, 60, 60, 1]
@@ -434,61 +430,10 @@ experiments:
   adaptive_pinn:
     sigma_fraction: 0.03
     fine_tune:
-      l2sp_lambda: 0.0001
-- name: sig0p03_l2sp1e-2
-  problem: allen_cahn
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    sigma_fraction: 0.03
-    fine_tune:
-      l2sp_lambda: 0.01
-- name: sig0p03_soap
-  problem: allen_cahn
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    sigma_fraction: 0.03
-    fine_tune:
-      optimizer_1: soap
-      optimizer_2: null
-- name: sig0p04_rs50_rad0p5
-  problem: allen_cahn
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    sigma_fraction: 0.04
+      l2sp_lambda: 0.1
   sampling:
-    resample_every_epochs: 50
+    resample_every_epochs: 100
   allen_cahn:
     adaptive_sampling:
       enabled: true
       adaptive_ratio: 0.5
-- name: sig0p03_rs50_l2sp1e-4_collar0p3
-  problem: allen_cahn
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    sigma_fraction: 0.03
-    fine_tune:
-      epochs: 10000
-      l2sp_lambda: 0.0001
-  sampling:
-    resample_every_epochs: 50
-    collar_data_ratio: 0.3
-- name: sig0p04_rs50_l2sp1e-4
-  problem: allen_cahn
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    sigma_fraction: 0.04
-    fine_tune:
-      epochs: 10000
-      l2sp_lambda: 0.0001
-  sampling:
-    resample_every_epochs: 50

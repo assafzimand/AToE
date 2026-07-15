@@ -159,17 +159,22 @@ def plot_training_curves(
             'ic': '#3498db',         # blue
             'bc': '#2ecc71',         # green
             'continuity': '#e67e22', # orange
+            'l2sp': '#9b59b6',       # purple
         }
         term_labels = {
             'residual': 'PDE residual',
             'ic': 'Initial condition',
             'bc': 'Boundary condition',
             'continuity': 'Continuity',
+            'l2sp': 'L2-SP anchor',
         }
         values_for_log = []
-        for term in ['residual', 'ic', 'bc', 'continuity']:
+        for term in ['residual', 'ic', 'bc', 'continuity', 'l2sp']:
             if loss_comps.get(term) and len(loss_comps[term]) > 0:
                 values = loss_comps[term]
+                # l2sp is all-zero unless anchoring was enabled — skip then
+                if term == 'l2sp' and not any(v > 0 for v in values):
+                    continue
                 ax.plot(comp_epochs, values, '-',
                         color=term_colors.get(term, 'gray'),
                         label=term_labels.get(term, term),
@@ -203,6 +208,81 @@ def plot_training_curves(
         plt.close(fig_s)
 
     print(f"  Training curves saved to {save_path} (+ per-panel files)")
+
+
+def plot_per_expert_region_report(
+    epochs: List,
+    series: Dict,
+    leaf_indices: List[int],
+    bounds_lower: List,
+    bounds_upper: List,
+    grids: Dict,
+    gt_sq_grid,
+    x_grid,
+    t_grid,
+    out_path,
+    segment_name: str,
+) -> None:
+    """Per-expert region report for one segment.
+
+    One row per leaf expert: its region rel-L2 curve (eval cadence, same
+    metric grid as the global curve) next to log10 |err| heatmaps of its tile
+    at segment start / segment best / segment final (final only when it
+    differs from best).
+
+    Args:
+        epochs: eval epochs of the segment (shared x-axis for all curves).
+        series: expert_idx (str or int) -> list of region rel-L2 values.
+        grids: state name ('start' / 'best' / 'final') ->
+            (err_grid (nt, nx), epoch_label). 'final' key optional.
+        gt_sq_grid, x_grid, t_grid: from
+            compute_native_grid_metrics(..., return_grids=True).
+    """
+    states = [s for s in ('start', 'best', 'final') if s in grids]
+    n = len(leaf_indices)
+    if n == 0 or not states:
+        return
+    ncols = 1 + len(states)
+    fig, axes = plt.subplots(n, ncols, figsize=(4.2 * ncols, 3.0 * n),
+                             squeeze=False)
+
+    for row, (eidx, lo, hi) in enumerate(
+            zip(leaf_indices, bounds_lower, bounds_upper)):
+        vals = series.get(str(eidx), series.get(eidx, []))
+        ax = axes[row][0]
+        if vals:
+            ax.semilogy(epochs[:len(vals)], vals, 'r-', linewidth=1.5)
+        ax.set_title(f"E{eidx}  x[{lo[0]:.2f},{hi[0]:.2f}] "
+                     f"t[{lo[1]:.2f},{hi[1]:.2f}]", fontsize=9)
+        ax.set_ylabel('region rel-$L^2$', fontsize=8)
+        ax.grid(alpha=0.3)
+        if row == n - 1:
+            ax.set_xlabel('epoch')
+
+        ix = (x_grid >= lo[0]) & (x_grid <= hi[0])
+        it = (t_grid >= lo[1]) & (t_grid <= hi[1])
+        if not ix.any() or not it.any():
+            continue
+        subs = {s: grids[s][0][np.ix_(it, ix)] for s in states}
+        log_subs = {s: np.log10(subs[s] + 1e-16) for s in states}
+        vmin = min(ls.min() for ls in log_subs.values())
+        vmax = max(ls.max() for ls in log_subs.values())
+        gt_sub_sum = gt_sq_grid[np.ix_(it, ix)].sum()
+        for col, s in enumerate(states, start=1):
+            axh = axes[row][col]
+            rel = float(np.sqrt((subs[s] ** 2).sum())
+                        / (np.sqrt(gt_sub_sum) + 1e-10))
+            im = axh.imshow(log_subs[s], origin='lower', aspect='auto',
+                            extent=[lo[0], hi[0], lo[1], hi[1]],
+                            cmap='hot', vmin=vmin, vmax=vmax)
+            axh.set_title(f"{s} (ep {grids[s][1]}) rel={rel:.2e}", fontsize=9)
+            plt.colorbar(im, ax=axh, fraction=0.046, pad=0.04)
+
+    fig.suptitle(f"Per-expert region rel-L2 — segment '{segment_name}'",
+                 fontsize=12)
+    plt.tight_layout(rect=(0, 0, 1, 0.98))
+    fig.savefig(out_path, dpi=110, bbox_inches='tight')
+    plt.close(fig)
 
 
 def plot_per_expert_curves(

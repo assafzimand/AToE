@@ -976,6 +976,7 @@ def _setup_training(
             'residual': [],    # PDE residual loss
             'ic': [],          # Initial condition loss
             'bc': [],          # Boundary condition loss
+            'l2sp': [],        # L2-SP anchor penalty (0 unless l2sp_lambda > 0)
         },
         # Gradient norm history
         'gradient_norms': {

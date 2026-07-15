@@ -294,14 +294,20 @@ def _run_fine_tune(ctx: TrainingContext) -> None:
 
         def _l2sp_loss(model, batch, **kw):
             loss = orig_loss_fn(model, batch, **kw)
-            if isinstance(loss, dict) or kw.get('return_components', False):
-                return loss
             penalty = sum(
                 (p - _anchor[n]).pow(2).sum()
                 for n, p in model.named_parameters()
                 if n in _anchor
             )
-            return loss + (_lam / 2.0) * penalty
+            pen = (_lam / 2.0) * penalty
+            if isinstance(loss, dict):
+                # Components path: expose the anchor penalty as its own term
+                # (tracked in metrics + training-curve components panel).
+                if kw.get('return_components', False) and 'total' in loss:
+                    loss['l2sp'] = pen
+                    loss['total'] = loss['total'] + pen
+                return loss
+            return loss + pen
 
         ctx.loss_fn = _l2sp_loss
         logger.info(f"[L2-SP] Anchoring enabled with lambda={l2sp_lambda}")

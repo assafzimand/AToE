@@ -50,6 +50,7 @@ def compute_native_grid_metrics(
     cfg: Dict,
     device: torch.device,
     chunk_size: int = 65536,
+    return_grids: bool = False,
 ) -> Optional[Dict]:
     """Rel-L2 and inf-norm of the model on the solver's NATIVE solution grid.
 
@@ -59,6 +60,13 @@ def compute_native_grid_metrics(
     restricted to the config's temporal domain so time-marching windows are
     scored on their own window. The solver memoizes the solution in-process,
     so calling this every eval is cheap (one chunked no-grad forward).
+
+    Args:
+        return_grids: When True the result also carries the per-point fields
+            needed for regional metrics / error heatmaps:
+            ``err_grid`` (nt, nx) = sqrt(sum over components of diff²),
+            ``gt_sq_grid`` (nt, nx) = sum over components of gt², plus
+            ``x_grid`` (nx,) and ``t_grid`` (nt,).
 
     Returns:
         {'rel_l2', 'inf_norm', 'n_points', 'grid_shape'} or None if the
@@ -92,6 +100,7 @@ def compute_native_grid_metrics(
     total_diff_sq = 0.0
     total_gt_sq = 0.0
     inf_norm = 0.0
+    err_sq = np.empty(xt.shape[0]) if return_grids else None
     with torch.no_grad():
         for start in range(0, xt.shape[0], chunk_size):
             xb = torch.tensor(xt[start:start + chunk_size], dtype=dtype, device=device)
@@ -101,16 +110,57 @@ def compute_native_grid_metrics(
             total_diff_sq += (diff ** 2).sum().item()
             total_gt_sq += (gb ** 2).sum().item()
             inf_norm = max(inf_norm, diff.abs().max().item())
+            if return_grids:
+                err_sq[start:start + xb.shape[0]] = (
+                    (diff ** 2).sum(dim=1).cpu().numpy())
     if was_training:
         model.train()
 
     rel_l2 = math.sqrt(total_diff_sq) / (math.sqrt(total_gt_sq) + 1e-10)
-    return {
+    result = {
         'rel_l2': rel_l2,
         'inf_norm': inf_norm,
         'n_points': xt.shape[0],
         'grid_shape': (len(t_grid), len(x_grid)),
     }
+    if return_grids:
+        shape = (len(t_grid), len(x_grid))
+        result['err_grid'] = np.sqrt(err_sq).reshape(shape)
+        result['gt_sq_grid'] = (gt ** 2).sum(axis=1).reshape(shape)
+        result['x_grid'] = np.asarray(x_grid)
+        result['t_grid'] = t_grid
+    return result
+
+
+def per_region_rel_l2(
+    err_grid: np.ndarray,
+    gt_sq_grid: np.ndarray,
+    x_grid: np.ndarray,
+    t_grid: np.ndarray,
+    bounds_lower,
+    bounds_upper,
+) -> list:
+    """Rel-L2 restricted to axis-aligned (x, t) boxes of the native grid.
+
+    Args:
+        err_grid, gt_sq_grid: (nt, nx) from compute_native_grid_metrics(return_grids=True).
+        bounds_lower/upper: iterables of [x, t] box bounds (1D-spatial only).
+
+    Returns:
+        List of rel-L2 values, one per box (nan for boxes with no grid points).
+    """
+    rels = []
+    for lo, hi in zip(bounds_lower, bounds_upper):
+        ix = (x_grid >= lo[0]) & (x_grid <= hi[0])
+        it = (t_grid >= lo[1]) & (t_grid <= hi[1])
+        if not ix.any() or not it.any():
+            rels.append(float('nan'))
+            continue
+        err_sub = err_grid[np.ix_(it, ix)]
+        gt_sub = gt_sq_grid[np.ix_(it, ix)]
+        rels.append(float(math.sqrt((err_sub ** 2).sum())
+                          / (math.sqrt(gt_sub.sum()) + 1e-10)))
+    return rels
 
 
 def native_ground_truth_grid(

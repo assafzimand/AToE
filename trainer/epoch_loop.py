@@ -18,8 +18,12 @@ logger = get_logger(__name__)
 from trainer.plotting import (
     plot_training_curves,
     plot_per_expert_curves,
+    plot_per_expert_region_report,
 )
-from trainer.utils import compute_infinity_norm_error, compute_native_grid_metrics
+from trainer.utils import (
+    compute_infinity_norm_error, compute_native_grid_metrics,
+    per_region_rel_l2,
+)
 from trainer.timing import EpochTimer
 from trainer.training_context import TrainingContext, SegmentResult
 from models.atoe_leaves import AToELeaves
@@ -191,6 +195,22 @@ def _train_segment(
         'lr': seg_cfg['lr'],
         'trainable_params': _n_train_params,
     })
+
+    # ── Per-expert (per Ω_j) region rel-L2 tracking ──
+    # Leaf tiles are fixed within a segment; root/base-only segments have
+    # no leaves (num_experts == 0 or base still in the leaf set) and are
+    # skipped. Collected at every eval; rendered at segment end.
+    _track_regions = (
+        is_adaptive and problem_cfg['spatial_dim'] == 1
+        and hasattr(model, 'leaf_indices') and hasattr(model, 'regions')
+        and getattr(model, 'num_experts', 0) > 0
+        and -1 not in model.leaf_indices)
+    _leaf_track = (sorted(i for i in model.leaf_indices if i >= 0)
+                   if _track_regions else [])
+    _bounds_lo = [list(model.regions[i].bounds_lower) for i in _leaf_track]
+    _bounds_up = [list(model.regions[i].bounds_upper) for i in _leaf_track]
+    _seg_err_start = None   # (err_grid, epoch) at the segment's first eval
+    _seg_gt_ref = None      # (gt_sq_grid, x_grid, t_grid)
 
     epoch = segment_start_epoch
     while epoch < total_epochs:
@@ -789,11 +809,33 @@ def _train_segment(
             model.eval()
 
             timer.start('eval.native_grid')
-            _native = compute_native_grid_metrics(model, cfg, device)
+            _native = compute_native_grid_metrics(model, cfg, device,
+                                                  return_grids=_track_regions)
             timer.stop('eval.native_grid')
             if _native is not None:
                 rel_l2 = _native['rel_l2']
                 inf_norm = _native['inf_norm']
+                # Per-expert region rel-L2 from the same eval pass
+                if _track_regions and 'err_grid' in _native:
+                    _region_rels = per_region_rel_l2(
+                        _native['err_grid'], _native['gt_sq_grid'],
+                        _native['x_grid'], _native['t_grid'],
+                        _bounds_lo, _bounds_up)
+                    _pe = metrics.setdefault('per_expert_rel_l2', {}).setdefault(
+                        segment_name, {
+                            'epochs': [],
+                            'experts': {str(i): [] for i in _leaf_track},
+                            'leaf_indices': list(_leaf_track),
+                            'bounds_lower': _bounds_lo,
+                            'bounds_upper': _bounds_up,
+                        })
+                    _pe['epochs'].append(epoch)
+                    for _i, _r in zip(_leaf_track, _region_rels):
+                        _pe['experts'][str(_i)].append(_r)
+                    if _seg_err_start is None:
+                        _seg_err_start = (_native['err_grid'], epoch)
+                        _seg_gt_ref = (_native['gt_sq_grid'],
+                                       _native['x_grid'], _native['t_grid'])
             else:
                 rel_l2 = float('nan')
                 inf_norm = float('nan')
@@ -833,8 +875,9 @@ def _train_segment(
 
             # ── Term-wise loss components (from the same eval pass) ──
             metrics['loss_components']['epochs'].append(epoch)
-            for term in ['residual', 'ic', 'bc']:
-                metrics['loss_components'][term].append(comp_means.get(term, 0.0))
+            for term in ['residual', 'ic', 'bc', 'l2sp']:
+                metrics['loss_components'].setdefault(term, []).append(
+                    comp_means.get(term, 0.0))
             _comp_str = ', '.join(f'{k}={v:.6e}' for k, v in comp_means.items())
             logger.info(f"  [LossTerms] {_comp_str}")
             metrics['loss_components_history'].append({
@@ -1123,14 +1166,25 @@ def _train_segment(
     # After this, the in-memory model == best_model_<segment>.pt == the
     # segment's best; the next segment (tree build, interface snapshot,
     # fine-tune) continues from it.
+    _seg_grids_final = None
+    _seg_grids_best = None
     if _nan_detected:
         _stop_reason = 'nan'
     else:
+        # End-of-segment error field (the 'final' weights, captured before
+        # reconciliation may replace them with the best checkpoint).
+        if _track_regions:
+            _seg_grids_final = compute_native_grid_metrics(
+                model, cfg, device, return_grids=True)
         rel_l2, inf_norm = _reconcile_segment_best(
             model, optimizer, current_optimizer_name, segment_name, epoch,
             train_loss, best_rel_l2, _best_epoch, best_checkpoint_path,
             cfg, metrics, device, ctx=ctx)
         best_rel_l2 = min(best_rel_l2, rel_l2) if math.isfinite(rel_l2) else best_rel_l2
+        # Error field of the kept (best) model after reconciliation.
+        if _track_regions:
+            _seg_grids_best = compute_native_grid_metrics(
+                model, cfg, device, return_grids=True)
 
     # ── Write reassigned segment state back to ctx ──
     # (objects mutated in place — model, metrics, timer — need no write-back.)
@@ -1152,7 +1206,51 @@ def _train_segment(
     ctx._nan_detected = _nan_detected
 
     if not _nan_detected:
-        _save_segment_pred_plot(ctx, segment_name)
+        # 'best' = the reconciled model that continues in the pipeline;
+        # label it with the epoch of the kept weights (best checkpoint's
+        # epoch when it was restored, else the segment-end epoch).
+        _rec = metrics.get('segment_reconcile_events', [])
+        _ev = (_rec[-1] if _rec and _rec[-1].get('segment') == segment_name
+               else None)
+        _best_label = (_ev['best_epoch']
+                       if _ev and _ev.get('kept') == 'best'
+                       and _ev.get('best_epoch') is not None else epoch)
+        _save_segment_pred_plot(ctx, segment_name, tag='best',
+                                epoch_label=_best_label)
+
+        # ── Per-expert region report (curve + start/best/final heatmaps) ──
+        if (_track_regions and _seg_grids_best is not None
+                and _seg_err_start is not None and _seg_gt_ref is not None):
+            _grids = {
+                'start': _seg_err_start,
+                'best': (_seg_grids_best['err_grid'], _best_label),
+            }
+            # 'final' only when the end weights lost to an earlier best
+            if (_ev is not None and _ev.get('kept') == 'best'
+                    and _seg_grids_final is not None):
+                _grids['final'] = (_seg_grids_final['err_grid'], epoch)
+            try:
+                _tp_dir = run_dir / 'training_plots'
+                _tp_dir.mkdir(exist_ok=True)
+                _pe = metrics['per_expert_rel_l2'][segment_name]
+                plot_per_expert_region_report(
+                    epochs=_pe['epochs'],
+                    series=_pe['experts'],
+                    leaf_indices=_leaf_track,
+                    bounds_lower=_bounds_lo,
+                    bounds_upper=_bounds_up,
+                    grids=_grids,
+                    gt_sq_grid=_seg_gt_ref[0],
+                    x_grid=_seg_gt_ref[1],
+                    t_grid=_seg_gt_ref[2],
+                    out_path=_tp_dir / f'per_expert_rel_l2_{segment_name}.png',
+                    segment_name=segment_name,
+                )
+                logger.info(f"  [Segment:{segment_name}] saved "
+                            f"training_plots/per_expert_rel_l2_{segment_name}.png")
+            except Exception as _pe_err:
+                logger.warning(f"  [Segment:{segment_name}] per-expert region "
+                               f"report failed: {_pe_err}")
     _final_tl = train_loss if train_loss is not None else float('nan')
     _final_rl2 = rel_l2 if rel_l2 is not None else float('nan')
     _oom_stopped = getattr(ctx, 'oom_stopped', False)
@@ -1213,9 +1311,10 @@ def _reconcile_segment_best(model, optimizer, optimizer_name: str,
     if restore_best:
         # The end-of-segment weights are about to be discarded in favor of
         # the best checkpoint — save their prediction plot first so both
-        # states are visible (name marks it as the non-kept final model).
+        # states are visible ('final' tag = the non-kept end weights).
         if ctx is not None:
-            _save_segment_pred_plot(ctx, f"{segment_name}_final_not_best")
+            _save_segment_pred_plot(ctx, segment_name, tag='final',
+                                    epoch_label=epoch)
         try:
             ckpt = torch.load(best_checkpoint_path, map_location=device,
                               weights_only=False)
@@ -1261,17 +1360,21 @@ def _reconcile_segment_best(model, optimizer, optimizer_name: str,
     return float('nan'), float('nan')
 
 
-def _save_segment_pred_plot(ctx: TrainingContext, segment_name: str) -> None:
-    """Save ``pred_after_<segment>.png`` (1D problems with ground truth).
+def _save_segment_pred_plot(ctx: TrainingContext, segment_name: str,
+                            tag: str = 'best', epoch_label=None) -> None:
+    """Save ``pred_after_<segment>_<tag>_ep<N>.png`` (1D problems with GT).
 
-    Captures the full-composition prediction at the end of a segment so each
-    stage (root, every level, fine-tune, joint) leaves a visual checkpoint.
+    ``tag`` is ``'best'`` for the reconciled model that continues in the
+    pipeline, or ``'final'`` for discarded end-of-segment weights (saved only
+    when they differ from the best). ``epoch_label`` overrides the epoch in
+    the filename (e.g. the best checkpoint's epoch); defaults to ctx.epoch.
     """
     if ctx.problem_cfg.get('spatial_dim', None) != 1:
         return
     out_dir = ctx.adaptive_plots_dir or ctx.run_dir
     if out_dir is None:
         return
+    ep = epoch_label if epoch_label is not None else ctx.epoch
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
         save_spawn_prediction_plot(
@@ -1281,11 +1384,12 @@ def _save_segment_pred_plot(ctx: TrainingContext, segment_name: str) -> None:
             grid_x=ctx.gt_x,
             grid_t=ctx.gt_t,
             # {relL2} placeholder is filled in by the renderer
-            output_path=(out_dir / f"pred_after_{segment_name}_ep{ctx.epoch}"
+            output_path=(out_dir / f"pred_after_{segment_name}_{tag}_ep{ep}"
                                    f"_relL2_{{relL2}}.png"),
             epoch=ctx.epoch,
             cfg=ctx.cfg,
         )
-        logger.info(f"  [Segment:{segment_name}] saved pred_after_{segment_name} plot")
+        logger.info(f"  [Segment:{segment_name}] saved "
+                    f"pred_after_{segment_name}_{tag} plot (epoch {ep})")
     except Exception as _e:
         logger.info(f"  [Segment:{segment_name}] prediction plot failed: {_e}")
