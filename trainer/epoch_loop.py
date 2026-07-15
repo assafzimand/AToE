@@ -875,7 +875,7 @@ def _train_segment(
 
             # ── Term-wise loss components (from the same eval pass) ──
             metrics['loss_components']['epochs'].append(epoch)
-            for term in ['residual', 'ic', 'bc', 'l2sp']:
+            for term in ['residual', 'ic', 'bc', 'l2sp', 'l2sp_drift']:
                 metrics['loss_components'].setdefault(term, []).append(
                     comp_means.get(term, 0.0))
             _comp_str = ', '.join(f'{k}={v:.6e}' for k, v in comp_means.items())
@@ -884,6 +884,49 @@ def _train_segment(
                 'epoch': epoch,
                 **comp_means,
             })
+
+            # ── Per-expert loss terms on the COMPOSED u_θ, filtered to Ω_j ──
+            # Per-sample losses from the problem loss (for_tree_spawning path),
+            # averaged over the probe points of each kind inside each leaf
+            # tile. Rendered in the per-expert region report at segment end.
+            if _track_regions and _probe is not None:
+                try:
+                    _ps = loss_fn(model, _probe, for_tree_spawning=True,
+                                  update_causal_state=False)
+                    _px = _probe['x'][:, 0]
+                    _pt = _probe['t'][:, 0]
+                    _pmask = _probe['mask']
+                    _kind_of = {'residual': _pmask['residual'],
+                                'ic': _pmask['IC'], 'bc': _pmask['BC']}
+                    _lw = problem_cfg['loss_weights']
+                    _pel = metrics.setdefault(
+                        'per_expert_loss_terms', {}).setdefault(
+                        segment_name, {
+                            'epochs': [],
+                            'experts': {str(i): {'residual': [], 'ic': [],
+                                                 'bc': [], 'total': []}
+                                        for i in _leaf_track},
+                        })
+                    _pel['epochs'].append(epoch)
+                    for _i, _lo, _hi in zip(_leaf_track, _bounds_lo, _bounds_up):
+                        _in_box = ((_px >= _lo[0]) & (_px <= _hi[0])
+                                   & (_pt >= _lo[1]) & (_pt <= _hi[1]))
+                        _tot = 0.0
+                        _any = False
+                        for _term in ('residual', 'ic', 'bc'):
+                            _arr = _ps.get(_term)
+                            _m = _in_box & _kind_of[_term]
+                            if _arr is not None and _m.any():
+                                _v = float(_arr[_m].detach().mean().item())
+                                _tot += _lw.get(_term, 1.0) * _v
+                                _any = True
+                            else:
+                                _v = float('nan')
+                            _pel['experts'][str(_i)][_term].append(_v)
+                        _pel['experts'][str(_i)]['total'].append(
+                            _tot if _any else float('nan'))
+                except Exception as _pel_err:
+                    logger.info(f"  [PerExpertTerms] failed: {_pel_err}")
 
             # Per-expert split-loss breakdown
             _split_ctx = getattr(ctx, '_split_context', None)
@@ -1237,6 +1280,8 @@ def _train_segment(
                 def _np(a):
                     return a.cpu().numpy() if isinstance(a, torch.Tensor) else a
 
+                _pel = metrics.get('per_expert_loss_terms', {}).get(
+                    segment_name, {})
                 plot_per_expert_region_report(
                     epochs=_pe['epochs'],
                     series=_pe['experts'],
@@ -1252,6 +1297,8 @@ def _train_segment(
                     gt_grid=_np(ctx.gt_grid),
                     gt_x=_np(ctx.gt_x),
                     gt_t=_np(ctx.gt_t),
+                    loss_series=_pel.get('experts'),
+                    loss_epochs=_pel.get('epochs'),
                 )
                 logger.info(f"  [Segment:{segment_name}] saved "
                             f"training_plots/per_expert_rel_l2_{segment_name}.png")

@@ -302,15 +302,22 @@ def _run_fine_tune(ctx: TrainingContext) -> None:
             pen = (_lam / 2.0) * penalty
             if isinstance(loss, dict):
                 # Components path: expose the anchor penalty as its own term
-                # (tracked in metrics + training-curve components panel).
+                # (tracked in metrics + training-curve components panel), plus
+                # the raw weight drift ||θ-θ₀|| — the λ-independent quantity
+                # that makes anchor behavior readable on the curves.
                 if kw.get('return_components', False) and 'total' in loss:
                     loss['l2sp'] = pen
+                    loss['l2sp_drift'] = penalty.sqrt()
                     loss['total'] = loss['total'] + pen
                 return loss
             return loss + pen
 
         ctx.loss_fn = _l2sp_loss
-        logger.info(f"[L2-SP] Anchoring enabled with lambda={l2sp_lambda}")
+        # Anchor norm reference for the drift panel (relative-drift readout).
+        ctx.metrics['l2sp_anchor_norm'] = float(sum(
+            p.pow(2).sum() for p in ctx._l2sp_anchor.values()) ** 0.5)
+        logger.info(f"[L2-SP] Anchoring enabled with lambda={l2sp_lambda} "
+                    f"(anchor norm {ctx.metrics['l2sp_anchor_norm']:.4f})")
 
     ft_cfg = dict(cfg)
     ft_cfg.update(fine_tune_cfg)

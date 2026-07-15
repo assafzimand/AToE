@@ -183,9 +183,29 @@ def plot_training_curves(
         _draw_markers(ax)
         _finish(ax, 'Loss component', values_for_log)
 
+    def _panel_drift(ax):
+        # Anchor drift ||θ-θ₀|| in raw weight-space units — the λ-independent
+        # view of what the L2-SP penalty means (the penalty line in the
+        # components panel is λ/2·drift², whose log-scale 'jump' from an
+        # exactly-zero start is visually misleading).
+        drift = loss_comps.get('l2sp_drift', [])
+        comp_epochs = loss_comps['epochs']
+        anchor_norm = metrics.get('l2sp_anchor_norm')
+        label = r'$\|\theta-\theta_0\|$'
+        if anchor_norm and drift:
+            label += (f'  (final: {drift[-1]:.2e} = '
+                      f'{drift[-1] / anchor_norm:.1e} of anchor norm '
+                      f'{anchor_norm:.1f})')
+        ax.plot(comp_epochs, drift, '-', color='#9b59b6',
+                label=label, linewidth=1.8, alpha=0.9)
+        _draw_markers(ax)
+        _finish(ax, 'Weight drift from anchor', [drift])
+
     panels = [('loss', _panel_loss), ('rel_l2', _panel_rel_l2)]
     if has_components:
         panels.append(('components', _panel_components))
+    if any(v > 0 for v in loss_comps.get('l2sp_drift', [])):
+        panels.append(('anchor_drift', _panel_drift))
 
     suffix = f'_{name_suffix}' if name_suffix else ''
 
@@ -225,14 +245,18 @@ def plot_per_expert_region_report(
     gt_grid=None,
     gt_x=None,
     gt_t=None,
+    loss_series: Dict = None,
+    loss_epochs: List = None,
 ) -> None:
     """Per-expert region report for one segment.
 
     One row per leaf expert: a ground-truth heatmap with all leaf boundaries
     and this row's region highlighted (like plot_per_expert_curves), its
     region rel-L2 curve (eval cadence, same metric grid as the global curve),
-    then log10 |err| heatmaps of its tile at segment start / segment best /
-    segment final (final only when it differs from best).
+    per-term loss curves measured on the composed u_θ restricted to Ω_j
+    (when ``loss_series`` is given), then log10 |err| heatmaps of its tile at
+    segment start / segment best / segment final (final only when it differs
+    from best).
 
     Args:
         epochs: eval epochs of the segment (shared x-axis for all curves).
@@ -253,9 +277,15 @@ def plot_per_expert_region_report(
         return
     has_gt_panel = (gt_grid is not None and gt_x is not None
                     and gt_t is not None)
-    ncols = (2 if has_gt_panel else 1) + len(states)
+    has_loss_panel = bool(loss_series) and loss_epochs is not None
+    ncols = ((2 if has_gt_panel else 1) + (1 if has_loss_panel else 0)
+             + len(states))
     fig, axes = plt.subplots(n, ncols, figsize=(4.2 * ncols, 3.0 * n),
                              squeeze=False)
+    _loss_term_style = {
+        'residual': '#e74c3c', 'ic': '#3498db',
+        'bc': '#2ecc71', 'total': '#2c3e50',
+    }
 
     if has_gt_panel:
         gt_disp = (np.linalg.norm(gt_grid, axis=2)
@@ -292,6 +322,30 @@ def plot_per_expert_region_report(
         ax.grid(alpha=0.3)
         if row == n - 1:
             ax.set_xlabel('epoch')
+
+        if has_loss_panel:
+            col0 += 1
+            axl = axes[row][col0]
+            _es = loss_series.get(str(eidx), loss_series.get(eidx, {}))
+            _plotted = False
+            for _term, _tvals in _es.items():
+                if not _tvals:
+                    continue
+                _v = np.asarray(_tvals, dtype=float)
+                _v = np.where(_v > 0, _v, np.nan)  # keep the axis log-friendly
+                if np.isfinite(_v).any():
+                    axl.plot(loss_epochs[:len(_v)], _v,
+                             color=_loss_term_style.get(_term, 'gray'),
+                             label=_term, linewidth=1.2, alpha=0.85)
+                    _plotted = True
+            if _plotted:
+                axl.set_yscale('log')
+                axl.legend(fontsize=6)
+            axl.set_title(r'loss terms on $u_\theta$ in $\Omega_j$',
+                          fontsize=9)
+            axl.grid(alpha=0.3)
+            if row == n - 1:
+                axl.set_xlabel('epoch')
 
         ix = (x_grid >= lo[0]) & (x_grid <= hi[0])
         it = (t_grid >= lo[1]) & (t_grid <= hi[1])

@@ -977,6 +977,7 @@ def _setup_training(
             'ic': [],          # Initial condition loss
             'bc': [],          # Boundary condition loss
             'l2sp': [],        # L2-SP anchor penalty (0 unless l2sp_lambda > 0)
+            'l2sp_drift': [],  # ||theta - theta_0|| weight drift (anchor runs)
         },
         # Gradient norm history
         'gradient_norms': {

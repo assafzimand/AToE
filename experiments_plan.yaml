@@ -403,10 +403,25 @@ base_config:
       l2sp_lambda: 0.0
 experiments:
 
-# Strong-anchor probe, uniform sampling (RAD removed: it reweights the collar
-# residual by ~1000x and overpowers the anchor — see l2sp_strong batch).
-# Control: earlier sig0p03 runs (l2sp 1e-4 / 1e-2 drifted; plain degraded).
-- name: sig0p03_l2sp10_rs100
+# Term-balance probe: down-weight the residual so it stops cashing in the
+# phase-3 IC/BC surplus (w_res*res: 6e-8 -> 6e-12, now BELOW ic/bc), with and
+# without the anchor; plus a stiffer anchor (lambda=100) at standard weights
+# to shrink the rel-L2 wobble seen at lambda=10 (drift 2e-5 -> ~2e-6).
+- name: sig0p03_wres1em4_l2sp0
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    sigma_fraction: 0.03
+    fine_tune:
+      l2sp_lambda: 0.0
+  sampling:
+    resample_every_epochs: 100
+  allen_cahn:
+    loss_weights:
+      residual: 0.0001
+- name: sig0p03_wres1em4_l2sp10
   problem: allen_cahn
   model: AToELeaves
   base_architecture: [2, 60, 60, 60, 60, 1]
@@ -417,7 +432,10 @@ experiments:
       l2sp_lambda: 10.0
   sampling:
     resample_every_epochs: 100
-- name: sig0p03_l2sp0p1_rs100
+  allen_cahn:
+    loss_weights:
+      residual: 0.0001
+- name: sig0p03_l2sp100
   problem: allen_cahn
   model: AToELeaves
   base_architecture: [2, 60, 60, 60, 60, 1]
@@ -425,17 +443,6 @@ experiments:
   adaptive_pinn:
     sigma_fraction: 0.03
     fine_tune:
-      l2sp_lambda: 0.1
-  sampling:
-    resample_every_epochs: 100
-- name: sig0p03_l2sp0_rs100
-  problem: allen_cahn
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    sigma_fraction: 0.03
-    fine_tune:
-      l2sp_lambda: 0.0
+      l2sp_lambda: 100.0
   sampling:
     resample_every_epochs: 100
