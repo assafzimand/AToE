@@ -1,4 +1,4 @@
-experiment_name: allen_cahn_ft_l2sp_strong
+experiment_name: allen_cahn_ft_balance30
 base_config:
   problem: allen_cahn
   model: AToELeaves
@@ -391,7 +391,7 @@ base_config:
       lr_decay_steps: 1000
       lr_warmup_steps: 0
     fine_tune:
-      epochs: 1000
+      epochs: 2000
       optimizer_1: ssbroyden
       optimizer_2: null
       optimizer_switch_epoch: 99999
@@ -403,11 +403,87 @@ base_config:
       l2sp_lambda: 0.0
 experiments:
 
-# Term-balance probe: down-weight the residual so it stops cashing in the
-# phase-3 IC/BC surplus (w_res*res: 6e-8 -> 6e-12, now BELOW ic/bc), with and
-# without the anchor; plus a stiffer anchor (lambda=100) at standard weights
-# to shrink the rel-L2 wobble seen at lambda=10 (drift 2e-5 -> ~2e-6).
-- name: sig0p03_wres1em4_l2sp0
+# Balance grid (30 x 2k epochs): loss-weight rebalancing (w_res down / ic-bc
+# up) x light anchor (lambda <= 10) x seam-focused sampling (collar XOR RAD).
+# Findings feeding this: w_res=1e-4 alone still degrades via collar
+# deformation (ic/bc stay 1e-13); w_res=1e-4+l2sp10 pins but is inert;
+# l2sp100 alone gave the first sub-start best (6.21e-6).
+- name: base
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    sigma_fraction: 0.03
+    fine_tune:
+      l2sp_lambda: 0.0
+  sampling:
+    resample_every_epochs: 100
+- name: l2sp1
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    sigma_fraction: 0.03
+    fine_tune:
+      l2sp_lambda: 1.0
+  sampling:
+    resample_every_epochs: 100
+- name: l2sp10
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    sigma_fraction: 0.03
+    fine_tune:
+      l2sp_lambda: 10.0
+  sampling:
+    resample_every_epochs: 100
+- name: wres1e-1
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    sigma_fraction: 0.03
+    fine_tune:
+      l2sp_lambda: 0.0
+  sampling:
+    resample_every_epochs: 100
+  allen_cahn:
+    loss_weights:
+      residual: 0.1
+- name: wres1e-2
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    sigma_fraction: 0.03
+    fine_tune:
+      l2sp_lambda: 0.0
+  sampling:
+    resample_every_epochs: 100
+  allen_cahn:
+    loss_weights:
+      residual: 0.01
+- name: wres1e-3
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    sigma_fraction: 0.03
+    fine_tune:
+      l2sp_lambda: 0.0
+  sampling:
+    resample_every_epochs: 100
+  allen_cahn:
+    loss_weights:
+      residual: 0.001
+- name: wres1e-4
   problem: allen_cahn
   model: AToELeaves
   base_architecture: [2, 60, 60, 60, 60, 1]
@@ -421,7 +497,78 @@ experiments:
   allen_cahn:
     loss_weights:
       residual: 0.0001
-- name: sig0p03_wres1em4_l2sp10
+- name: icbc100
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    sigma_fraction: 0.03
+    fine_tune:
+      l2sp_lambda: 0.0
+  sampling:
+    resample_every_epochs: 100
+  allen_cahn:
+    loss_weights:
+      ic: 100.0
+      bc: 100.0
+- name: wres1e-1_l2sp10
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    sigma_fraction: 0.03
+    fine_tune:
+      l2sp_lambda: 10.0
+  sampling:
+    resample_every_epochs: 100
+  allen_cahn:
+    loss_weights:
+      residual: 0.1
+- name: wres1e-2_l2sp1
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    sigma_fraction: 0.03
+    fine_tune:
+      l2sp_lambda: 1.0
+  sampling:
+    resample_every_epochs: 100
+  allen_cahn:
+    loss_weights:
+      residual: 0.01
+- name: wres1e-2_l2sp10
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    sigma_fraction: 0.03
+    fine_tune:
+      l2sp_lambda: 10.0
+  sampling:
+    resample_every_epochs: 100
+  allen_cahn:
+    loss_weights:
+      residual: 0.01
+- name: wres1e-4_l2sp1
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    sigma_fraction: 0.03
+    fine_tune:
+      l2sp_lambda: 1.0
+  sampling:
+    resample_every_epochs: 100
+  allen_cahn:
+    loss_weights:
+      residual: 0.0001
+- name: wres1e-4_l2sp10
   problem: allen_cahn
   model: AToELeaves
   base_architecture: [2, 60, 60, 60, 60, 1]
@@ -435,7 +582,7 @@ experiments:
   allen_cahn:
     loss_weights:
       residual: 0.0001
-- name: sig0p03_l2sp100
+- name: icbc100_l2sp10
   problem: allen_cahn
   model: AToELeaves
   base_architecture: [2, 60, 60, 60, 60, 1]
@@ -443,6 +590,250 @@ experiments:
   adaptive_pinn:
     sigma_fraction: 0.03
     fine_tune:
-      l2sp_lambda: 100.0
+      l2sp_lambda: 10.0
   sampling:
     resample_every_epochs: 100
+  allen_cahn:
+    loss_weights:
+      ic: 100.0
+      bc: 100.0
+- name: collar0p3
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    sigma_fraction: 0.03
+    fine_tune:
+      l2sp_lambda: 0.0
+  sampling:
+    resample_every_epochs: 100
+    collar_data_ratio: 0.3
+- name: collar0p5
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    sigma_fraction: 0.03
+    fine_tune:
+      l2sp_lambda: 0.0
+  sampling:
+    resample_every_epochs: 100
+    collar_data_ratio: 0.5
+- name: wres1e-2_collar0p3
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    sigma_fraction: 0.03
+    fine_tune:
+      l2sp_lambda: 0.0
+  sampling:
+    resample_every_epochs: 100
+    collar_data_ratio: 0.3
+  allen_cahn:
+    loss_weights:
+      residual: 0.01
+- name: wres1e-4_collar0p3
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    sigma_fraction: 0.03
+    fine_tune:
+      l2sp_lambda: 0.0
+  sampling:
+    resample_every_epochs: 100
+    collar_data_ratio: 0.3
+  allen_cahn:
+    loss_weights:
+      residual: 0.0001
+- name: wres1e-2_collar0p5
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    sigma_fraction: 0.03
+    fine_tune:
+      l2sp_lambda: 0.0
+  sampling:
+    resample_every_epochs: 100
+    collar_data_ratio: 0.5
+  allen_cahn:
+    loss_weights:
+      residual: 0.01
+- name: wres1e-2_collar0p3_l2sp10
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    sigma_fraction: 0.03
+    fine_tune:
+      l2sp_lambda: 10.0
+  sampling:
+    resample_every_epochs: 100
+    collar_data_ratio: 0.3
+  allen_cahn:
+    loss_weights:
+      residual: 0.01
+- name: wres1e-2_collar0p5_l2sp10
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    sigma_fraction: 0.03
+    fine_tune:
+      l2sp_lambda: 10.0
+  sampling:
+    resample_every_epochs: 100
+    collar_data_ratio: 0.5
+  allen_cahn:
+    loss_weights:
+      residual: 0.01
+- name: wres1e-3_collar0p3_l2sp1
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    sigma_fraction: 0.03
+    fine_tune:
+      l2sp_lambda: 1.0
+  sampling:
+    resample_every_epochs: 100
+    collar_data_ratio: 0.3
+  allen_cahn:
+    loss_weights:
+      residual: 0.001
+- name: rad0p3
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    sigma_fraction: 0.03
+    fine_tune:
+      l2sp_lambda: 0.0
+  sampling:
+    resample_every_epochs: 100
+  allen_cahn:
+    adaptive_sampling:
+      enabled: true
+      adaptive_ratio: 0.3
+- name: wres1e-2_rad0p3
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    sigma_fraction: 0.03
+    fine_tune:
+      l2sp_lambda: 0.0
+  sampling:
+    resample_every_epochs: 100
+  allen_cahn:
+    loss_weights:
+      residual: 0.01
+    adaptive_sampling:
+      enabled: true
+      adaptive_ratio: 0.3
+- name: wres1e-4_rad0p3
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    sigma_fraction: 0.03
+    fine_tune:
+      l2sp_lambda: 0.0
+  sampling:
+    resample_every_epochs: 100
+  allen_cahn:
+    loss_weights:
+      residual: 0.0001
+    adaptive_sampling:
+      enabled: true
+      adaptive_ratio: 0.3
+- name: wres1e-2_rad0p3_l2sp10
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    sigma_fraction: 0.03
+    fine_tune:
+      l2sp_lambda: 10.0
+  sampling:
+    resample_every_epochs: 100
+  allen_cahn:
+    loss_weights:
+      residual: 0.01
+    adaptive_sampling:
+      enabled: true
+      adaptive_ratio: 0.3
+- name: wres1e-4_rad0p5_l2sp1
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    sigma_fraction: 0.03
+    fine_tune:
+      l2sp_lambda: 1.0
+  sampling:
+    resample_every_epochs: 100
+  allen_cahn:
+    loss_weights:
+      residual: 0.0001
+    adaptive_sampling:
+      enabled: true
+      adaptive_ratio: 0.5
+- name: ic100
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    sigma_fraction: 0.03
+    fine_tune:
+      l2sp_lambda: 0.0
+  sampling:
+    resample_every_epochs: 100
+  allen_cahn:
+    loss_weights:
+      ic: 100.0
+- name: bc100
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    sigma_fraction: 0.03
+    fine_tune:
+      l2sp_lambda: 0.0
+  sampling:
+    resample_every_epochs: 100
+  allen_cahn:
+    loss_weights:
+      bc: 100.0
+- name: icbc1e4
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    sigma_fraction: 0.03
+    fine_tune:
+      l2sp_lambda: 0.0
+  sampling:
+    resample_every_epochs: 100
+  allen_cahn:
+    loss_weights:
+      ic: 10000.0
+      bc: 10000.0
