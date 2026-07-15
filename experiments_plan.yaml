@@ -7,7 +7,7 @@ base_config:
   epochs: 45000
   batch_size: 99999
   min_epochs: 1
-  eval_every: 250
+  eval_every: 100
   patience_intervals: 10
   patience_rel_delta: 0.001
   optimizer_1: adam
@@ -391,7 +391,7 @@ base_config:
       lr_decay_steps: 1000
       lr_warmup_steps: 0
     fine_tune:
-      epochs: 5000
+      epochs: 1000
       optimizer_1: ssbroyden
       optimizer_2: null
       optimizer_switch_epoch: 99999
@@ -403,11 +403,10 @@ base_config:
       l2sp_lambda: 0.0
 experiments:
 
-# Strong-anchor probe: can SSBroyden reduce collar residual while l2sp pins
-# the weights near the phase-3 solution? RAD 0.5 + per-expert region reports
-# instrument where residual mass and rel-L2 move. Control: earlier
-# sig0p03 runs (l2sp 1e-4 / 1e-2 drifted; plain fine-tune degraded).
-- name: sig0p03_l2sp10_rad0p5_rs100
+# Strong-anchor probe, uniform sampling (RAD removed: it reweights the collar
+# residual by ~1000x and overpowers the anchor — see l2sp_strong batch).
+# Control: earlier sig0p03 runs (l2sp 1e-4 / 1e-2 drifted; plain degraded).
+- name: sig0p03_l2sp10_rs100
   problem: allen_cahn
   model: AToELeaves
   base_architecture: [2, 60, 60, 60, 60, 1]
@@ -418,11 +417,7 @@ experiments:
       l2sp_lambda: 10.0
   sampling:
     resample_every_epochs: 100
-  allen_cahn:
-    adaptive_sampling:
-      enabled: true
-      adaptive_ratio: 0.5
-- name: sig0p03_l2sp0p1_rad0p5_rs100
+- name: sig0p03_l2sp0p1_rs100
   problem: allen_cahn
   model: AToELeaves
   base_architecture: [2, 60, 60, 60, 60, 1]
@@ -433,7 +428,14 @@ experiments:
       l2sp_lambda: 0.1
   sampling:
     resample_every_epochs: 100
-  allen_cahn:
-    adaptive_sampling:
-      enabled: true
-      adaptive_ratio: 0.5
+- name: sig0p03_l2sp0_rs100
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    sigma_fraction: 0.03
+    fine_tune:
+      l2sp_lambda: 0.0
+  sampling:
+    resample_every_epochs: 100

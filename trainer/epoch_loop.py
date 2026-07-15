@@ -1233,6 +1233,10 @@ def _train_segment(
                 _tp_dir = run_dir / 'training_plots'
                 _tp_dir.mkdir(exist_ok=True)
                 _pe = metrics['per_expert_rel_l2'][segment_name]
+
+                def _np(a):
+                    return a.cpu().numpy() if isinstance(a, torch.Tensor) else a
+
                 plot_per_expert_region_report(
                     epochs=_pe['epochs'],
                     series=_pe['experts'],
@@ -1245,6 +1249,9 @@ def _train_segment(
                     t_grid=_seg_gt_ref[2],
                     out_path=_tp_dir / f'per_expert_rel_l2_{segment_name}.png',
                     segment_name=segment_name,
+                    gt_grid=_np(ctx.gt_grid),
+                    gt_x=_np(ctx.gt_x),
+                    gt_t=_np(ctx.gt_t),
                 )
                 logger.info(f"  [Segment:{segment_name}] saved "
                             f"training_plots/per_expert_rel_l2_{segment_name}.png")

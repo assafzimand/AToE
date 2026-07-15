@@ -222,13 +222,17 @@ def plot_per_expert_region_report(
     t_grid,
     out_path,
     segment_name: str,
+    gt_grid=None,
+    gt_x=None,
+    gt_t=None,
 ) -> None:
     """Per-expert region report for one segment.
 
-    One row per leaf expert: its region rel-L2 curve (eval cadence, same
-    metric grid as the global curve) next to log10 |err| heatmaps of its tile
-    at segment start / segment best / segment final (final only when it
-    differs from best).
+    One row per leaf expert: a ground-truth heatmap with all leaf boundaries
+    and this row's region highlighted (like plot_per_expert_curves), its
+    region rel-L2 curve (eval cadence, same metric grid as the global curve),
+    then log10 |err| heatmaps of its tile at segment start / segment best /
+    segment final (final only when it differs from best).
 
     Args:
         epochs: eval epochs of the segment (shared x-axis for all curves).
@@ -237,19 +241,49 @@ def plot_per_expert_region_report(
             (err_grid (nt, nx), epoch_label). 'final' key optional.
         gt_sq_grid, x_grid, t_grid: from
             compute_native_grid_metrics(..., return_grids=True).
+        gt_grid, gt_x, gt_t: optional plot-ready ground truth (ctx.gt_grid
+            orientation: (nx, nt)) for the region-locator panel; the panel is
+            omitted when not given.
     """
+    import matplotlib.patches as patches
+
     states = [s for s in ('start', 'best', 'final') if s in grids]
     n = len(leaf_indices)
     if n == 0 or not states:
         return
-    ncols = 1 + len(states)
+    has_gt_panel = (gt_grid is not None and gt_x is not None
+                    and gt_t is not None)
+    ncols = (2 if has_gt_panel else 1) + len(states)
     fig, axes = plt.subplots(n, ncols, figsize=(4.2 * ncols, 3.0 * n),
                              squeeze=False)
 
+    if has_gt_panel:
+        gt_disp = (np.linalg.norm(gt_grid, axis=2)
+                   if getattr(gt_grid, 'ndim', 2) == 3 else gt_grid)
+        GT_T, GT_X = np.meshgrid(gt_t, gt_x)
+
     for row, (eidx, lo, hi) in enumerate(
             zip(leaf_indices, bounds_lower, bounds_upper)):
+        col0 = 0
+        if has_gt_panel:
+            axg = axes[row][0]
+            axg.pcolormesh(GT_X, GT_T, gt_disp, shading='auto',
+                           cmap='viridis', alpha=0.7, zorder=0)
+            for ri, (rlo, rhi) in enumerate(zip(bounds_lower, bounds_upper)):
+                is_this = (ri == row)
+                axg.add_patch(patches.Rectangle(
+                    (rlo[0], rlo[1]), rhi[0] - rlo[0], rhi[1] - rlo[1],
+                    linewidth=2.5 if is_this else 0.8,
+                    edgecolor='red' if is_this else 'black',
+                    facecolor='none', zorder=10 if is_this else 5))
+            axg.set_title(f"Expert {eidx}", fontsize=10)
+            axg.set_ylabel('t', fontsize=8)
+            if row == n - 1:
+                axg.set_xlabel('x')
+            col0 = 1
+
         vals = series.get(str(eidx), series.get(eidx, []))
-        ax = axes[row][0]
+        ax = axes[row][col0]
         if vals:
             ax.semilogy(epochs[:len(vals)], vals, 'r-', linewidth=1.5)
         ax.set_title(f"E{eidx}  x[{lo[0]:.2f},{hi[0]:.2f}] "
@@ -268,7 +302,7 @@ def plot_per_expert_region_report(
         vmin = min(ls.min() for ls in log_subs.values())
         vmax = max(ls.max() for ls in log_subs.values())
         gt_sub_sum = gt_sq_grid[np.ix_(it, ix)].sum()
-        for col, s in enumerate(states, start=1):
+        for col, s in enumerate(states, start=col0 + 1):
             axh = axes[row][col]
             rel = float(np.sqrt((subs[s] ** 2).sum())
                         / (np.sqrt(gt_sub_sum) + 1e-10))
