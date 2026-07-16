@@ -1,839 +1,437 @@
-experiment_name: allen_cahn_ft_balance30
 base_config:
-  problem: allen_cahn
-  model: AToELeaves
   activation: tanh
-  precision: float64
-  epochs: 45000
-  batch_size: 99999
-  min_epochs: 1
-  eval_every: 100
-  patience_intervals: 10
-  patience_rel_delta: 0.001
-  optimizer_1: adam
-  optimizer_2: ssbroyden
-  optimizer_switch_epoch: 5000
-  lr: 0.001
-  lr_schedule: none
-  lr_decay_rate: 0.98
-  lr_decay_steps: 1000
-  lr_warmup_steps: 0
-  lr_warmup_start_factor: 0.01
   adam:
     betas:
     - 0.9
     - 0.999
     eps: 1.0e-08
-  lbfgs:
-    lr: 1.0
-    max_iter: 1
-    history_size: 100
-    line_search: strong_wolfe
-    tolerance_grad: 0.0
-    tolerance_change: 0.0
-  ssbroyden:
-    lr: 1.0
-    tolerance_grad: 1.0e-10
-  soap:
-    betas:
-    - 0.95
-    - 0.95
-    precondition_frequency: 10
-    weight_decay: 0.0
-  cuda: true
-  eval_only: false
-  resume_from: null
-  print_every: 1000
-  save_every: 999999
-  seed: 42
+  adaptive_pinn:
+    AToE_threshold_capacity: null
+    M_experts_num: 8
+    blending_mode: soft
+    enable_gradient_diagnostics: false
+    enable_timing: false
+    enabled: true
+    expert_type: mlp
+    fine_tune:
+      epochs: 20000
+      l2sp_lambda: 0.0
+      lr: 0.0001
+      lr_decay_rate: 0.98
+      lr_decay_steps: 1000
+      lr_schedule: none
+      lr_warmup_steps: 500
+      optimizer_1: ssbroyden
+      optimizer_2: null
+      optimizer_switch_epoch: 99999
+    initial_train:
+      epochs: 40000
+      lr: 0.001
+      lr_decay_rate: 0.98
+      lr_decay_steps: 1000
+      lr_schedule: none
+      lr_warmup_steps: 0
+      optimizer_1: adam
+      optimizer_2: ssbroyden
+      optimizer_switch_epoch: 1000
+    max_experts: 150
+    sigma_fraction: 0.03
+    split_icbc:
+      enabled: true
+    tree_max_depth: 15
+    tree_min_samples_leaf: 50
+    variable_for_expert_size: norm
+    variable_for_node_accept: norm
   allen_cahn:
-    pretrained_local_expert_checkpoint: roots_checkpoints/allen_cahn_experts.pt
-    pretrained_base_checkpoint: roots_checkpoints/allen_cahn_root.pt
-    spatial_dim: 1
-    output_dim: 1
-    spatial_domain:
-    - - -1.0
-      - 1.0
-    temporal_domain:
-    - 0.0
-    - 1.0
     D: 0.0001
-    wavelet_threshold: 0.002
-    new_norm_threshold: 0.04
-    tree_smoothness_threshold: 0.5
-    window_type: smoothstep
-    window_smoothness_order: 2
-    loss_weights:
-      residual: 1.0
-      ic: 1.0
-      bc: 1.0
-      continuity: 0.0
+    adaptive_sampling:
+      adaptive_ratio: 0.3
+      enabled: false
+      phi: quadratic
+      phi_epsilon: 1.0
+      phi_power: 2.0
     causal_training:
       enabled: false
+      min_weight_threshold: 0.99
       num_chunks: 32
       tol_schedule:
       - 0.01
       - 0.1
       - 1.0
-      min_weight_threshold: 0.99
-    rwf:
-      enabled: false
-      mean: 1.0
-      std: 0.1
+    expert_grad_clip_norm: null
     fourier_features:
-      enabled: false
       dim: 10
+      enabled: false
+      periodic: false
       scale: 3.0
-      periodic: false
+    grad_clip_norm: null
     init:
       hidden: default
-      output: default
       ls_use_bias: false
-    lra:
-      enabled: false
-      update_every: 100
-      alpha: 0.1
-      scheme: grad_norm
-      epsilon: 1.0e-05
-    adaptive_sampling:
-      enabled: false
-      adaptive_ratio: 0.3
-      phi: quadratic
-      phi_epsilon: 1.0
-      phi_power: 2.0
-    grad_clip_norm: null
-    expert_grad_clip_norm: null
-    time_marching:
-      enabled: false
-      num_windows: 5
-      freeze_previous_windows: true
-      m_distribution: quadratic
-  schrodinger:
-    pretrained_local_expert_checkpoint: null
-    pretrained_base_checkpoint: null
-    spatial_dim: 1
-    output_dim: 2
-    spatial_domain:
-    - - -5.0
-      - 5.0
-    temporal_domain:
-    - 0.0
-    - 1.5707963267948966
-    wavelet_threshold: 0.1
-    new_norm_threshold: 2.0
-    tree_smoothness_threshold: 0.7
-    window_type: smoothstep
-    window_smoothness_order: 2
+      output: default
     loss_weights:
-      residual: 1.0
-      ic: 1.0
       bc: 1.0
       continuity: 0.0
-    causal_training:
+      ic: 1.0
+      residual: 1.0
+    lra:
+      alpha: 0.1
       enabled: false
-      num_chunks: 32
-      tol_schedule:
-      - 0.01
-      - 0.1
-      - 1.0
-      min_weight_threshold: 0.99
+      epsilon: 1.0e-05
+      scheme: grad_norm
+      update_every: 100
+    new_norm_threshold: 0.04
+    output_dim: 1
+    pretrained_base_checkpoint: roots_checkpoints/allen_cahn_root.pt
+    pretrained_local_expert_checkpoint: null
     rwf:
       enabled: false
       mean: 1.0
       std: 0.1
-    fourier_features:
-      enabled: false
-      dim: 128
-      scale: 1.0
-      periodic: false
-    init:
-      hidden: default
-      output: default
-      ls_use_bias: false
-    lra:
-      enabled: false
-      update_every: 100
-      alpha: 0.1
-      scheme: grad_norm
-      epsilon: 1.0e-05
-    adaptive_sampling:
-      enabled: false
-      adaptive_ratio: 0.3
-      phi: quadratic
-      phi_epsilon: 1.0
-      phi_power: 2.0
-    grad_clip_norm: null
-    expert_grad_clip_norm: null
-    time_marching:
-      enabled: false
-      num_windows: 5
-      freeze_previous_windows: true
-      m_distribution: quadratic
-  burgers1d:
-    pretrained_local_expert_checkpoint: null
-    pretrained_base_checkpoint: null
     spatial_dim: 1
-    output_dim: 1
     spatial_domain:
     - - -1.0
       - 1.0
     temporal_domain:
     - 0.0
     - 1.0
-    nu: 0.01
-    wavelet_threshold: 0.001
-    new_norm_threshold: 0.015
+    time_marching:
+      enabled: false
+      freeze_previous_windows: true
+      m_distribution: quadratic
+      num_windows: 5
     tree_smoothness_threshold: 0.5
-    window_type: smoothstep
+    wavelet_threshold: 0.002
     window_smoothness_order: 2
-    loss_weights:
-      residual: 1.0
-      ic: 1.0
-      bc: 1.0
-      continuity: 0.0
+    window_type: smoothstep
+  batch_size: 99999
+  burgers1d:
+    adaptive_sampling:
+      adaptive_ratio: 0.5
+      enabled: false
+      phi: quadratic
+      phi_epsilon: 1.0
+      phi_power: 2.0
     causal_training:
       enabled: false
+      min_weight_threshold: 0.99
       num_chunks: 32
       tol_schedule:
       - 0.01
       - 0.1
       - 1.0
-      min_weight_threshold: 0.99
+    expert_grad_clip_norm: null
+    fourier_features:
+      dim: 128
+      enabled: false
+      periodic: false
+      scale: 1.0
+    grad_clip_norm: null
+    init:
+      hidden: default
+      ls_use_bias: false
+      output: default
+    loss_weights:
+      bc: 1.0
+      continuity: 1.0
+      ic: 1.0
+      residual: 1.0
+    lra:
+      alpha: 0.1
+      enabled: false
+      epsilon: 1.0e-05
+      scheme: grad_norm
+      update_every: 100
+    new_norm_threshold: 0.015
+    nu: 0.01
+    output_dim: 1
+    pretrained_base_checkpoint: null
+    pretrained_local_expert_checkpoint: null
     rwf:
       enabled: false
       mean: 1.0
       std: 0.1
-    fourier_features:
-      enabled: false
-      dim: 128
-      scale: 1.0
-      periodic: false
-    init:
-      hidden: default
-      output: default
-      ls_use_bias: false
-    lra:
-      enabled: false
-      update_every: 100
-      alpha: 0.1
-      scheme: grad_norm
-      epsilon: 1.0e-05
-    adaptive_sampling:
-      enabled: false
-      adaptive_ratio: 0.5
-      phi: quadratic
-      phi_epsilon: 1.0
-      phi_power: 2.0
-    grad_clip_norm: null
-    expert_grad_clip_norm: null
-    time_marching:
-      enabled: false
-      num_windows: 5
-      freeze_previous_windows: true
-      m_distribution: quadratic
-  kdv:
-    pretrained_local_expert_checkpoint: null
-    pretrained_base_checkpoint: null
     spatial_dim: 1
-    output_dim: 1
     spatial_domain:
     - - -1.0
       - 1.0
     temporal_domain:
     - 0.0
     - 1.0
-    mu: 0.022
-    wavelet_threshold: 0.0025
-    new_norm_threshold: 0.2
-    tree_smoothness_threshold: 0.4
+    time_marching:
+      enabled: false
+      freeze_previous_windows: true
+      m_distribution: quadratic
+      num_windows: 5
+    tree_smoothness_threshold: 0.5
+    wavelet_threshold: 0.001
+    window_smoothness_order: 2
     window_type: smoothstep
-    window_smoothness_order: 3
-    loss_weights:
-      residual: 1.0
-      ic: 1.0
-      bc: 1.0
-      continuity: 0.0
+  cuda: true
+  epochs: 40000
+  eval_every: 1000
+  eval_only: false
+  kdv:
+    adaptive_sampling:
+      adaptive_ratio: 0.3
+      enabled: false
+      phi: quadratic
+      phi_epsilon: 1.0
+      phi_power: 2.0
     causal_training:
       enabled: false
+      min_weight_threshold: 0.99
       num_chunks: 16
       tol_schedule:
       - 0.01
-      min_weight_threshold: 0.99
+    expert_grad_clip_norm: null
+    fourier_features:
+      dim: 10
+      enabled: false
+      periodic: false
+      scale: 2.0
+    grad_clip_norm: null
+    init:
+      hidden: default
+      ls_use_bias: false
+      output: default
+    loss_weights:
+      bc: 1.0
+      continuity: 0.0
+      ic: 1.0
+      residual: 1.0
+    lra:
+      alpha: 0.1
+      enabled: false
+      epsilon: 1.0e-05
+      scheme: grad_norm
+      update_every: 1000
+    mu: 0.022
+    new_norm_threshold: 0.2
+    output_dim: 1
+    pretrained_base_checkpoint: null
+    pretrained_local_expert_checkpoint: null
     rwf:
       enabled: false
       mean: 1.0
       std: 0.1
-    fourier_features:
+    spatial_dim: 1
+    spatial_domain:
+    - - -1.0
+      - 1.0
+    temporal_domain:
+    - 0.0
+    - 1.0
+    time_marching:
       enabled: false
-      dim: 10
-      scale: 2.0
-      periodic: false
-    init:
-      hidden: default
-      output: default
-      ls_use_bias: false
-    lra:
-      enabled: false
-      update_every: 1000
-      alpha: 0.1
-      scheme: grad_norm
-      epsilon: 1.0e-05
+      freeze_previous_windows: true
+      m_distribution: quadratic
+      num_windows: 5
+    tree_smoothness_threshold: 0.4
+    wavelet_threshold: 0.0025
+    window_smoothness_order: 3
+    window_type: smoothstep
+  ks:
     adaptive_sampling:
+      adaptive_ratio: 0.5
       enabled: false
-      adaptive_ratio: 0.3
       phi: quadratic
       phi_epsilon: 1.0
       phi_power: 2.0
-    grad_clip_norm: null
-    expert_grad_clip_norm: null
-    time_marching:
+    alpha: 6.25
+    beta: 0.390625
+    causal_training:
       enabled: false
-      num_windows: 5
-      freeze_previous_windows: true
-      m_distribution: quadratic
-  ks:
-    pretrained_local_expert_checkpoint: null
-    pretrained_base_checkpoint: null
-    spatial_dim: 1
+      min_weight_threshold: 0.99
+      num_chunks: 32
+      tol_schedule:
+      - 0.01
+      - 0.1
+      - 1
+    expert_grad_clip_norm: null
+    fourier_features:
+      dim: 10
+      enabled: false
+      periodic: false
+      scale: 1.0
+    gamma: 0.00152587890625
+    grad_clip_norm: null
+    init:
+      hidden: default
+      ls_use_bias: false
+      output: default
+    loss_weights:
+      bc: 1.0
+      continuity: 0.0
+      ic: 1.0
+      residual: 1.0
+    lra:
+      alpha: 0.1
+      enabled: false
+      epsilon: 1.0e-05
+      scheme: grad_norm
+      update_every: 100
+    new_norm_threshold: 10.0
     output_dim: 1
+    pretrained_base_checkpoint: null
+    pretrained_local_expert_checkpoint: null
+    rwf:
+      enabled: false
+      mean: 1.0
+      std: 0.1
+    spatial_dim: 1
     spatial_domain:
     - - 0.0
       - 6.283185307179586
     temporal_domain:
     - 0.0
     - 1.0
-    alpha: 6.25
-    beta: 0.390625
-    gamma: 0.00152587890625
-    wavelet_threshold: 0.04
-    new_norm_threshold: 10.0
+    time_marching:
+      enabled: true
+      freeze_previous_windows: true
+      m_distribution: quadratic
+      num_windows: 20
     tree_smoothness_threshold: 0.3
-    window_type: smoothstep
+    wavelet_threshold: 0.04
     window_smoothness_order: 4
-    loss_weights:
-      residual: 1.0
-      ic: 1.0
-      bc: 1.0
-      continuity: 0.0
+    window_type: smoothstep
+  lbfgs:
+    history_size: 100
+    line_search: strong_wolfe
+    lr: 1.0
+    max_iter: 1
+    tolerance_change: 0.0
+    tolerance_grad: 0.0
+  lr: 0.001
+  lr_decay_rate: 0.98
+  lr_decay_steps: 1000
+  lr_schedule: none
+  lr_warmup_start_factor: 0.01
+  lr_warmup_steps: 0
+  min_epochs: 1
+  model: AToELeaves
+  optimizer_1: adam
+  optimizer_2: ssbroyden
+  optimizer_switch_epoch: 1000
+  patience_evals: 5
+  patience_rel_delta: 0.01
+  precision: float64
+  print_every: 1000
+  problem: burgers1d
+  resume_from: null
+  sampling:
+    collar_data_ratio: 0.0
+    collar_margin: 1.3
+    eval_train_ratio: 0.25
+    n_boundary_train: 256
+    n_initial_train: 256
+    n_residual_train: 4096
+    plot_samples_every: 1000
+    resample_every_epochs: 100
+    sample_volume_ratio: 35
+  save_every: 999999
+  schrodinger:
+    adaptive_sampling:
+      adaptive_ratio: 0.3
+      enabled: false
+      phi: quadratic
+      phi_epsilon: 1.0
+      phi_power: 2.0
     causal_training:
       enabled: false
+      min_weight_threshold: 0.99
       num_chunks: 32
       tol_schedule:
       - 0.01
       - 0.1
-      - 1
-      min_weight_threshold: 0.99
+      - 1.0
+    expert_grad_clip_norm: null
+    fourier_features:
+      dim: 128
+      enabled: false
+      periodic: false
+      scale: 1.0
+    grad_clip_norm: null
+    init:
+      hidden: default
+      ls_use_bias: false
+      output: default
+    loss_weights:
+      bc: 1.0
+      continuity: 0.0
+      ic: 1.0
+      residual: 1.0
+    lra:
+      alpha: 0.1
+      enabled: false
+      epsilon: 1.0e-05
+      scheme: grad_norm
+      update_every: 100
+    new_norm_threshold: 2.0
+    output_dim: 2
+    pretrained_base_checkpoint: null
+    pretrained_local_expert_checkpoint: null
     rwf:
       enabled: false
       mean: 1.0
       std: 0.1
-    fourier_features:
-      enabled: false
-      dim: 10
-      scale: 1.0
-      periodic: false
-    init:
-      hidden: default
-      output: default
-      ls_use_bias: false
-    lra:
-      enabled: false
-      update_every: 100
-      alpha: 0.1
-      scheme: grad_norm
-      epsilon: 1.0e-05
-    adaptive_sampling:
-      enabled: false
-      adaptive_ratio: 0.5
-      phi: quadratic
-      phi_epsilon: 1.0
-      phi_power: 2.0
-    grad_clip_norm: null
-    expert_grad_clip_norm: null
+    spatial_dim: 1
+    spatial_domain:
+    - - -5.0
+      - 5.0
+    temporal_domain:
+    - 0.0
+    - 1.5707963267948966
     time_marching:
       enabled: false
-      num_windows: 10
       freeze_previous_windows: true
       m_distribution: quadratic
-  sampling:
-    n_residual_train: 10000
-    sample_volume_ratio: 35
-    n_initial_train: 256
-    n_boundary_train: 256
-    collar_data_ratio: 0.0
-    resample_every_epochs: 500
-    plot_samples_every: 1000
-  adaptive_pinn:
-    enabled: true
-    max_experts: 150
-    variable_for_node_accept: norm
-    variable_for_expert_size: norm
-    AToE_threshold_capacity: null
-    expert_type: mlp
-    blending_mode: soft
-    sigma_fraction: 0.2
-    tree_max_depth: 15
-    tree_min_samples_leaf: 50
-    enable_timing: false
-    enable_gradient_diagnostics: false
-    M_experts_num: 8
-    epsilon_node_acceptance: 0.00
-    split_icbc:
-      enabled: true
-    initial_train:
-      epochs: 45000
-      optimizer_1: adam
-      optimizer_2: ssbroyden
-      optimizer_switch_epoch: 5000
-      lr: 0.001
-      lr_schedule: none
-      lr_decay_rate: 0.98
-      lr_decay_steps: 1000
-      lr_warmup_steps: 0
-    fine_tune:
-      epochs: 2000
-      optimizer_1: ssbroyden
-      optimizer_2: null
-      optimizer_switch_epoch: 99999
-      lr: 0.0001
-      lr_schedule: none
-      lr_decay_rate: 0.98
-      lr_decay_steps: 1000
-      lr_warmup_steps: 0
-      l2sp_lambda: 0.0
+      num_windows: 5
+    tree_smoothness_threshold: 0.7
+    wavelet_threshold: 0.1
+    window_smoothness_order: 2
+    window_type: smoothstep
+  seed: 42
+  soap:
+    betas:
+    - 0.95
+    - 0.95
+    precondition_frequency: 10
+    weight_decay: 0.0
+  ssbroyden:
+    lr: 1.0
+    tolerance_grad: 1.0e-10
+experiment_name: burgers_M8_sig0p03_sampling
 experiments:
-
-# Balance grid (30 x 2k epochs): loss-weight rebalancing (w_res down / ic-bc
-# up) x light anchor (lambda <= 10) x seam-focused sampling (collar XOR RAD).
-# Findings feeding this: w_res=1e-4 alone still degrades via collar
-# deformation (ic/bc stay 1e-13); w_res=1e-4+l2sp10 pins but is inert;
-# l2sp100 alone gave the first sub-start best (6.21e-6).
-- name: base
-  problem: allen_cahn
+- base_architecture: &id001
+  - 2
+  - 60
+  - 60
+  - 60
+  - 60
+  - 1
+  experts_architecture: &id002
+  - 2
+  - 20
+  - 20
+  - 20
+  - 1
   model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    sigma_fraction: 0.03
-    fine_tune:
-      l2sp_lambda: 0.0
-  sampling:
-    resample_every_epochs: 100
-- name: l2sp1
-  problem: allen_cahn
+  name: sig0p03_base
+  problem: burgers1d
+- base_architecture: *id001
+  experts_architecture: *id002
   model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    sigma_fraction: 0.03
-    fine_tune:
-      l2sp_lambda: 1.0
+  name: sig0p03_collar0p3
+  problem: burgers1d
   sampling:
-    resample_every_epochs: 100
-- name: l2sp10
-  problem: allen_cahn
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    sigma_fraction: 0.03
-    fine_tune:
-      l2sp_lambda: 10.0
-  sampling:
-    resample_every_epochs: 100
-- name: wres1e-1
-  problem: allen_cahn
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    sigma_fraction: 0.03
-    fine_tune:
-      l2sp_lambda: 0.0
-  sampling:
-    resample_every_epochs: 100
-  allen_cahn:
-    loss_weights:
-      residual: 0.1
-- name: wres1e-2
-  problem: allen_cahn
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    sigma_fraction: 0.03
-    fine_tune:
-      l2sp_lambda: 0.0
-  sampling:
-    resample_every_epochs: 100
-  allen_cahn:
-    loss_weights:
-      residual: 0.01
-- name: wres1e-3
-  problem: allen_cahn
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    sigma_fraction: 0.03
-    fine_tune:
-      l2sp_lambda: 0.0
-  sampling:
-    resample_every_epochs: 100
-  allen_cahn:
-    loss_weights:
-      residual: 0.001
-- name: wres1e-4
-  problem: allen_cahn
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    sigma_fraction: 0.03
-    fine_tune:
-      l2sp_lambda: 0.0
-  sampling:
-    resample_every_epochs: 100
-  allen_cahn:
-    loss_weights:
-      residual: 0.0001
-- name: icbc100
-  problem: allen_cahn
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    sigma_fraction: 0.03
-    fine_tune:
-      l2sp_lambda: 0.0
-  sampling:
-    resample_every_epochs: 100
-  allen_cahn:
-    loss_weights:
-      ic: 100.0
-      bc: 100.0
-- name: wres1e-1_l2sp10
-  problem: allen_cahn
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    sigma_fraction: 0.03
-    fine_tune:
-      l2sp_lambda: 10.0
-  sampling:
-    resample_every_epochs: 100
-  allen_cahn:
-    loss_weights:
-      residual: 0.1
-- name: wres1e-2_l2sp1
-  problem: allen_cahn
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    sigma_fraction: 0.03
-    fine_tune:
-      l2sp_lambda: 1.0
-  sampling:
-    resample_every_epochs: 100
-  allen_cahn:
-    loss_weights:
-      residual: 0.01
-- name: wres1e-2_l2sp10
-  problem: allen_cahn
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    sigma_fraction: 0.03
-    fine_tune:
-      l2sp_lambda: 10.0
-  sampling:
-    resample_every_epochs: 100
-  allen_cahn:
-    loss_weights:
-      residual: 0.01
-- name: wres1e-4_l2sp1
-  problem: allen_cahn
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    sigma_fraction: 0.03
-    fine_tune:
-      l2sp_lambda: 1.0
-  sampling:
-    resample_every_epochs: 100
-  allen_cahn:
-    loss_weights:
-      residual: 0.0001
-- name: wres1e-4_l2sp10
-  problem: allen_cahn
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    sigma_fraction: 0.03
-    fine_tune:
-      l2sp_lambda: 10.0
-  sampling:
-    resample_every_epochs: 100
-  allen_cahn:
-    loss_weights:
-      residual: 0.0001
-- name: icbc100_l2sp10
-  problem: allen_cahn
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    sigma_fraction: 0.03
-    fine_tune:
-      l2sp_lambda: 10.0
-  sampling:
-    resample_every_epochs: 100
-  allen_cahn:
-    loss_weights:
-      ic: 100.0
-      bc: 100.0
-- name: collar0p3
-  problem: allen_cahn
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    sigma_fraction: 0.03
-    fine_tune:
-      l2sp_lambda: 0.0
-  sampling:
-    resample_every_epochs: 100
     collar_data_ratio: 0.3
-- name: collar0p5
-  problem: allen_cahn
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    sigma_fraction: 0.03
-    fine_tune:
-      l2sp_lambda: 0.0
-  sampling:
-    resample_every_epochs: 100
-    collar_data_ratio: 0.5
-- name: wres1e-2_collar0p3
-  problem: allen_cahn
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    sigma_fraction: 0.03
-    fine_tune:
-      l2sp_lambda: 0.0
-  sampling:
-    resample_every_epochs: 100
-    collar_data_ratio: 0.3
-  allen_cahn:
-    loss_weights:
-      residual: 0.01
-- name: wres1e-4_collar0p3
-  problem: allen_cahn
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    sigma_fraction: 0.03
-    fine_tune:
-      l2sp_lambda: 0.0
-  sampling:
-    resample_every_epochs: 100
-    collar_data_ratio: 0.3
-  allen_cahn:
-    loss_weights:
-      residual: 0.0001
-- name: wres1e-2_collar0p5
-  problem: allen_cahn
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    sigma_fraction: 0.03
-    fine_tune:
-      l2sp_lambda: 0.0
-  sampling:
-    resample_every_epochs: 100
-    collar_data_ratio: 0.5
-  allen_cahn:
-    loss_weights:
-      residual: 0.01
-- name: wres1e-2_collar0p3_l2sp10
-  problem: allen_cahn
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    sigma_fraction: 0.03
-    fine_tune:
-      l2sp_lambda: 10.0
-  sampling:
-    resample_every_epochs: 100
-    collar_data_ratio: 0.3
-  allen_cahn:
-    loss_weights:
-      residual: 0.01
-- name: wres1e-2_collar0p5_l2sp10
-  problem: allen_cahn
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    sigma_fraction: 0.03
-    fine_tune:
-      l2sp_lambda: 10.0
-  sampling:
-    resample_every_epochs: 100
-    collar_data_ratio: 0.5
-  allen_cahn:
-    loss_weights:
-      residual: 0.01
-- name: wres1e-3_collar0p3_l2sp1
-  problem: allen_cahn
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    sigma_fraction: 0.03
-    fine_tune:
-      l2sp_lambda: 1.0
-  sampling:
-    resample_every_epochs: 100
-    collar_data_ratio: 0.3
-  allen_cahn:
-    loss_weights:
-      residual: 0.001
-- name: rad0p3
-  problem: allen_cahn
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    sigma_fraction: 0.03
-    fine_tune:
-      l2sp_lambda: 0.0
-  sampling:
-    resample_every_epochs: 100
-  allen_cahn:
+- base_architecture: *id001
+  burgers1d:
     adaptive_sampling:
-      enabled: true
-      adaptive_ratio: 0.3
-- name: wres1e-2_rad0p3
-  problem: allen_cahn
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    sigma_fraction: 0.03
-    fine_tune:
-      l2sp_lambda: 0.0
-  sampling:
-    resample_every_epochs: 100
-  allen_cahn:
-    loss_weights:
-      residual: 0.01
-    adaptive_sampling:
-      enabled: true
-      adaptive_ratio: 0.3
-- name: wres1e-4_rad0p3
-  problem: allen_cahn
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    sigma_fraction: 0.03
-    fine_tune:
-      l2sp_lambda: 0.0
-  sampling:
-    resample_every_epochs: 100
-  allen_cahn:
-    loss_weights:
-      residual: 0.0001
-    adaptive_sampling:
-      enabled: true
-      adaptive_ratio: 0.3
-- name: wres1e-2_rad0p3_l2sp10
-  problem: allen_cahn
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    sigma_fraction: 0.03
-    fine_tune:
-      l2sp_lambda: 10.0
-  sampling:
-    resample_every_epochs: 100
-  allen_cahn:
-    loss_weights:
-      residual: 0.01
-    adaptive_sampling:
-      enabled: true
-      adaptive_ratio: 0.3
-- name: wres1e-4_rad0p5_l2sp1
-  problem: allen_cahn
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    sigma_fraction: 0.03
-    fine_tune:
-      l2sp_lambda: 1.0
-  sampling:
-    resample_every_epochs: 100
-  allen_cahn:
-    loss_weights:
-      residual: 0.0001
-    adaptive_sampling:
-      enabled: true
       adaptive_ratio: 0.5
-- name: ic100
-  problem: allen_cahn
+      enabled: true
+  experts_architecture: *id002
   model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    sigma_fraction: 0.03
-    fine_tune:
-      l2sp_lambda: 0.0
-  sampling:
-    resample_every_epochs: 100
-  allen_cahn:
-    loss_weights:
-      ic: 100.0
-- name: bc100
-  problem: allen_cahn
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    sigma_fraction: 0.03
-    fine_tune:
-      l2sp_lambda: 0.0
-  sampling:
-    resample_every_epochs: 100
-  allen_cahn:
-    loss_weights:
-      bc: 100.0
-- name: icbc1e4
-  problem: allen_cahn
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    sigma_fraction: 0.03
-    fine_tune:
-      l2sp_lambda: 0.0
-  sampling:
-    resample_every_epochs: 100
-  allen_cahn:
-    loss_weights:
-      ic: 10000.0
-      bc: 10000.0
+  name: sig0p03_rad0p5
+  problem: burgers1d

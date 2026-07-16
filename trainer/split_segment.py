@@ -104,6 +104,8 @@ def _run_split_segment(
             [regions_list[i] for i in new_expert_indices],
             getattr(model, 'sigma_fraction', 0.2),
             plot=(_spatial_dim == 1),
+            margin=(cfg.get('sampling', {}) or {}).get(
+                'collar_margin', 1.0) or 1.0,
         )
     split_data = build_subdomain_data(
         model_snapshot, new_expert_indices, regions_list, cfg,

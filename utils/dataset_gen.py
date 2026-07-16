@@ -199,7 +199,8 @@ def _compute_phi_pdf(residuals: torch.Tensor, phi_cfg: Dict) -> torch.Tensor:
     return w / w.sum()
 
 
-def build_collar_info(leaf_regions, sigma_fraction: float, plot: bool = False) -> Dict:
+def build_collar_info(leaf_regions, sigma_fraction: float, plot: bool = False,
+                      margin: float = 1.0) -> Dict:
     """Pack leaf-region geometry for collar sampling.
 
     The collar is the set of points covered by >= 2 leaf indicator supports
@@ -210,6 +211,10 @@ def build_collar_info(leaf_regions, sigma_fraction: float, plot: bool = False) -
         leaf_regions: RegionDescriptors of the LEAF experts only.
         sigma_fraction: The model's collar fraction (adaptive_pinn.sigma_fraction).
         plot: Whether the caller wants the collar diagnostic plot this resample.
+        margin: Widens the SAMPLED collar band relative to the true window
+            overlap (sampling.collar_margin): a band of width W is sampled
+            over margin*W. Only affects where collar points are drawn (and
+            the plot's shaded region) — the PoU windows are untouched.
     """
     lower = torch.tensor([list(r.bounds_lower) for r in leaf_regions],
                          dtype=torch.get_default_dtype())
@@ -218,7 +223,10 @@ def build_collar_info(leaf_regions, sigma_fraction: float, plot: bool = False) -
     return {
         'bounds_lower': lower,
         'bounds_upper': upper,
-        'sigma_fraction': float(sigma_fraction),
+        # Effective fraction used for sampling/plotting: margin scales the
+        # support expansion, which scales the overlap band width by margin.
+        'sigma_fraction': float(sigma_fraction) * float(margin),
+        'margin': float(margin),
         'plot': bool(plot),
     }
 

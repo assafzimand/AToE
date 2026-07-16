@@ -257,6 +257,8 @@ def _train_segment(
                         plot=(plot_samples_every > 0
                               and (epoch - 1) % plot_samples_every == 0
                               and _problem_spatial_dim == 1),
+                        margin=(cfg.get('sampling', {}) or {}).get(
+                            'collar_margin', 1.0) or 1.0,
                     )
             if _split_ctx is not None:
                 # Adaptive sampling: hand last epoch's per-expert residual
