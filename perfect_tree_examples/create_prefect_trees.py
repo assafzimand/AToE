@@ -35,6 +35,7 @@ from adaptive.visualization import prepare_ground_truth_grid  # noqa: E402
 from utils.dataset_gen import calculate_dataset_sizes  # noqa: E402
 from utils.plot_io import save_png  # noqa: E402
 from trainer.time_marching import compute_m_per_window  # noqa: E402
+from trainer.utils import native_ground_truth_grid  # noqa: E402
 
 
 class _NumpySafeEncoder(json.JSONEncoder):
@@ -159,6 +160,34 @@ def build_symmetric_grid_data(eval_data, domain_bounds, resolution=200):
     if y_grid.shape[1] == 1:
         y_grid = y_grid.ravel()
     return X_grid, y_grid
+
+
+def build_native_grid_data(problem, base_cfg):
+    """Tree-fit data + heatmap grid from the solver's NATIVE solution.
+
+    Same GT source as the trainer's rel-L2 reporting
+    (trainer.utils.compute_native_grid_metrics): the exact solution on the
+    solver's own grid, with no random eval sample and no interpolation.
+    Sparse scattered eval points smear sharp features (e.g. thin KdV
+    solitons), which distorts both the plots and the wavelet norms that
+    drive the tree construction.
+
+    Returns (X, y, (gt_grid, grid_x, grid_t)) or None if the solver has no
+    cached native solution (callers fall back to eval-data interpolation).
+    """
+    cfg = dict(base_cfg)
+    cfg['problem'] = problem
+    res = native_ground_truth_grid(cfg)
+    if res is None:
+        return None
+    gt_grid, grid_x, grid_t = res
+    XX, TT = np.meshgrid(grid_x, grid_t, indexing='ij')
+    X = np.column_stack([XX.ravel(), TT.ravel()])
+    if gt_grid.ndim == 3:
+        y = gt_grid.reshape(-1, gt_grid.shape[2])
+    else:
+        y = np.asarray(gt_grid).ravel()
+    return X, y, (gt_grid, grid_x, grid_t)
 
 
 def fit_and_get_all_nodes(
@@ -492,17 +521,24 @@ def process_problem_with_time_marching(
     print(f"  num_windows={num_windows}, m_distribution={m_distribution}")
     print(f"  global_M={global_M}, M per window: {m_per_window}")
 
-    eval_data = ensure_eval_data(problem, base_cfg)
     domain_bounds = build_domain_bounds(problem_cfg)
 
     if len(domain_bounds['lower']) != 2:
         print(f"  Skipping {problem}: only 2D (x,t) domains supported.")
         return None
 
-    # Fit on a symmetric regular grid (eval points only supply GT values).
-    # min_samples_leaf is a LITERAL minimum number of grid samples per leaf
-    # (matching the pipeline's tree construction) — no rescaling.
-    X_full, y_full = build_symmetric_grid_data(eval_data, domain_bounds)
+    # Prefer the solver's native solution grid (same GT source as the
+    # trainer's rel-L2 reporting); fall back to interpolating the scattered
+    # eval sample only if no native grid exists for this problem.
+    native = build_native_grid_data(problem, base_cfg)
+    if native is not None:
+        X_full, y_full, native_heatmap = native
+        print("  GT source: native solver grid")
+    else:
+        eval_data = ensure_eval_data(problem, base_cfg)
+        X_full, y_full = build_symmetric_grid_data(eval_data, domain_bounds)
+        native_heatmap = None
+        print("  GT source: interpolated eval sample (no native grid)")
     print(f"  Full data: X={X_full.shape}, y={y_full.shape if hasattr(y_full, 'shape') else '?'}, "
           f"min_samples_leaf={min_samples_leaf}")
 
@@ -606,9 +642,12 @@ def process_problem_with_time_marching(
     }
     
     # Generate 2-panel plot on FULL domain
-    gt_grid, grid_x, grid_t = prepare_ground_truth_grid(
-        eval_data, domain_bounds, resolution=150)
-    
+    if native_heatmap is not None:
+        gt_grid, grid_x, grid_t = native_heatmap
+    else:
+        gt_grid, grid_x, grid_t = prepare_ground_truth_grid(
+            eval_data, domain_bounds, resolution=150)
+
     fig, axes = plt.subplots(1, 2, figsize=(18, 7))
 
     _plot_regions_panel(
@@ -675,7 +714,6 @@ def process_problem(
         f"variable_for_node_accept={variable_for_node_accept}, "
         f"epsilon_node_acceptance={epsilon_node_acceptance}")
 
-    eval_data = ensure_eval_data(problem, base_cfg)
     domain_bounds = build_domain_bounds(problem_cfg)
 
     if len(domain_bounds['lower']) != 2:
@@ -684,10 +722,18 @@ def process_problem(
             f"only 2D (x,t) domains supported.")
         return None
 
-    # Fit on a symmetric regular grid (eval points only supply GT values).
-    # min_samples_leaf is a LITERAL minimum number of grid samples per leaf
-    # (matching the pipeline's tree construction) — no rescaling.
-    X, y = build_symmetric_grid_data(eval_data, domain_bounds)
+    # Prefer the solver's native solution grid (same GT source as the
+    # trainer's rel-L2 reporting); fall back to interpolating the scattered
+    # eval sample only if no native grid exists for this problem.
+    native = build_native_grid_data(problem, base_cfg)
+    if native is not None:
+        X, y, native_heatmap = native
+        print("  GT source: native solver grid")
+    else:
+        eval_data = ensure_eval_data(problem, base_cfg)
+        X, y = build_symmetric_grid_data(eval_data, domain_bounds)
+        native_heatmap = None
+        print("  GT source: interpolated eval sample (no native grid)")
     print(f"  Data: X={X.shape}, y="
           f"{y.shape if hasattr(y, 'shape') else '?'}")
 
@@ -707,8 +753,11 @@ def process_problem(
     )
 
     # -- Generate 3-panel plot --
-    gt_grid, grid_x, grid_t = prepare_ground_truth_grid(
-        eval_data, domain_bounds, resolution=150)
+    if native_heatmap is not None:
+        gt_grid, grid_x, grid_t = native_heatmap
+    else:
+        gt_grid, grid_x, grid_t = prepare_ground_truth_grid(
+            eval_data, domain_bounds, resolution=150)
 
     all_region_dicts = list(node_dicts)
     accepted_region_dicts = [

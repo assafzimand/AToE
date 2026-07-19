@@ -223,10 +223,10 @@ base_config:
     - 0.0
     - 1.0
     time_marching:
-      enabled: false
+      enabled: true
       freeze_previous_windows: true
       m_distribution: quadratic
-      num_windows: 5
+      num_windows: 3
     tree_smoothness_threshold: 0.4
     wavelet_threshold: 0.0025
     window_smoothness_order: 3
@@ -290,7 +290,7 @@ base_config:
       enabled: true
       freeze_previous_windows: true
       m_distribution: quadratic
-      num_windows: 20
+      num_windows: 5
     tree_smoothness_threshold: 0.3
     wavelet_threshold: 0.04
     window_smoothness_order: 4
