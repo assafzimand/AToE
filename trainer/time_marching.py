@@ -10,13 +10,14 @@ using the previous window's terminal prediction as the next window's initial con
 
 import copy
 import json
+import shutil
 import torch
 import torch.nn as nn
 import numpy as np
 import matplotlib.pyplot as plt
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 import importlib
 
 from utils.logging_config import get_logger
@@ -170,6 +171,90 @@ def narrow_config_for_window(cfg: Dict, window: TimeWindow, prev_model: nn.Modul
     }
     
     return window_cfg
+
+
+def resolve_window_pretrained_checkpoint(
+    ckpt_value,
+    window: TimeWindow,
+    num_windows: int,
+) -> Optional[str]:
+    """Resolve a pretrained-checkpoint config value for one time window.
+
+    Non-time-marching runs point ``pretrained_base_checkpoint`` /
+    ``pretrained_local_expert_checkpoint`` at a single ``.pt`` file. For
+    time-marching runs the value may instead be a DIRECTORY (e.g.
+    ``roots_checkpoints/<name>/``) holding one checkpoint per window — one
+    training segment across all windows, as written by
+    :func:`train_with_time_marching` into ``run_dir/checkpoints/<segment>/``.
+    Whether each file holds a plain root or a full leaf-expert model is up
+    to the producer — the config key it is supplied under decides how the
+    trainer loads it.
+
+    The window's file is located by the folder's ``manifest.json`` when
+    present (which also validates the run's window layout: window count and
+    per-window time bounds must match); otherwise by filename —
+    ``window_{idx}.pt`` or a unique ``window_{idx}_*.pt`` match.
+
+    Returns:
+        The per-window checkpoint path (str); the value unchanged when it
+        is a single file (the same checkpoint is then reused for every
+        window); or None when ``ckpt_value`` is None.
+    """
+    if ckpt_value is None:
+        return None
+    p = Path(ckpt_value)
+    if not p.exists():
+        raise FileNotFoundError(
+            f"Pretrained checkpoint path not found: {ckpt_value}")
+    if p.is_file():
+        logger.info(f"    [Time Marching] Pretrained checkpoint {p} is a "
+                    f"single file — reusing it for every window.")
+        return str(p)
+
+    fname = f"window_{window.idx}.pt"
+    manifest_path = p / 'manifest.json'
+    if manifest_path.exists():
+        with open(manifest_path, 'r') as f:
+            manifest = json.load(f)
+        saved_windows = manifest.get('num_windows')
+        if saved_windows is not None and saved_windows != num_windows:
+            raise ValueError(
+                f"Pretrained checkpoint folder {p} was saved with "
+                f"{saved_windows} windows but this run uses {num_windows}. "
+                f"Match time_marching.num_windows to the checkpoint folder.")
+        for entry in manifest.get('windows', []):
+            if entry.get('idx') != window.idx:
+                continue
+            for key, have in (('t_start', window.t_start),
+                              ('t_end', window.t_end)):
+                want = entry.get(key)
+                if want is not None and abs(want - have) > 1e-9:
+                    raise ValueError(
+                        f"Pretrained checkpoint folder {p}: window "
+                        f"{window.idx} covers {key}={want} but this run's "
+                        f"window {window.idx} has {key}={have}.")
+            fname = entry.get('file', fname)
+            break
+
+    ckpt_path = p / fname
+    if not ckpt_path.exists():
+        # No manifest entry and no bare window_{idx}.pt — accept a unique
+        # window_{idx}_*.pt (the collected-segment naming, e.g.
+        # window_0_best_model_root.pt).
+        matches = sorted(p.glob(f"window_{window.idx}_*.pt"))
+        if len(matches) == 1:
+            ckpt_path = matches[0]
+        elif len(matches) > 1:
+            raise ValueError(
+                f"Pretrained checkpoint folder {p} has multiple candidates "
+                f"for window {window.idx}: {[m.name for m in matches]}. "
+                f"Keep one file per window (or add a manifest.json).")
+        else:
+            raise FileNotFoundError(
+                f"Pretrained checkpoint folder {p} has no checkpoint for "
+                f"window {window.idx} (expected {fname} or a unique "
+                f"window_{window.idx}_*.pt).")
+    return str(ckpt_path)
 
 
 def override_ic_with_model(
@@ -453,10 +538,18 @@ def train_with_time_marching(
     1. Computes time windows with M allocation
     2. For each window:
        - Narrows config (temporal_domain, M_experts_num)
+       - Resolves pretrained_base_checkpoint / pretrained_local_expert_checkpoint
+         per window (a directory value maps to its window_{idx}.pt — see
+         resolve_window_pretrained_checkpoint)
        - Generates datasets for narrowed domain
        - If not first window: overrides IC h_gt with prev_model predictions
        - Creates fresh model
        - Calls existing train() as black box
+       - Collects the window's best_model_<segment>.pt files into
+         run_dir/checkpoints/<segment>/window_{idx}_best_model_<segment>.pt
+         (+ manifest.json per segment folder) — copy ONE segment folder to
+         roots_checkpoints/<name>/ to reuse that stage for all windows via
+         the pretrained checkpoint keys in a later run
        - Optionally freezes model
     3. Wraps all window models in TimeMarchingModel
     
@@ -497,10 +590,28 @@ def train_with_time_marching(
         logger.info(f"    Window {w.idx}: t in [{w.t_start:.4f}, {w.t_end:.4f}], M={w.M}")
     logger.info(f"{'='*60}")
     
+    # Per-RUN checkpoint collection: run_dir/checkpoints/<segment>/ gathers
+    # every window's best_model_<segment>.pt (root / phase3 / fine_tune), so
+    # ONE folder holds the same training stage for ALL windows. Copy a
+    # segment folder to roots_checkpoints/<name>/ and point
+    # pretrained_base_checkpoint (roots) or pretrained_local_expert_checkpoint
+    # (full leaf-expert models) at it — each window of the new run then
+    # loads its own file for that segment (resolve_window_pretrained_checkpoint).
+    run_ckpt_root = run_dir / 'checkpoints'
+    manifest_base = {
+        'problem': problem,
+        'temporal_domain': list(config[problem]['temporal_domain']),
+        'num_windows': len(windows),
+        'm_distribution': tm_cfg['m_distribution'],
+        'global_M': global_M,
+    }
+    segment_manifests: Dict[str, Dict] = {}
+    window_segment_paths: List[Dict[str, Path]] = []
+
     window_models: List[Tuple[TimeWindow, nn.Module]] = []
     prev_model = None
     last_checkpoint_path = None
-    
+
     for window in windows:
         logger.info(f"\n{'='*60}")
         logger.info(f"  WINDOW {window.idx + 1}/{len(windows)}: t in [{window.t_start:.4f}, {window.t_end:.4f}]")
@@ -511,6 +622,19 @@ def train_with_time_marching(
         window_cfg = narrow_config_for_window(config, window, prev_model=prev_model)
         window_run_dir = run_dir / f"window_{window.idx}"
         window_run_dir.mkdir(parents=True, exist_ok=True)
+
+        # 1b. Resolve pretrained checkpoints for this window: a directory
+        # value maps to its window_{idx}.pt; a single file is reused as-is.
+        # train() then applies the standard skip logic (base → skip Phase 1,
+        # experts → fine-tune only) within the window.
+        for _ckpt_key in ('pretrained_base_checkpoint',
+                          'pretrained_local_expert_checkpoint'):
+            _resolved = resolve_window_pretrained_checkpoint(
+                window_cfg[problem].get(_ckpt_key), window, len(windows))
+            if _resolved is not None:
+                logger.info(f"  [Time Marching] {_ckpt_key} for window "
+                            f"{window.idx}: {_resolved}")
+            window_cfg[problem][_ckpt_key] = _resolved
         
         # 2. Generate datasets with narrowed domain
         logger.info(f"\n  Generating datasets for window {window.idx}...")
@@ -548,21 +672,39 @@ def train_with_time_marching(
             run_dir=window_run_dir,
         )
         
-        # 6. Save window-specific checkpoint
-        window_checkpoint = {
-            'window_idx': window.idx,
-            'window': {
+        # 6. Collect this window's per-segment bests into the run-level
+        # checkpoints/<segment>/ folders. The files come straight from
+        # _save_checkpoint, so they carry adaptive_state and are consumable
+        # by BOTH pretrained flows (_load_pretrained_base takes just the
+        # base, _load_pretrained_experts the full leaf-expert state).
+        collected: Dict[str, Path] = {}
+        for src in sorted((window_run_dir / 'checkpoints').glob('best_model_*.pt')):
+            segment = src.stem[len('best_model_'):]
+            seg_dir = run_ckpt_root / segment
+            seg_dir.mkdir(parents=True, exist_ok=True)
+            dst = seg_dir / f"window_{window.idx}_{src.stem}.pt"
+            shutil.copy2(src, dst)
+            collected[segment] = dst
+            manifest = segment_manifests.setdefault(
+                segment, {**manifest_base, 'segment': segment, 'windows': []})
+            manifest['windows'].append({
+                'idx': window.idx,
                 't_start': window.t_start,
                 't_end': window.t_end,
                 'M': window.M,
-            },
-            'model_state_dict': window_model.state_dict(),
-            'is_adaptive': True,
-            'adaptive_state': window_model.get_state_dict_extended() if hasattr(window_model, 'get_state_dict_extended') else None,
-        }
-        window_checkpoint_path = window_run_dir / f"window_{window.idx}_final.pt"
-        torch.save(window_checkpoint, window_checkpoint_path)
-        logger.info(f"  Window checkpoint saved: {window_checkpoint_path}")
+                'file': dst.name,
+            })
+            # Rewrite after every window so a partial run still leaves a
+            # valid (truncated) segment folder behind.
+            with open(seg_dir / 'manifest.json', 'w') as f:
+                json.dump(manifest, f, indent=2)
+        if collected:
+            logger.info(f"  Window {window.idx} segment checkpoints collected "
+                        f"into {run_ckpt_root}: {sorted(collected)}")
+        else:
+            logger.info(f"  Warning: no best_model_*.pt found for window "
+                        f"{window.idx} in {window_run_dir / 'checkpoints'}")
+        window_segment_paths.append(collected)
         
         # 7. Optionally freeze for memory savings
         if tm_cfg['freeze_previous_windows']:
@@ -581,7 +723,16 @@ def train_with_time_marching(
     logger.info(f"{'='*60}")
     combined_model = TimeMarchingModel(window_models)
     
-    # 10. Save combined model checkpoint
+    # 10. Save combined model checkpoint. Each window is represented by its
+    # latest collected segment (the reconciled best of the last stage run).
+    _segment_priority = ('fine_tune', 'phase3', 'root', 'main')
+
+    def _final_segment_file(seg_paths: Dict[str, Path]):
+        for seg in _segment_priority:
+            if seg in seg_paths:
+                return str(seg_paths[seg])
+        return None
+
     combined_checkpoint = {
         'is_time_marching': True,
         'num_windows': len(windows),
@@ -590,8 +741,8 @@ def train_with_time_marching(
             for w, _ in window_models
         ],
         'window_checkpoints': [
-            str(run_dir / f"window_{w.idx}" / f"window_{w.idx}_final.pt")
-            for w, _ in window_models
+            _final_segment_file(seg_paths)
+            for seg_paths in window_segment_paths
         ],
     }
     combined_checkpoint_path = run_dir / "time_marching_combined.pt"
