@@ -411,6 +411,8 @@ experiments:
   model: AToELeaves
   name: A_schrodinger_M8
   problem: schrodinger
+  schrodinger:
+    pretrained_base_checkpoint: roots_checkpoints/schrodinger_root.pt
 - adaptive_pinn:
     M_experts_num: 20
   base_architecture: &id001

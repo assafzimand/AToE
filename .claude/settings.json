@@ -2,7 +2,12 @@
   "permissions": {
     "allow": [
       "Read(//c/Users/assaf/Desktop/kdv_01_main_20260607_060715/**)",
-      "Bash(Sort-Object Name)"
+      "Bash(Sort-Object Name)",
+      "Read(//c/Users/assaf/Desktop/**)",
+      "Read(//c/Users/assaf/Downloads/**)",
+      "Bash(cd \"/c/Users/assaf/Desktop/experts_creation_sch_kdv_ks_20260719_234224\" && du -sh . 2>&1; echo \"---top level---\"; ls -la; echo \"---kdv windows---\"; ls -d kdv-*/*/window_* 2>/dev/null; echo \"---ks windows---\"; ls -d ks-*/*/window_* 2>/dev/null; echo \"---schrodinger contents---\"; ls schrodinger-*/*/ 2>/dev/null)",
+      "Read(//c/Users/assaf/Desktop/experts_creation_sch_kdv_ks_20260719_234224/**)",
+      "Bash(cd \"/c/Users/assaf/Desktop/experts_creation_sch_kdv_ks_20260719_234224\" && echo \"=== kdv top-level run dir ===\" && ls -la \"kdv-base-2-60-60-60-60-1-experts-2-20-20-20-1-tanh/20260720_063547/\" && echo \"=== kdv checkpoints/root ===\" && ls \"kdv-base-2-60-60-60-60-1-experts-2-20-20-20-1-tanh/20260720_063547/checkpoints/root/\" 2>&1 && echo \"=== ks top-level run dir ===\" && ls -la \"ks-base-2-60-60-60-60-1-experts-2-20-20-20-1-tanh/20260720_105505/\" && echo \"=== ks checkpoints/root ===\" && ls \"ks-base-2-60-60-60-60-1-experts-2-20-20-20-1-tanh/20260720_105505/checkpoints/root/\" 2>&1)"
     ]
   }
 }

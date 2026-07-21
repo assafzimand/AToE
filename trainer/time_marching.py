@@ -21,6 +21,7 @@ from typing import Dict, List, Optional, Tuple
 import importlib
 
 from utils.logging_config import get_logger
+from utils.io import resolve_experts_architecture
 
 logger = get_logger(__name__)
 
@@ -646,7 +647,10 @@ def train_with_time_marching(
         
         # 3. Create fresh model for this window
         logger.info(f"\n  Creating model for window {window.idx}...")
-        window_model = model_class(architecture, activation, window_cfg, window_cfg['adaptive_pinn'])
+        window_model = model_class(
+            architecture, activation, window_cfg, window_cfg['adaptive_pinn'],
+            experts_architecture=resolve_experts_architecture(window_cfg),
+        )
         window_model = window_model.to(device)
         
         # Convert to double precision if configured
