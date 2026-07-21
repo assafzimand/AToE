@@ -6,9 +6,15 @@ Each leaf expert is trained on its OWN output (no PoU), with:
   - True IC/BC on faces coinciding with global domain bounds
   - Neighbor-to-neighbor continuity on shared interior faces
 
-For Allen-Cahn with periodic BC, global boundary points are
-paired across experts (left/right at same t), penalizing both
-value and spatial derivative mismatches.
+For PDEs with periodic BC (Allen-Cahn, Schrodinger, KdV, KS),
+global boundary points are paired across experts (left/right at
+same t), penalizing both value and spatial derivative mismatches
+over all output components. Non-periodic problems (Burgers)
+instead match the true Dirichlet data.
+
+Note: unlike the global losses, the per-expert BC term is always
+enforced as a soft penalty — there is deliberately no
+``fourier_features.periodic`` guard here.
 
 Total loss = SUM over experts of:
     w_res*L_res + w_ic*L_ic + w_bc*L_bc + w_cont*L_cont
@@ -25,6 +31,11 @@ from adaptive.subdomain_data import (
 from utils.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+# PDEs whose true spatial BC is periodic: the per-expert BC term pairs
+# global-boundary points across experts (value + first spatial derivative,
+# matching the global losses) instead of Dirichlet matching to h_gt.
+PERIODIC_PROBLEMS = frozenset({'allen_cahn', 'schrodinger', 'kdv', 'ks'})
 
 
 def build_split_loss(
@@ -50,8 +61,8 @@ def build_split_loss(
     w_bc = loss_weights['bc']
     w_cont = loss_weights.get('continuity', 1.0)
 
-    # Allen-Cahn uses periodic BC pairing, so skip Dirichlet-to-zero
-    is_allen_cahn = (problem == 'allen_cahn')
+    # Periodic PDEs use cross-expert BC pairing, so skip Dirichlet-to-zero
+    is_periodic = problem in PERIODIC_PROBLEMS
 
     pde_res_fn, deriv_fn = _import_pde_helpers(problem)
     pde_params = _get_pde_params(problem, pc)
@@ -113,7 +124,7 @@ def build_split_loss(
                 model, eidx,
                 x[emask], t[emask], h_gt[emask],
                 kinds[emask],
-                w_res, w_ic, w_bc, is_allen_cahn,
+                w_res, w_ic, w_bc, is_periodic,
                 device,
                 residual_loss=residual_losses.get(eidx),
             )
@@ -122,11 +133,11 @@ def build_split_loss(
             if return_components:
                 all_comps[eidx] = comps
 
-        # ── Periodic BC (Allen-Cahn): cross-expert pairing ──
-        if is_allen_cahn and bc_face_ids is not None:
-            bc_loss_contrib = _compute_periodic_bc_loss(
+        # ── Periodic BC: cross-expert pairing ──
+        if is_periodic and bc_face_ids is not None:
+            bc_loss_contrib, bc_per_expert = _compute_periodic_bc_loss(
                 model, x, t, expert_ids, kinds,
-                bc_face_ids, deriv_fn, device,
+                bc_face_ids, device,
             )
             if bc_loss_contrib.item() > 0:
                 logger.debug(
@@ -134,6 +145,17 @@ def build_split_loss(
                     f"{bc_loss_contrib.item():.6e}"
                 )
             total_loss = total_loss + w_bc * bc_loss_contrib
+            # Surface the pairing term in the per-expert history/plots:
+            # fold each expert's share into the 'bc' entry recorded above
+            # (raw value, like the other components; weights live in 'total').
+            for eidx, bc_val in bc_per_expert.items():
+                hist = per_expert_history.get(eidx)
+                if hist is not None and hist['bc']:
+                    hist['bc'][-1] += bc_val
+                if return_components and eidx in all_comps:
+                    all_comps[eidx]['bc'] = (
+                        all_comps[eidx]['bc'] + bc_val
+                    )
 
         # ── Continuity loss: neighbor-to-neighbor on shared interior faces ──
         # Skipped entirely (not computed, not recorded/plotted) when its
@@ -235,7 +257,7 @@ def _compute_all_residual_losses(
 
 def _compute_expert_loss(
     model, expert_idx, x, t, h_gt, kinds,
-    w_res, w_ic, w_bc, is_allen_cahn, device,
+    w_res, w_ic, w_bc, is_periodic, device,
     residual_loss=None,
 ):
     """Per-expert local loss (no PoU). Residual is supplied precomputed."""
@@ -287,9 +309,9 @@ def _compute_expert_loss(
             (u_if_bc - h_gt[ifm_bc]) ** 2
         )
 
-    # ── BC true: Dirichlet (Allen-Cahn instead uses batch-level periodic pairing) ──
+    # ── BC true: Dirichlet (periodic PDEs instead use batch-level pairing) ──
     bc_mask = (kinds == KIND_BC_TRUE)
-    if (not is_allen_cahn) and bc_mask.sum() > 0:
+    if (not is_periodic) and bc_mask.sum() > 0:
         xt_bc = torch.cat(
             [x[bc_mask], t[bc_mask]], dim=1
         )
@@ -309,16 +331,25 @@ def _compute_expert_loss(
 
 
 def _compute_periodic_bc_loss(
-    model, x, t, expert_ids, kinds, bc_face_ids, deriv_fn, device,
+    model, x, t, expert_ids, kinds, bc_face_ids, device,
 ):
-    """Compute periodic BC loss for Allen-Cahn via cross-expert pairing.
+    """Compute periodic BC loss via cross-expert pairing.
 
-    Pairs left/right boundary points by sorting on t-value and penalizes
-    (u_left - u_right)² + (∂u/∂x_left - ∂u/∂x_right)².
+    Pairs left/right global-boundary points by sorting on t-value and
+    penalizes (u_left - u_right)² + (∂u/∂x_left - ∂u/∂x_right)², summed
+    over all output components (e.g. real+imag for Schrodinger). This
+    matches the value + first-derivative periodicity enforced by the
+    global losses.
+
+    Returns:
+        (loss, per_expert): total pairing loss (scalar tensor) and a dict
+        mapping expert_idx -> float contribution (pair losses split
+        equally between the two experts, same normalization as ``loss``).
     """
+    per_expert: Dict[int, float] = {}
     bc_mask = (kinds == KIND_BC_TRUE)
     if bc_mask.sum() == 0:
-        return torch.tensor(0.0, device=device)
+        return torch.tensor(0.0, device=device), per_expert
 
     x_bc = x[bc_mask]
     t_bc = t[bc_mask]
@@ -395,35 +426,51 @@ def _compute_periodic_bc_loss(
             
             xt_l = torch.cat([x_l_batch, t_l_batch], dim=1)
             xt_r = torch.cat([x_r_batch, t_r_batch], dim=1)
-            
-            # Single batched forward pass per expert
-            u_l = model.forward_single_expert(eid_l, xt_l)[:, 0]
-            u_r = model.forward_single_expert(eid_r, xt_r)[:, 0]
-            
-            # Batched spatial derivative computation
-            ux_l = torch.autograd.grad(
-                u_l, x_l_batch,
-                grad_outputs=torch.ones_like(u_l),
-                create_graph=True, retain_graph=True,
-            )[0][:, d]
-            
-            ux_r = torch.autograd.grad(
-                u_r, x_r_batch,
-                grad_outputs=torch.ones_like(u_r),
-                create_graph=True, retain_graph=True,
-            )[0][:, d]
-            
-            # Periodic penalty (vectorized sum)
-            total_bc_loss = (
-                total_bc_loss
-                + torch.sum((u_l - u_r) ** 2)
-                + torch.sum((ux_l - ux_r) ** 2)
-            )
+
+            # Single batched forward pass per expert (all output components)
+            u_l_full = model.forward_single_expert(eid_l, xt_l)
+            u_r_full = model.forward_single_expert(eid_r, xt_r)
+
+            # Periodic penalty per output component: value + first
+            # spatial derivative mismatch (vectorized sum)
+            pair_loss = torch.tensor(0.0, device=device)
+            for c in range(u_l_full.shape[1]):
+                u_l = u_l_full[:, c]
+                u_r = u_r_full[:, c]
+
+                # Batched spatial derivative computation
+                ux_l = torch.autograd.grad(
+                    u_l, x_l_batch,
+                    grad_outputs=torch.ones_like(u_l),
+                    create_graph=True, retain_graph=True,
+                )[0][:, d]
+
+                ux_r = torch.autograd.grad(
+                    u_r, x_r_batch,
+                    grad_outputs=torch.ones_like(u_r),
+                    create_graph=True, retain_graph=True,
+                )[0][:, d]
+
+                pair_loss = (
+                    pair_loss
+                    + torch.sum((u_l - u_r) ** 2)
+                    + torch.sum((ux_l - ux_r) ** 2)
+                )
+
+            total_bc_loss = total_bc_loss + pair_loss
             n_pairs += pair_mask.sum().item()
-    
+
+            # Attribute the pair loss equally to both experts
+            half = pair_loss.item() / 2
+            per_expert[int(eid_l)] = per_expert.get(int(eid_l), 0.0) + half
+            per_expert[int(eid_r)] = per_expert.get(int(eid_r), 0.0) + half
+
     if n_pairs > 0:
-        return total_bc_loss / n_pairs
-    return torch.tensor(0.0, device=device)
+        # Same normalization for total and per-expert shares
+        for eidx in per_expert:
+            per_expert[eidx] /= n_pairs
+        return total_bc_loss / n_pairs, per_expert
+    return torch.tensor(0.0, device=device), per_expert
 
 
 def _record(history, expert_idx, comps):
