@@ -6,7 +6,7 @@ and bc_face_id for periodic BC pairing.
 
 For bc_true points on global spatial boundaries, bc_face_id encodes
 dim*2 + side (side=0 lower, side=1 upper) to enable cross-expert
-pairing in periodic BC loss (Allen-Cahn).
+pairing in the periodic BC loss (Allen-Cahn, Schrodinger, KdV, KS).
 
 Used by the split-loss training path for AToE-Leaves.
 """
