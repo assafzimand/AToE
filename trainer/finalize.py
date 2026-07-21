@@ -83,7 +83,8 @@ def _finalize_training(ctx: TrainingContext) -> Path:
     # Finalize-only imports (originally imported in setup under is_adaptive)
     if is_adaptive:
         from adaptive.visualization import (
-            plot_expert_regions, save_regions_metadata, plot_expert_soft_weights
+            plot_expert_regions, save_regions_metadata, plot_expert_soft_weights,
+            plot_corrector_indicator, plot_corrector_contributions
         )
 
     # Disable emergency save (loop done or NaN exit)
@@ -205,6 +206,21 @@ def _finalize_training(ctx: TrainingContext) -> Path:
                 output_path=adaptive_plots_dir / f"soft_weights_final_E{_n_final}.png",
                 leaf_indices=leaf_indices_set
             )
+
+            # Single-corrector diagnostics: χ support + per-expert correction.
+            if getattr(model, 'corrector', None) is not None:
+                plot_corrector_indicator(
+                    model=model,
+                    domain_bounds=domain_bounds,
+                    output_path=adaptive_plots_dir / f"corrector_indicator_final_E{_n_final}.png",
+                    leaf_indices=leaf_indices_set,
+                )
+                plot_corrector_contributions(
+                    model=model,
+                    domain_bounds=domain_bounds,
+                    output_path=adaptive_plots_dir / f"corrector_contributions_final_E{_n_final}.png",
+                    leaf_indices=leaf_indices_set,
+                )
         
         save_regions_metadata(
             regions=model.regions,

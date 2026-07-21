@@ -794,6 +794,157 @@ def plot_expert_soft_weights(
     mode_str = 'Hard' if blending_mode == 'hard' else 'Soft'
     logger.info(f"  {mode_str} blending weights plot saved to {output_path}")
 
+
+def _corrector_eval_grid(model, domain_bounds, resolution):
+    """Shared (x,t) eval grid + model inputs for the corrector plots (2D only)."""
+    x_min, t_min = domain_bounds['lower']
+    x_max, t_max = domain_bounds['upper']
+    gx = np.linspace(x_min, x_max, resolution)
+    gt = np.linspace(t_min, t_max, resolution)
+    X, T = np.meshgrid(gx, gt, indexing='ij')
+    device = next(model.parameters()).device
+    dtype = next(model.parameters()).dtype
+    inputs = torch.tensor(np.column_stack([X.ravel(), T.ravel()]),
+                          dtype=dtype, device=device)
+    return gx, gt, X, T, inputs
+
+
+def _leaf_regions(model, leaf_indices):
+    """(leaf_idx, RegionDescriptor) pairs for the plotted leaves."""
+    if leaf_indices is not None:
+        ids = sorted(i for i in leaf_indices if i >= 0)
+    else:
+        ids = list(range(model.num_experts))
+    return [(i, model.regions[i]) for i in ids if i < len(model.regions)]
+
+
+def plot_corrector_indicator(
+    model,
+    domain_bounds: Dict[str, List[float]],
+    output_path: Union[str, Path],
+    resolution: int = 200,
+    leaf_indices: Optional[set] = None,
+) -> None:
+    """Heatmap of the collar indicator χ = 1 - Σ_j ψ̃_j² with region overlays.
+
+    χ is exactly 0 on every expert-exclusive flat-top and positive only in the
+    collars (≥2 overlapping windows) — the set the corrector can act on. Expert
+    hard-region rectangles (dashed) and the collar boundary (χ→0 contour) are
+    drawn on top so the support can be checked visually.
+    """
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if len(domain_bounds['lower']) != 2:
+        logger.info("  [Corrector] χ heatmap only supports 2D (x, t) domains — skipped.")
+        return
+
+    gx, gt, X, T, inputs = _corrector_eval_grid(model, domain_bounds, resolution)
+    with torch.no_grad():
+        chi = model.compute_corrector_indicator(inputs).cpu().numpy().reshape(X.shape)
+
+    fig, ax = plt.subplots(figsize=(7.5, 6), layout='constrained')
+    im = ax.pcolormesh(gx, gt, chi.T, cmap=plt.cm.viridis,
+                       vmin=0.0, vmax=max(float(chi.max()), 1e-6), shading='auto')
+    fig.colorbar(im, ax=ax, label=r'$\chi = 1 - \sum_j \tilde\psi_j^2$',
+                 shrink=0.85, pad=0.01)
+
+    # Collar boundary: contour where χ leaves 0.
+    if float(chi.max()) > 1e-6:
+        ax.contour(X, T, chi, levels=[1e-3], colors='white',
+                   linewidths=1.0, linestyles='dotted')
+
+    for _i, region in _leaf_regions(model, leaf_indices):
+        lo, hi = region.bounds_lower, region.bounds_upper
+        ax.add_patch(patches.Rectangle(
+            (lo[0], lo[1]), hi[0] - lo[0], hi[1] - lo[1],
+            linewidth=1.8, edgecolor='black', facecolor='none', linestyle='--'))
+
+    ax.set_xlabel('x', fontsize=12)
+    ax.set_ylabel('t', fontsize=12)
+    ax.tick_params(labelsize=10)
+    ax.set_title('Corrector indicator χ (collar support)', fontsize=13)
+
+    from utils.plot_io import save_png
+    save_png(output_path, fig=fig)
+    plt.close()
+    logger.info(f"  Corrector indicator χ plot saved to {output_path}")
+
+
+def plot_corrector_contributions(
+    model,
+    domain_bounds: Dict[str, List[float]],
+    output_path: Union[str, Path],
+    resolution: int = 200,
+    leaf_indices: Optional[set] = None,
+) -> None:
+    """Per-leaf panels of the correction field χ·c restricted to each leaf's support.
+
+    The first panel is the total correction |χ·c| over the domain; each following
+    panel masks it to one leaf's window support (ψ_leaf > 0), so the correction
+    the corrector applies around each expert — and only in its collar — is
+    visible. Magnitude is the L2 norm across output components.
+    """
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if len(domain_bounds['lower']) != 2:
+        logger.info("  [Corrector] contribution panels only support 2D (x, t) — skipped.")
+        return
+    if getattr(model, 'corrector', None) is None:
+        logger.info("  [Corrector] no corrector on model — contribution panels skipped.")
+        return
+
+    gx, gt, X, T, inputs = _corrector_eval_grid(model, domain_bounds, resolution)
+    with torch.no_grad():
+        fields = model.corrector_fields(inputs)
+        corr = fields['correction']                       # (N, out) = χ·c
+        corr_mag = corr.norm(dim=1).cpu().numpy().reshape(X.shape)
+        psi_norm = fields['psi_norm'].cpu().numpy()       # (N, L)
+        leaf_list = fields['leaf_list']
+
+    panels = [('Total |χ·c|', corr_mag, None)]
+    for local_idx, leaf_idx in enumerate(leaf_list):
+        active = (psi_norm[:, local_idx] > 1e-6).reshape(X.shape)
+        masked = np.where(active, corr_mag, np.nan)
+        region = model.regions[leaf_idx] if leaf_idx < len(model.regions) else None
+        panels.append((f'Expert {leaf_idx + 1}', masked, region))
+
+    n_plots = len(panels)
+    n_cols = min(4, n_plots)
+    n_rows = (n_plots + n_cols - 1) // n_cols
+    fig, axes = plt.subplots(n_rows, n_cols,
+                             figsize=(4.5 * n_cols, 3.8 * n_rows),
+                             squeeze=False, layout='constrained')
+    axes = axes.flatten()
+
+    vmax = max(float(np.nanmax(corr_mag)), 1e-12)
+    cmap = plt.cm.magma
+    im = None
+    for idx, (label, grid, region) in enumerate(panels):
+        ax = axes[idx]
+        im = ax.pcolormesh(gx, gt, grid.T, cmap=cmap, vmin=0.0, vmax=vmax,
+                           shading='auto')
+        ax.set_title(label, fontsize=12)
+        ax.set_xlabel('x', fontsize=11)
+        ax.set_ylabel('t', fontsize=11)
+        ax.tick_params(labelsize=9)
+        if region is not None:
+            lo, hi = region.bounds_lower, region.bounds_upper
+            ax.add_patch(patches.Rectangle(
+                (lo[0], lo[1]), hi[0] - lo[0], hi[1] - lo[1],
+                linewidth=1.6, edgecolor='cyan', facecolor='none', linestyle='--'))
+
+    for j in range(n_plots, len(axes)):
+        axes[j].set_visible(False)
+    if im is not None:
+        fig.colorbar(im, ax=axes[:n_plots].tolist(), label='|χ·c|',
+                     shrink=0.85, pad=0.01)
+
+    from utils.plot_io import save_png
+    save_png(output_path, fig=fig)
+    plt.close()
+    logger.info(f"  Corrector contribution panels saved to {output_path}")
+
+
 def plot_capacity_map(
     regions,
     expert_params: List[int],

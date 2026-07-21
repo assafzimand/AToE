@@ -53,6 +53,21 @@ class AToELeaves(nn.Module):
         # Blending mode: 'soft' (PoU) or 'hard' (step functions, mean on shared faces)
         self.blending_mode = adaptive_config.get('blending_mode', 'soft')
 
+        # ── Single-corrector fine-tune ──
+        # When active, the frozen soft-blend u_soft is augmented by a single
+        # trainable network c gated by the collar indicator χ = 1 - Σ_j ψ̃_j²:
+        #     u = u_soft + χ · c
+        # χ vanishes (with N derivatives) on every expert-exclusive flat-top, so
+        # the corrector can only ever move the composition inside the collars —
+        # the interiors that already carry the 1e-6 accuracy are untouched by
+        # construction. Built lazily (experts must exist first); inactive on
+        # normal soft/hard forwards.
+        ft_cfg = adaptive_config.get('fine_tune', {}) or {}
+        self.corrector_architecture_cfg = ft_cfg.get('corrector_architecture', None)
+        self.corrector_init = ft_cfg.get('corrector_init', 'zero')
+        self.corrector: Optional[nn.Module] = None
+        self.corrector_active = False
+
         self.atoe_threshold_capacity = adaptive_config.get(
             'AToE_threshold_capacity', None
         )
@@ -292,10 +307,97 @@ class AToELeaves(nn.Module):
 
         return expert_idx
 
+    # ── Single-corrector fine-tune helpers ──
+
+    def build_corrector(self, device: Optional[torch.device] = None) -> nn.Module:
+        """Create the collar corrector network (idempotent).
+
+        Architecture defaults to ``experts_architecture`` when
+        ``fine_tune.corrector_architecture`` is null. With ``corrector_init ==
+        'zero'`` the output layer is zeroed so c ≡ 0 at construction: the
+        composition starts exactly equal to the frozen soft blend (lower-bounded
+        by the current best under GT best-model selection), while the random
+        hidden layers keep feature diversity so gradients still flow.
+        """
+        ref_param = next(self.base_model.parameters())
+        if device is None:
+            device = ref_param.device
+        arch = (list(self.corrector_architecture_cfg)
+                if self.corrector_architecture_cfg
+                else list(self.experts_architecture))
+        corrector = create_network(
+            arch, self.activation, self.config,
+            is_base=True, expert_type=self.expert_type
+        ).to(device=device, dtype=ref_param.dtype)
+        if self.corrector_init == 'zero':
+            self._zero_init_output_layer(corrector)
+        self.corrector = corrector
+        logger.info(f"[Corrector] built architecture={arch}, "
+                    f"init={self.corrector_init}")
+        return corrector
+
+    @staticmethod
+    def _zero_init_output_layer(net: nn.Module) -> None:
+        """Zero the final linear layer (weight + bias) of an FCNet-style net."""
+        names = net.get_layer_names() if hasattr(net, 'get_layer_names') else []
+        if names and hasattr(net, 'network'):
+            last = net.network[names[-1]]
+            with torch.no_grad():
+                if getattr(last, 'weight', None) is not None:
+                    last.weight.zero_()
+                if getattr(last, 'bias', None) is not None:
+                    last.bias.zero_()
+
+    def _soft_blend_and_chi(self, inputs: torch.Tensor):
+        """Normalized soft blend, its collar indicator, and the per-leaf weights.
+
+        Returns (u_soft (N,out), chi (N,1), psi_norm (N,L), leaf_list). The
+        collar indicator is χ = 1 - Σ_j ψ̃_j² ∈ [0, 1-1/L): exactly 0 wherever a
+        single leaf owns the point (some ψ̃=1), positive only where ≥2 windows
+        overlap, and C^N since each ψ̃ is C^N and reaches 0/1 flatly.
+        """
+        leaf_list = sorted(self.leaf_indices)
+        _, psi_experts = self.batched_indicators(inputs)  # (N, K)
+        psi_leaves = psi_experts[:, leaf_list]  # (N, L)
+        psi_sum = psi_leaves.sum(dim=1, keepdim=True).clamp(min=1e-12)
+        psi_norm = psi_leaves / psi_sum
+        u_leaves = torch.stack([self.experts[i](inputs) for i in leaf_list], dim=1)
+        u_soft = (psi_norm.unsqueeze(-1) * u_leaves).sum(dim=1)
+        chi = (1.0 - (psi_norm ** 2).sum(dim=1, keepdim=True)).clamp(min=0.0)
+        return u_soft, chi, psi_norm, leaf_list
+
+    def compute_corrector_indicator(self, inputs: torch.Tensor) -> torch.Tensor:
+        """Collar indicator χ (N,1); zeros in the base-only case."""
+        if -1 in self.leaf_indices:
+            return torch.zeros(inputs.shape[0], 1,
+                               device=inputs.device, dtype=inputs.dtype)
+        _, chi, _, _ = self._soft_blend_and_chi(inputs)
+        return chi
+
+    def corrector_fields(self, inputs: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """χ, the correction field χ·c, u_soft, and per-leaf weights (for plots)."""
+        u_soft, chi, psi_norm, leaf_list = self._soft_blend_and_chi(inputs)
+        if self.corrector is not None:
+            c = self.corrector(inputs)
+        else:
+            c = torch.zeros_like(u_soft)
+        return {
+            'chi': chi,
+            'correction': chi * c,
+            'u_soft': u_soft,
+            'psi_norm': psi_norm,
+            'leaf_list': leaf_list,
+        }
+
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         # Base-only case (no experts spawned yet)
         if -1 in self.leaf_indices:
             return self.base_model(inputs)
+
+        # Single-corrector fine-tune: frozen soft blend + collar-gated correction.
+        if getattr(self, 'corrector_active', False) and self.corrector is not None:
+            u_soft, chi, _, _ = self._soft_blend_and_chi(inputs)
+            return u_soft + chi * self.corrector(inputs)
 
         if self.blending_mode == 'hard':
             return self._forward_hard_only_leaves(inputs)
@@ -434,6 +536,14 @@ class AToELeaves(nn.Module):
             'activation': self.activation,
             'adaptive_config': self.adaptive_config,
             'leaf_indices': sorted(self.leaf_indices),
+            'corrector': (self.corrector.state_dict()
+                          if self.corrector is not None else None),
+            'corrector_architecture': (
+                list(self.corrector.layers)
+                if (self.corrector is not None
+                    and hasattr(self.corrector, 'layers')) else None),
+            'corrector_active': self.corrector_active,
+            'corrector_init': self.corrector_init,
         }
 
     def load_state_dict_extended(self, state_dict: Dict):
@@ -491,6 +601,24 @@ class AToELeaves(nn.Module):
 
         if 'leaf_indices' in state_dict:
             self.leaf_indices = set(state_dict['leaf_indices'])
+
+        # ── Restore the collar corrector, if the checkpoint carried one ──
+        saved_corrector = state_dict.get('corrector', None)
+        if saved_corrector is not None:
+            corr_arch = state_dict.get('corrector_architecture')
+            if corr_arch is None:
+                corr_arch = self._infer_architecture_from_state_dict(saved_corrector)
+            ref_param = next(self.base_model.parameters())
+            self.corrector = create_network(
+                corr_arch, self.activation, self.config,
+                is_base=True, expert_type=saved_expert_type
+            ).to(device=ref_param.device, dtype=ref_param.dtype)
+            self.corrector.load_state_dict(saved_corrector)
+            self.corrector_active = state_dict.get('corrector_active', False)
+        else:
+            self.corrector = None
+            self.corrector_active = False
+        self.corrector_init = state_dict.get('corrector_init', self.corrector_init)
 
         self.sync_batched_indicators()
 

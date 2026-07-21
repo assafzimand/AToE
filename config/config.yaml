@@ -24,6 +24,19 @@ adaptive_pinn:
     optimizer_1: adam
     optimizer_2: ssbroyden
     optimizer_switch_epoch: 5000
+    # ── Single-corrector fine-tune ──
+    # false: joint fine-tune of the full PoU composition (default behaviour).
+    # true : freeze all experts, train one collar corrector c gated by
+    #        χ = 1 - Σ_j ψ̃_j² so u = u_soft + χ·c; interiors stay frozen by
+    #        construction. Reuses epochs / lr / optimizer_* above.
+    single_corrector: false
+    # Corrector network architecture ([in, hidden..., out]); null → experts_architecture.
+    corrector_architecture: null
+    # 'zero' zeros the output layer (composition starts == frozen blend); 'default' uses standard init.
+    corrector_init: zero
+    # Residual sampling for the corrector segment: fraction of residual points
+    # drawn from the collar (χ>0). 1.0 = all residual points in the collar.
+    corrector_collar_ratio: 1.0
   initial_train:
     epochs: 5
     lr: 0.001

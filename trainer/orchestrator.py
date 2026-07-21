@@ -272,6 +272,12 @@ def _run_fine_tune(ctx: TrainingContext) -> None:
     if not fine_tune_cfg:
         return
 
+    # ── Single-corrector fine-tune: freeze the blend, train only a collar
+    # corrector u = u_soft + χ·c. Interiors are untouched by construction. ──
+    if fine_tune_cfg.get('single_corrector', False):
+        _run_corrector_fine_tune(ctx, fine_tune_cfg)
+        return
+
     blending = model.blending_mode if hasattr(model, 'blending_mode') else 'soft'
     logger.info("[FineTune] Unfreezing ALL params for final joint fine-tune.")
     logger.info(f"[FineTune] Using composed loss with blending_mode='{blending}' (matches inference)")
@@ -331,20 +337,71 @@ def _run_fine_tune(ctx: TrainingContext) -> None:
         ctx._l2sp_anchor = None
 
 
+def _run_corrector_fine_tune(ctx: TrainingContext, fine_tune_cfg: Dict) -> None:
+    """Single-corrector fine-tune: u = u_soft + χ·c, only c trainable.
+
+    All experts and the base are frozen; a single network c (built here) is
+    gated by the collar indicator χ = 1 - Σ_j ψ̃_j², so it can only alter the
+    composition where ≥2 windows overlap. The expert-exclusive flat-tops — which
+    already hold the phase-3 accuracy — are unreachable by the corrector. The
+    residual collocation set is focused on the collar via the existing
+    ``sampling.collar_data_ratio`` knob so the trainable region is well sampled.
+    Uses the same optimizer / epoch schedule as the ordinary fine-tune.
+    """
+    model = ctx.model
+    cfg = ctx.cfg
+    device = ctx.device
+
+    if not isinstance(model, AToELeaves):
+        logger.warning("[Corrector] single_corrector is only supported for "
+                       "AToELeaves models — skipping fine-tune.")
+        return
+
+    # The corrector composition is inherently soft (χ is defined from the soft
+    # PoU weights); force soft eval regardless of the configured blending mode.
+    model.blending_mode = 'soft'
+    ctx._split_context = None
+
+    model.build_corrector(device)
+    model.corrector_active = True
+    _set_trainable(model, 'corrector')
+
+    # Focus residual sampling on the collar (χ>0) for this segment only.
+    collar_ratio = fine_tune_cfg.get('corrector_collar_ratio', 1.0)
+    sampling_cfg = cfg.setdefault('sampling', {})
+    _saved_collar_ratio = sampling_cfg.get('collar_data_ratio', 0.0)
+    sampling_cfg['collar_data_ratio'] = collar_ratio
+    logger.info(f"[Corrector] collar-focused residual sampling: "
+                f"collar_data_ratio={collar_ratio} (was {_saved_collar_ratio})")
+
+    ft_cfg = dict(cfg)
+    ft_cfg.update(fine_tune_cfg)
+    ft_min = fine_tune_cfg.get('min_epochs', ctx.min_epochs)
+    try:
+        _train_segment(ctx, 'fine_tune', fine_tune_cfg['epochs'], ft_cfg,
+                       min_epochs_override=ft_min)
+    finally:
+        # Restore the sampling knob; keep corrector_active so finalize eval and
+        # plots report the corrected composition.
+        sampling_cfg['collar_data_ratio'] = _saved_collar_ratio
+
+
 def _set_trainable(model: nn.Module, which: str, verbose: bool = True) -> int:
     """Set ``requires_grad`` across the model for a training segment.
 
     ``which``:
-      * ``'all'``      — every parameter trainable (root w/o experts, joint fine-tune).
-      * ``'base'``     — only the base/root network (Phase-1 root segment).
-      * ``'leaves'``   — all leaf experts trainable, base frozen (Phase 3).
+      * ``'all'``       — every parameter trainable (root w/o experts, joint fine-tune).
+      * ``'base'``      — only the base/root network (Phase-1 root segment).
+      * ``'leaves'``    — all leaf experts trainable, base frozen (Phase 3).
+      * ``'corrector'`` — only the collar corrector trainable; base + every
+                          expert frozen (single-corrector fine-tune).
 
     Frozen params still participate in the forward composition; only the
     optimizer (which filters on ``requires_grad``) skips them. Returns the
     count of trainable param tensors.
     """
     trainable_details = []
-    
+
     if which == 'all':
         for p in model.parameters():
             p.requires_grad = True
@@ -369,6 +426,15 @@ def _set_trainable(model: nn.Module, which: str, verbose: bool = True) -> int:
                 for p in expert.parameters():
                     p.requires_grad = True
                 trainable_details.append(f"  expert[{idx}]: TRAINABLE")
+        elif which == 'corrector':
+            corrector = getattr(model, 'corrector', None)
+            if corrector is None:
+                raise ValueError("_set_trainable('corrector'): model has no "
+                                 "corrector built — call build_corrector first.")
+            trainable_details.append("base_model + all experts: FROZEN")
+            for p in corrector.parameters():
+                p.requires_grad = True
+            trainable_details.append("  corrector: TRAINABLE")
         else:
             raise ValueError(f"_set_trainable: unknown which={which!r}")
     
