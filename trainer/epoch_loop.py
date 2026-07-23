@@ -212,6 +212,38 @@ def _train_segment(
     _seg_err_start = None   # (err_grid, epoch) at the segment's first eval
     _seg_gt_ref = None      # (gt_sq_grid, x_grid, t_grid)
 
+    # ── Initial collar seeding ──
+    # When collar-focused sampling is active (sampling.collar_data_ratio > 0),
+    # draw the FIRST collocation with collar focus too, not only at resamples.
+    # Without this the segment spends its first resample interval on the plain
+    # uniform set (and, if resampling is disabled, the WHOLE segment). Plain
+    # path only — the split path builds its own collar-aware data upstream.
+    _seed_collar_ratio = (cfg.get('sampling', {}) or {}).get(
+        'collar_data_ratio', 0.0) or 0.0
+    if (_seed_collar_ratio > 0
+            and getattr(ctx, '_split_context', None) is None
+            and hasattr(model, 'regions') and hasattr(model, 'leaf_indices')):
+        _seed_leaf_idx = [i for i in sorted(model.leaf_indices) if i >= 0]
+        if len(_seed_leaf_idx) >= 2:
+            from utils.dataset_gen import build_collar_info
+            _seed_collar_info = build_collar_info(
+                [model.regions[i] for i in _seed_leaf_idx],
+                getattr(model, 'sigma_fraction', 0.2),
+                plot=False,
+                margin=(cfg.get('sampling', {}) or {}).get(
+                    'collar_margin', 1.0) or 1.0,
+            )
+            train_data = resample_residual_inplace(
+                train_data, cfg, device,
+                resample_seed=base_seed + segment_start_epoch,
+                cached_residuals=[], run_dir=run_dir,
+                epoch=segment_start_epoch, causal_state=None,
+                collar_info=_seed_collar_info,
+            )
+            ctx.train_data = train_data
+            logger.info(f"  [Segment:{segment_name}] seeded initial collar "
+                        f"collocation (collar_data_ratio={_seed_collar_ratio})")
+
     epoch = segment_start_epoch
     while epoch < total_epochs:
         epoch += 1

@@ -11,34 +11,27 @@ adaptive_pinn:
   enable_gradient_diagnostics: false
   enable_timing: false
   enabled: true
-  epsilon_node_acceptance: 0.0
   expert_type: mlp
   fine_tune:
-    epochs: 15
-    l2sp_lambda: 0.0
-    lr: 0.0001
-    lr_decay_rate: 0.98
-    lr_decay_steps: 1000
-    lr_schedule: none
-    lr_warmup_steps: 0
-    optimizer_1: adam
-    optimizer_2: ssbroyden
-    optimizer_switch_epoch: 5000
-    # ── Single-corrector fine-tune ──
-    # false: joint fine-tune of the full PoU composition (default behaviour).
-    # true : freeze all experts, train one collar corrector c gated by
-    #        χ = 1 - Σ_j ψ̃_j² so u = u_soft + χ·c; interiors stay frozen by
-    #        construction. Reuses epochs / lr / optimizer_* above.
-    single_corrector: false
-    # Corrector network architecture ([in, hidden..., out]); null → experts_architecture.
-    corrector_architecture: null
-    # 'zero' zeros the output layer (composition starts == frozen blend); 'default' uses standard init.
-    corrector_init: zero
-    # Residual sampling for the corrector segment: fraction of residual points
-    # drawn from the collar (χ>0). 1.0 = all residual points in the collar.
+    corrector_architecture:
+    - 2
+    - 20
+    - 20
+    - 20
+    - 20
+    - 1
     corrector_collar_ratio: 1.0
+    corrector_init: zero
+    epochs: 10000
+    lr: 0.0001
+    lr_schedule: none
+    min_epochs: 1
+    optimizer_1: ssbroyden
+    optimizer_2: null
+    optimizer_switch_epoch: 10000
+    single_corrector: true
   initial_train:
-    epochs: 5
+    epochs: 45000
     lr: 0.001
     lr_decay_rate: 0.98
     lr_decay_steps: 1000
@@ -58,8 +51,8 @@ adaptive_pinn:
 allen_cahn:
   D: 0.0001
   adaptive_sampling:
-    adaptive_ratio: 0.5
-    enabled: true
+    adaptive_ratio: 0.3
+    enabled: false
     phi: quadratic
     phi_epsilon: 1.0
     phi_power: 2.0
@@ -95,7 +88,8 @@ allen_cahn:
     update_every: 100
   new_norm_threshold: 0.04
   output_dim: 1
-  pretrained_base_checkpoint: roots_checkpoints\allen_cahn_root.pt
+  pretrained_base_checkpoint: null
+  pretrained_local_expert_checkpoint: roots_checkpoints/allen_cahn_experts.pt
   rwf:
     enabled: false
     mean: 1.0
@@ -165,6 +159,7 @@ burgers1d:
   nu: 0.01
   output_dim: 1
   pretrained_base_checkpoint: null
+  pretrained_local_expert_checkpoint: null
   rwf:
     enabled: false
     mean: 1.0
@@ -186,10 +181,10 @@ burgers1d:
   window_smoothness_order: 2
   window_type: smoothstep
 cuda: true
-epochs: 25
-eval_every: 25
+epochs: 45000
+eval_every: 250
 eval_only: false
-experiment_tag: allen_cahn
+experiment_tag: ac_corr_ssb_sig0p20_deep
 experts_architecture:
 - 2
 - 20
@@ -235,6 +230,7 @@ kdv:
   new_norm_threshold: 0.2
   output_dim: 1
   pretrained_base_checkpoint: null
+  pretrained_local_expert_checkpoint: null
   rwf:
     enabled: false
     mean: 1.0
@@ -247,10 +243,10 @@ kdv:
   - 0.0
   - 1.0
   time_marching:
-    enabled: false
+    enabled: true
     freeze_previous_windows: true
     m_distribution: quadratic
-    num_windows: 5
+    num_windows: 3
   tree_smoothness_threshold: 0.4
   wavelet_threshold: 0.0025
   window_smoothness_order: 3
@@ -298,6 +294,7 @@ ks:
   new_norm_threshold: 10.0
   output_dim: 1
   pretrained_base_checkpoint: null
+  pretrained_local_expert_checkpoint: null
   rwf:
     enabled: false
     mean: 1.0
@@ -310,10 +307,10 @@ ks:
   - 0.0
   - 1.0
   time_marching:
-    enabled: false
+    enabled: true
     freeze_previous_windows: true
     m_distribution: quadratic
-    num_windows: 10
+    num_windows: 5
   tree_smoothness_threshold: 0.3
   wavelet_threshold: 0.04
   window_smoothness_order: 4
@@ -333,22 +330,25 @@ lr_warmup_start_factor: 0.01
 lr_warmup_steps: 0
 min_epochs: 1
 model: AToELeaves
-name: allen_cahn
+name: ac_corr_ssb_sig0p20_deep
 optimizer_1: adam
 optimizer_2: ssbroyden
 optimizer_switch_epoch: 5000
-patience_intervals: 10
-patience_rel_delta: 0.001
+patience_evals: 99999
+patience_rel_delta: 0.01
 precision: float64
-print_every: 25
+print_every: 1000
 problem: allen_cahn
 resume_from: null
 sampling:
+  collar_data_ratio: 0.0
+  collar_margin: 1.0
+  eval_train_ratio: 0.25
   n_boundary_train: 256
   n_initial_train: 256
-  n_residual_train: 2000
-  plot_samples_every: 10
-  resample_every_epochs: 10
+  n_residual_train: 10000
+  plot_samples_every: 1000
+  resample_every_epochs: 500
   sample_volume_ratio: 35
 save_every: 999999
 schrodinger:
@@ -391,6 +391,7 @@ schrodinger:
   new_norm_threshold: 2.0
   output_dim: 2
   pretrained_base_checkpoint: null
+  pretrained_local_expert_checkpoint: null
   rwf:
     enabled: false
     mean: 1.0
