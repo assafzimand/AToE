@@ -39,6 +39,27 @@ KIND_NAMES = {
 # Tolerance for face-neighbor adjacency checks
 ADJACENCY_TOL = 1e-8
 
+# Highest spatial derivative order m appearing in each PDE. Interior
+# interfaces and the periodic seam must transmit the field plus its spatial
+# derivatives up to order m-1 (C^{m-1} continuity) for the local high-order
+# problem to be well posed; value-only Dirichlet under-determines KdV/KS.
+PDE_SPATIAL_ORDER = {
+    'allen_cahn': 2,
+    'burgers1d': 2,
+    'kdv': 3,
+    'ks': 4,
+    'schrodinger': 2,
+}
+
+
+def pde_spatial_order(problem: str) -> int:
+    """Highest spatial derivative order m appearing in the PDE."""
+    if problem not in PDE_SPATIAL_ORDER:
+        raise ValueError(
+            f"No PDE spatial-order mapping for '{problem}' "
+            f"(known: {sorted(PDE_SPATIAL_ORDER)})")
+    return PDE_SPATIAL_ORDER[problem]
+
 
 def _face_counts(cfg: Dict) -> tuple:
     """Resolve (n_ic_per_face, n_bc_per_face) from the sampling config."""

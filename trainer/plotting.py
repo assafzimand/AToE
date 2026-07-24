@@ -158,6 +158,9 @@ def plot_training_curves(
             'residual': '#e74c3c',  # red
             'ic': '#3498db',         # blue
             'bc': '#2ecc71',         # green
+            'bc_dx': '#27ae60',      # darker green — 1st-deriv periodicity
+            'bc_dxx': '#1e8449',     # 2nd-deriv (KdV, KS)
+            'bc_dxxx': '#145a32',    # 3rd-deriv (KS)
             'continuity': '#e67e22', # orange
             'l2sp': '#9b59b6',       # purple
         }
@@ -165,15 +168,21 @@ def plot_training_curves(
             'residual': 'PDE residual',
             'ic': 'Initial condition',
             'bc': 'Boundary condition',
+            'bc_dx': 'BC ∂ₓ periodicity',
+            'bc_dxx': 'BC ∂ₓₓ periodicity',
+            'bc_dxxx': 'BC ∂ₓₓₓ periodicity',
             'continuity': 'Continuity',
             'l2sp': 'L2-SP anchor',
         }
         values_for_log = []
-        for term in ['residual', 'ic', 'bc', 'continuity', 'l2sp']:
+        for term in ['residual', 'ic', 'bc', 'bc_dx', 'bc_dxx', 'bc_dxxx',
+                     'continuity', 'l2sp']:
             if loss_comps.get(term) and len(loss_comps[term]) > 0:
                 values = loss_comps[term]
-                # l2sp is all-zero unless anchoring was enabled — skip then
-                if term == 'l2sp' and not any(v > 0 for v in values):
+                # Skip terms that are all-zero for this run (l2sp when anchoring
+                # is off; bc_d* for Dirichlet problems / PDEs without that order)
+                if (term in ('l2sp', 'bc_dx', 'bc_dxx', 'bc_dxxx')
+                        and not any(v > 0 for v in values)):
                     continue
                 ax.plot(comp_epochs, values, '-',
                         color=term_colors.get(term, 'gray'),
@@ -457,8 +466,14 @@ def plot_per_expert_curves(
         'residual': '#e74c3c',
         'ic': '#3498db',
         'interface_ic': '#9b59b6',
-        'interface_bc': '#f39c12',
-        'bc': '#2ecc71',
+        'interface_bc': '#f39c12',        # amber — interface value match
+        'interface_bc_dx': '#d68910',     # interface ∂ₓ match to root
+        'interface_bc_dxx': '#b9770e',    # interface ∂ₓₓ match (KdV, KS)
+        'interface_bc_dxxx': '#7e5109',   # interface ∂ₓₓₓ match (KS)
+        'bc': '#2ecc71',                  # green — periodic value match
+        'bc_dx': '#27ae60',               # periodic ∂ₓ match
+        'bc_dxx': '#1e8449',              # periodic ∂ₓₓ match (KdV, KS)
+        'bc_dxxx': '#145a32',             # periodic ∂ₓₓₓ match (KS)
         'continuity': '#e67e22',  # orange for continuity term
         'total': '#2c3e50',
     }

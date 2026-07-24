@@ -364,7 +364,16 @@ def _run_corrector_fine_tune(ctx: TrainingContext, fine_tune_cfg: Dict) -> None:
 
     model.build_corrector(device)
     model.corrector_active = True
-    _set_trainable(model, 'corrector')
+    # freeze_experts (default True): the canonical corrector run trains only c,
+    # leaving the experts (and their interiors) untouched. Set false to jointly
+    # train the leaf experts alongside the corrector (base stays frozen).
+    freeze_experts = fine_tune_cfg.get('freeze_experts', True)
+    if freeze_experts:
+        _set_trainable(model, 'corrector')
+    else:
+        logger.info("[Corrector] freeze_experts=false — training leaf experts "
+                    "jointly with the corrector (interiors are NOT protected).")
+        _set_trainable(model, 'corrector_and_experts')
 
     # Focus residual sampling on the collar (χ>0) for this segment only.
     collar_ratio = fine_tune_cfg.get('corrector_collar_ratio', 1.0)
@@ -395,6 +404,8 @@ def _set_trainable(model: nn.Module, which: str, verbose: bool = True) -> int:
       * ``'leaves'``    — all leaf experts trainable, base frozen (Phase 3).
       * ``'corrector'`` — only the collar corrector trainable; base + every
                           expert frozen (single-corrector fine-tune).
+      * ``'corrector_and_experts'`` — corrector + all leaf experts trainable,
+                          base frozen (corrector fine-tune with freeze_experts=false).
 
     Frozen params still participate in the forward composition; only the
     optimizer (which filters on ``requires_grad``) skips them. Returns the
@@ -432,6 +443,20 @@ def _set_trainable(model: nn.Module, which: str, verbose: bool = True) -> int:
                 raise ValueError("_set_trainable('corrector'): model has no "
                                  "corrector built — call build_corrector first.")
             trainable_details.append("base_model + all experts: FROZEN")
+            for p in corrector.parameters():
+                p.requires_grad = True
+            trainable_details.append("  corrector: TRAINABLE")
+        elif which == 'corrector_and_experts':
+            corrector = getattr(model, 'corrector', None)
+            if corrector is None:
+                raise ValueError("_set_trainable('corrector_and_experts'): model "
+                                 "has no corrector built — call build_corrector first.")
+            experts = getattr(model, 'experts', [])
+            trainable_details.append("base_model: FROZEN")
+            for idx, expert in enumerate(experts):
+                for p in expert.parameters():
+                    p.requires_grad = True
+                trainable_details.append(f"  expert[{idx}]: TRAINABLE")
             for p in corrector.parameters():
                 p.requires_grad = True
             trainable_details.append("  corrector: TRAINABLE")

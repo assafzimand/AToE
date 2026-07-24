@@ -137,9 +137,12 @@ def _run_split_segment(
     orig_train_data = ctx.train_data
     orig_train_loader = ctx.train_loader
 
-    # Build split loss with original loss as fallback for eval batches
+    # Build split loss with original loss as fallback for eval batches.
+    # interface_model (frozen base/root) supplies the interior-interface
+    # derivative targets matched in the interface_bc term.
     split_loss = build_split_loss(
         model, cfg, orig_loss_fn=orig_loss_fn,
+        interface_model=interface_model,
     )
 
     # Swap to split data/loss

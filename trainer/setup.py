@@ -995,21 +995,23 @@ def _setup_training(
 
     best_rel_l2 = float('inf')
     best_checkpoint_path = None
-    # Patience counts consecutive RESAMPLE INTERVALS in which the train loss
-    # failed to improve by patience_rel_delta (start-vs-end of each interval,
-    # where the point set is fixed and losses are comparable). Preferred key:
-    # patience_intervals. Legacy patience_epochs / patience_evals configs are
-    # converted to an equivalent interval count in the epoch loop.
+    # Patience counts consecutive EVALS (every eval_every) in which rel-L2
+    # failed to beat the best-so-far by at least patience_rel_delta. Preferred
+    # key: patience_evals (X). A legacy patience_epochs / patience_intervals
+    # config is converted to an equivalent eval count.
     patience_intervals = cfg.get('patience_intervals')
-    if 'patience_epochs' in cfg:
-        patience_epochs = cfg['patience_epochs']
-    elif 'patience_evals' in cfg:
-        patience_epochs = cfg['patience_evals'] * max(1, cfg['eval_every'])
+    _eval_every = max(1, cfg['eval_every'])
+    if 'patience_evals' in cfg:
+        patience_evals = cfg['patience_evals']
+    elif 'patience_epochs' in cfg:
+        patience_evals = max(1, round(cfg['patience_epochs'] / _eval_every))
     else:
-        patience_epochs = 0
+        patience_evals = 0
+    # patience_epochs kept for backward-compatible ctx wiring / logging.
+    patience_epochs = cfg.get('patience_epochs', patience_evals * _eval_every)
     min_epochs = cfg['min_epochs']
     # Relative-improvement threshold for the plateau test: an eval only counts as
-    # an improvement if it beats the anchored best by at least this fraction.
+    # an improvement if it beats the best-so-far rel-L2 by at least this fraction.
     patience_rel_delta = cfg.get('patience_rel_delta', 0.0)
 
     # LRA: adaptive loss component weighting (read from per-problem config)
@@ -1185,17 +1187,11 @@ def _setup_training(
     else:
         logger.info(f"  Optimizer: {opt1_name}")
     
-    # Early stopping
-    _pat_active = (patience_intervals if patience_intervals is not None
-                   else patience_epochs)
-    if _pat_active and _pat_active > 0:
-        if patience_intervals is not None:
-            logger.info(f"  Early stopping: enabled ({patience_intervals} consecutive "
-                        f"flat resample intervals on train loss, min_epochs={min_epochs})")
-        else:
-            logger.info(f"  Early stopping: enabled (legacy patience_epochs="
-                        f"{patience_epochs} — converted to resample intervals, "
-                        f"min_epochs={min_epochs})")
+    # Early stopping (rel-L2 plateau over consecutive evals)
+    if patience_evals and patience_evals > 0:
+        logger.info(f"  Early stopping: enabled ({patience_evals} consecutive evals "
+                    f"without >{patience_rel_delta:.1%} rel-L2 improvement over best, "
+                    f"eval_every={_eval_every}, min_epochs={min_epochs})")
     else:
         logger.info(f"  Early stopping: disabled")
     
@@ -1252,6 +1248,7 @@ def _setup_training(
         metrics=metrics,
         best_rel_l2=best_rel_l2,
         best_checkpoint_path=best_checkpoint_path,
+        patience_evals=patience_evals,
         patience_epochs=patience_epochs,
         patience_intervals=patience_intervals,
         min_epochs=min_epochs,

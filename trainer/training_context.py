@@ -82,10 +82,12 @@ class TrainingContext:
     metrics: Dict = field(default_factory=dict)
     best_rel_l2: float = float('inf')
     best_checkpoint_path: Any = None
-    # Patience: consecutive resample intervals without a patience_rel_delta
-    # train-loss improvement (start-vs-end within each interval). The legacy
-    # patience_epochs value is converted to intervals in the epoch loop when
-    # patience_intervals is None.
+    # Patience: consecutive EVALS (every eval_every) in which the rel-L2 metric
+    # failed to beat the best-so-far by at least patience_rel_delta. On an
+    # optimizer_1 plateau the epoch loop fast-forwards to the switch; on an
+    # optimizer_2 / no-switch plateau it stops the segment. patience_epochs /
+    # patience_intervals are retained for backward-compatible config parsing.
+    patience_evals: int = 0
     patience_intervals: Any = None
     patience_epochs: int = 0
     min_epochs: int = 0

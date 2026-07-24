@@ -26,7 +26,7 @@ import importlib
 from typing import Dict, Callable
 from adaptive.subdomain_data import (
     KIND_RESIDUAL, KIND_IC_TRUE, KIND_INTERFACE, KIND_INTERFACE_BC, KIND_BC_TRUE,
-    KIND_CONTINUITY,
+    KIND_CONTINUITY, pde_spatial_order,
 )
 from utils.logging_config import get_logger
 
@@ -37,12 +37,19 @@ logger = get_logger(__name__)
 # matching the global losses) instead of Dirichlet matching to h_gt.
 PERIODIC_PROBLEMS = frozenset({'allen_cahn', 'schrodinger', 'kdv', 'ks'})
 
+# Suffixes for the per-order spatial-derivative loss components recorded as
+# their own lines in metrics/plots: order 1 -> _dx, 2 -> _dxx, 3 -> _dxxx.
+# These are display/metric breakdowns only; the value+derivatives are already
+# summed into the aggregate 'interface_bc' / 'bc' terms that enter 'total'.
+_DERIV_SUFFIX = ['_dx', '_dxx', '_dxxx']
+
 
 def build_split_loss(
     model,
     cfg: Dict,
     *,
     orig_loss_fn: Callable = None,
+    interface_model=None,
 ) -> Callable:
     """Build a split loss for per-expert subdomain training.
 
@@ -52,6 +59,12 @@ def build_split_loss(
     If ``orig_loss_fn`` is provided, batches missing split-specific
     keys (expert_id, kind) will fall back to the original loss
     (used for eval batches).
+
+    ``interface_model`` is the frozen root used to supply interior-interface
+    targets (same object passed to the data builder). Its spatial derivatives
+    up to order m-1 are matched at interface points, on the fly, so the local
+    high-order problem is well posed (value-only under-determines KdV/KS).
+    Defaults to the model's own base, which is frozen during split training.
     """
     problem = cfg['problem']
     pc = cfg[problem]
@@ -60,6 +73,9 @@ def build_split_loss(
     w_ic = loss_weights['ic']
     w_bc = loss_weights['bc']
     w_cont = loss_weights.get('continuity', 1.0)
+
+    iface_src = interface_model if interface_model is not None else getattr(
+        model, 'base_model', None)
 
     # Periodic PDEs use cross-expert BC pairing, so skip Dirichlet-to-zero
     is_periodic = problem in PERIODIC_PROBLEMS
@@ -126,6 +142,7 @@ def build_split_loss(
                 kinds[emask],
                 w_res, w_ic, w_bc, is_periodic,
                 device,
+                problem, iface_src,
                 residual_loss=residual_losses.get(eidx),
             )
             total_loss = total_loss + comps['total']
@@ -137,7 +154,7 @@ def build_split_loss(
         if is_periodic and bc_face_ids is not None:
             bc_loss_contrib, bc_per_expert = _compute_periodic_bc_loss(
                 model, x, t, expert_ids, kinds,
-                bc_face_ids, device,
+                bc_face_ids, device, problem,
             )
             if bc_loss_contrib.item() > 0:
                 logger.debug(
@@ -145,17 +162,18 @@ def build_split_loss(
                     f"{bc_loss_contrib.item():.6e}"
                 )
             total_loss = total_loss + w_bc * bc_loss_contrib
-            # Surface the pairing term in the per-expert history/plots:
-            # fold each expert's share into the 'bc' entry recorded above
-            # (raw value, like the other components; weights live in 'total').
-            for eidx, bc_val in bc_per_expert.items():
+            # Surface the pairing term in the per-expert history/plots: fold
+            # each expert's per-order share ({'bc', 'bc_dx', ...}) into the
+            # entries recorded above (raw values; weights live in 'total').
+            for eidx, contrib in bc_per_expert.items():
                 hist = per_expert_history.get(eidx)
-                if hist is not None and hist['bc']:
-                    hist['bc'][-1] += bc_val
-                if return_components and eidx in all_comps:
-                    all_comps[eidx]['bc'] = (
-                        all_comps[eidx]['bc'] + bc_val
-                    )
+                for key, val in contrib.items():
+                    if hist is not None and hist.get(key):
+                        hist[key][-1] += val
+                    if return_components and eidx in all_comps:
+                        all_comps[eidx][key] = (
+                            all_comps[eidx].get(key, 0.0) + val
+                        )
 
         # ── Continuity loss: neighbor-to-neighbor on shared interior faces ──
         # Skipped entirely (not computed, not recorded/plotted) when its
@@ -258,10 +276,12 @@ def _compute_all_residual_losses(
 def _compute_expert_loss(
     model, expert_idx, x, t, h_gt, kinds,
     w_res, w_ic, w_bc, is_periodic, device,
+    problem, interface_model,
     residual_loss=None,
 ):
     """Per-expert local loss (no PoU). Residual is supplied precomputed."""
     z = torch.tensor(0.0, device=device)
+    n_deriv = pde_spatial_order(problem) - 1
     comps = {
         'residual': residual_loss if residual_loss is not None else z.clone(),
         'ic': z.clone(),
@@ -269,6 +289,13 @@ def _compute_expert_loss(
         'interface_bc': z.clone(),
         'bc': z.clone(),
     }
+    # Per-order derivative breakdown lines (kept at 0 when a term is absent so
+    # every expert records the same keys each step — the periodic BC pairing
+    # fills the 'bc_*' entries afterwards for edge experts).
+    for s in _DERIV_SUFFIX[:n_deriv]:
+        comps['interface_bc' + s] = z.clone()
+        if is_periodic:
+            comps['bc' + s] = z.clone()
 
     # ── IC true (real t=0) ──
     ic_mask = (kinds == KIND_IC_TRUE)
@@ -297,17 +324,30 @@ def _compute_expert_loss(
         )
 
     # ── Interface BC (x-face interior boundary → w_bc) ──
+    # Transmit the frozen root's field AND its spatial derivatives up to order
+    # m-1 (C^{m-1} continuity). Value-only Dirichlet under-determines high-order
+    # operators at interior interfaces (KdV/KS launch a spurious dispersive
+    # mode); this is the well-posedness fix. The root value target is the minted
+    # h_gt; its derivatives are computed on the fly from the frozen
+    # interface_model at the same points (few points, negligible cost).
     ifm_bc = (kinds == KIND_INTERFACE_BC)
     if ifm_bc.sum() > 0:
-        xt_if_bc = torch.cat(
-            [x[ifm_bc], t[ifm_bc]], dim=1
-        )
+        x_bc = x[ifm_bc].clone().detach().requires_grad_(True)
+        t_bc = t[ifm_bc]
         u_if_bc = model.forward_single_expert(
-            expert_idx, xt_if_bc
+            expert_idx, torch.cat([x_bc, t_bc], dim=1)
         )
-        comps['interface_bc'] = torch.mean(
-            (u_if_bc - h_gt[ifm_bc]) ** 2
-        )
+        interface_bc = torch.mean((u_if_bc - h_gt[ifm_bc]) ** 2)
+        if n_deriv >= 1 and interface_model is not None:
+            expert_dx = _consecutive_x_derivatives(u_if_bc, x_bc, n_deriv)
+            x_root = x[ifm_bc].clone().detach().requires_grad_(True)
+            u_root = interface_model(torch.cat([x_root, t_bc], dim=1))
+            root_dx = _consecutive_x_derivatives(u_root, x_root, n_deriv)
+            for o, (d_expert, d_root) in enumerate(zip(expert_dx, root_dx)):
+                term = torch.mean((d_expert - d_root.detach()) ** 2)
+                comps['interface_bc' + _DERIV_SUFFIX[o]] = term  # display line
+                interface_bc = interface_bc + term               # into 'total'
+        comps['interface_bc'] = interface_bc
 
     # ── BC true: Dirichlet (periodic PDEs instead use batch-level pairing) ──
     bc_mask = (kinds == KIND_BC_TRUE)
@@ -331,22 +371,23 @@ def _compute_expert_loss(
 
 
 def _compute_periodic_bc_loss(
-    model, x, t, expert_ids, kinds, bc_face_ids, device,
+    model, x, t, expert_ids, kinds, bc_face_ids, device, problem,
 ):
     """Compute periodic BC loss via cross-expert pairing.
 
     Pairs left/right global-boundary points by sorting on t-value and
-    penalizes (u_left - u_right)² + (∂u/∂x_left - ∂u/∂x_right)², summed
-    over all output components (e.g. real+imag for Schrodinger). This
-    matches the value + first-derivative periodicity enforced by the
-    global losses.
+    penalizes the mismatch of the field and its spatial derivatives up to
+    order m-1 (C^{m-1} periodicity, m = highest spatial order of the PDE),
+    summed over all output components (e.g. real+imag for Schrodinger). For
+    the 2nd-order PDEs this is value + u_x; KdV adds u_xx, KS adds u_xx + u_xxx.
 
     Returns:
         (loss, per_expert): total pairing loss (scalar tensor) and a dict
-        mapping expert_idx -> float contribution (pair losses split
-        equally between the two experts, same normalization as ``loss``).
+        mapping expert_idx -> {'bc': value_share, 'bc_dx': …, …} per-order
+        contributions (pair losses split equally between the two experts,
+        same normalization as ``loss``).
     """
-    per_expert: Dict[int, float] = {}
+    per_expert: Dict[int, Dict[str, float]] = {}
     bc_mask = (kinds == KIND_BC_TRUE)
     if bc_mask.sum() == 0:
         return torch.tensor(0.0, device=device), per_expert
@@ -431,44 +472,50 @@ def _compute_periodic_bc_loss(
             u_l_full = model.forward_single_expert(eid_l, xt_l)
             u_r_full = model.forward_single_expert(eid_r, xt_r)
 
-            # Periodic penalty per output component: value + first
-            # spatial derivative mismatch (vectorized sum)
-            pair_loss = torch.tensor(0.0, device=device)
+            # Periodic penalty per output component: value + spatial
+            # derivatives up to order m-1 (C^{m-1} periodicity). order_terms[0]
+            # is the value mismatch, order_terms[k] the k-th derivative — kept
+            # separate so each order is a recorded 'bc'/'bc_dx'/… line.
+            n_deriv = pde_spatial_order(problem) - 1
+            order_terms = [torch.tensor(0.0, device=device)
+                           for _ in range(n_deriv + 1)]
             for c in range(u_l_full.shape[1]):
-                u_l = u_l_full[:, c]
-                u_r = u_r_full[:, c]
+                cur_l = u_l_full[:, c]
+                cur_r = u_r_full[:, c]
+                order_terms[0] = order_terms[0] + torch.sum((cur_l - cur_r) ** 2)
+                for o in range(1, n_deriv + 1):
+                    cur_l = torch.autograd.grad(
+                        cur_l, x_l_batch,
+                        grad_outputs=torch.ones_like(cur_l),
+                        create_graph=True, retain_graph=True,
+                    )[0][:, d]
+                    cur_r = torch.autograd.grad(
+                        cur_r, x_r_batch,
+                        grad_outputs=torch.ones_like(cur_r),
+                        create_graph=True, retain_graph=True,
+                    )[0][:, d]
+                    order_terms[o] = order_terms[o] + torch.sum(
+                        (cur_l - cur_r) ** 2)
 
-                # Batched spatial derivative computation
-                ux_l = torch.autograd.grad(
-                    u_l, x_l_batch,
-                    grad_outputs=torch.ones_like(u_l),
-                    create_graph=True, retain_graph=True,
-                )[0][:, d]
-
-                ux_r = torch.autograd.grad(
-                    u_r, x_r_batch,
-                    grad_outputs=torch.ones_like(u_r),
-                    create_graph=True, retain_graph=True,
-                )[0][:, d]
-
-                pair_loss = (
-                    pair_loss
-                    + torch.sum((u_l - u_r) ** 2)
-                    + torch.sum((ux_l - ux_r) ** 2)
-                )
-
+            pair_loss = order_terms[0]
+            for term in order_terms[1:]:
+                pair_loss = pair_loss + term
             total_bc_loss = total_bc_loss + pair_loss
             n_pairs += pair_mask.sum().item()
 
-            # Attribute the pair loss equally to both experts
-            half = pair_loss.item() / 2
-            per_expert[int(eid_l)] = per_expert.get(int(eid_l), 0.0) + half
-            per_expert[int(eid_r)] = per_expert.get(int(eid_r), 0.0) + half
+            # Attribute each order's share equally to both experts
+            for o, term in enumerate(order_terms):
+                key = 'bc' if o == 0 else 'bc' + _DERIV_SUFFIX[o - 1]
+                half = term.item() / 2
+                for eid in (int(eid_l), int(eid_r)):
+                    contrib = per_expert.setdefault(eid, {})
+                    contrib[key] = contrib.get(key, 0.0) + half
 
     if n_pairs > 0:
         # Same normalization for total and per-expert shares
         for eidx in per_expert:
-            per_expert[eidx] /= n_pairs
+            for key in per_expert[eidx]:
+                per_expert[eidx][key] /= n_pairs
         return total_bc_loss / n_pairs, per_expert
     return torch.tensor(0.0, device=device), per_expert
 
@@ -481,12 +528,15 @@ def _record(history, expert_idx, comps):
                 'interface_bc', 'bc', 'total', 'continuity',
             ]
         }
-    for k in history[expert_idx]:
-        if k in comps:
-            val = comps[k]
-            history[expert_idx][k].append(
-                val.item() if torch.is_tensor(val) else val
-            )
+    hist = history[expert_idx]
+    # Length to align against (any always-present base key works).
+    ref_len = len(hist['total'])
+    for k, val in comps.items():
+        lst = hist.setdefault(k, [])
+        # Backfill a newly-seen derivative key so it lines up with the rest.
+        while len(lst) < ref_len:
+            lst.append(0.0)
+        lst.append(val.item() if torch.is_tensor(val) else val)
 
 
 def _record_continuity(history, expert_idx, cont_val):
@@ -530,7 +580,7 @@ def _compute_continuity_loss(
     neighbor_cont = cont_neighbors[cont_mask]
     dim_cont = cont_dims[cont_mask]
 
-    pde_order = _pde_spatial_order(problem)
+    pde_order = pde_spatial_order(problem)
 
     total_loss = torch.tensor(0.0, device=device)
     cont_per_expert = {}
@@ -603,22 +653,30 @@ def _compute_continuity_loss(
     return total_loss, cont_per_expert
 
 
-# Highest spatial derivative order per PDE (drives continuity matching depth).
-_PDE_SPATIAL_ORDER = {
-    'allen_cahn': 2,
-    'burgers1d': 2,
-    'kdv': 3,
-    'ks': 4,
-    'schrodinger': 2,
-}
+def _consecutive_x_derivatives(u, x, n_orders, dim=0):
+    """Spatial derivatives [∂u/∂x, ∂²u/∂x², …, ∂ⁿu/∂xⁿ] up to ``n_orders``.
 
-
-def _pde_spatial_order(problem: str) -> int:
-    if problem not in _PDE_SPATIAL_ORDER:
-        raise ValueError(
-            f"split loss has no PDE order mapping for '{problem}' "
-            f"(known: {sorted(_PDE_SPATIAL_ORDER)})")
-    return _PDE_SPATIAL_ORDER[problem]
+    Each element is shaped like ``u`` (N, C), differentiated along spatial
+    dimension ``dim``. ``x`` must be the leaf tensor (requires_grad=True) that
+    ``u`` was computed from. ``create_graph=True`` keeps the results
+    differentiable, so the expert-side derivatives backprop and the next
+    higher order can be taken. Handles multi-component fields (e.g. the
+    real/imag pair of Schrödinger) via the per-component loop.
+    """
+    out = []
+    cur = u
+    for _ in range(n_orders):
+        cols = []
+        for c in range(cur.shape[1]):
+            g = torch.autograd.grad(
+                cur[:, c], x,
+                grad_outputs=torch.ones_like(cur[:, c]),
+                create_graph=True, retain_graph=True,
+            )[0][:, dim]
+            cols.append(g)
+        cur = torch.stack(cols, dim=1)
+        out.append(cur)
+    return out
 
 
 def _import_pde_helpers(problem: str):

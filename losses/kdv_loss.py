@@ -230,9 +230,10 @@ def build_loss(**cfg) -> Callable:
 
         # ============================================================
         # MSE_b: Boundary Condition Loss (Periodic)
-        # h(-1,t) = h(1,t) and h_x(-1,t) = h_x(1,t)
+        # h(-1,t) = h(1,t), h_x(-1,t) = h_x(1,t), h_xx(-1,t) = h_xx(1,t)
         # Skipped when periodic Fourier embedding is active (use_bc=False).
         # ============================================================
+        bc_terms = {}  # per-order breakdown for return_components (bc_dx, bc_dxx)
         if use_bc and masks['BC'].sum() > 0:
             x_b = x[masks['BC']].contiguous()  # (N_b, spatial_dim)
             t_b = t[masks['BC']].contiguous()  # (N_b, 1)
@@ -269,9 +270,13 @@ def build_loss(**cfg) -> Callable:
             h_stacked = h_pred_stacked[:, 0]
 
             if _t: _t.start('loss.bc.derivatives')
-            h_b_scalar = h_stacked
             h_x_stacked = torch.autograd.grad(
-                h_b_scalar.sum(), x_stacked, create_graph=True, retain_graph=True
+                h_stacked.sum(), x_stacked, create_graph=True, retain_graph=True
+            )[0].squeeze(-1)
+            # KdV is 3rd order → periodicity requires matching the field and
+            # its spatial derivatives up to 2nd order (C² across the seam).
+            h_xx_stacked = torch.autograd.grad(
+                h_x_stacked.sum(), x_stacked, create_graph=True, retain_graph=True
             )[0].squeeze(-1)
             if _t: _t.stop('loss.bc.derivatives')
 
@@ -279,6 +284,8 @@ def build_loss(**cfg) -> Callable:
             h_right = h_stacked[n_left:]
             h_x_left = h_x_stacked[:n_left]
             h_x_right = h_x_stacked[n_left:]
+            h_xx_left = h_xx_stacked[:n_left]
+            h_xx_right = h_xx_stacked[n_left:]
 
             if n_left == 0 or n_right == 0:
                 if not for_tree_spawning:
@@ -296,11 +303,14 @@ def build_loss(**cfg) -> Callable:
                 h_right_sorted = h_right[sort_right[:n_pairs]]
                 h_x_left_sorted = h_x_left[sort_left[:n_pairs]]
                 h_x_right_sorted = h_x_right[sort_right[:n_pairs]]
+                h_xx_left_sorted = h_xx_left[sort_left[:n_pairs]]
+                h_xx_right_sorted = h_xx_right[sort_right[:n_pairs]]
 
                 bc_value_diff = (h_left_sorted - h_right_sorted) ** 2
                 bc_deriv_diff = (h_x_left_sorted - h_x_right_sorted) ** 2
+                bc_deriv2_diff = (h_xx_left_sorted - h_xx_right_sorted) ** 2
 
-                bc_paired_loss = bc_value_diff + bc_deriv_diff
+                bc_paired_loss = bc_value_diff + bc_deriv_diff + bc_deriv2_diff
 
                 if for_tree_spawning:
                     bc_mask_indices = torch.where(masks['BC'])[0]
@@ -315,7 +325,10 @@ def build_loss(**cfg) -> Callable:
                 else:
                     mse_value = torch.mean(bc_value_diff)
                     mse_derivative = torch.mean(bc_deriv_diff)
-                    mse_bc = mse_value + mse_derivative
+                    mse_derivative2 = torch.mean(bc_deriv2_diff)
+                    mse_bc = mse_value + mse_derivative + mse_derivative2
+                    bc_terms = {'bc_dx': mse_derivative,
+                                'bc_dxx': mse_derivative2}
         else:
             if not for_tree_spawning:
                 mse_bc = torch.tensor(0.0, device=device)
@@ -334,6 +347,7 @@ def build_loss(**cfg) -> Callable:
             total_loss = weight_residual * mse_residual + weight_ic * mse_ic
             if use_bc:
                 comps['bc'] = mse_bc
+                comps.update(bc_terms)  # bc_dx, bc_dxx breakdown lines
                 total_loss = total_loss + weight_bc * mse_bc
             comps['total'] = total_loss
             return comps

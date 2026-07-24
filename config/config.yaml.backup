@@ -13,18 +13,26 @@ adaptive_pinn:
   enabled: true
   expert_type: mlp
   fine_tune:
-    corrector_architecture: null
+    corrector_architecture:
+    - 2
+    - 20
+    - 20
+    - 20
+    - 20
+    - 1
     corrector_collar_ratio: 1.0
     corrector_init: zero
-    epochs: 5000
-    freeze_experts: false
+    epochs: 10000
     lr: 0.0001
     lr_schedule: none
     min_epochs: 1
     optimizer_1: ssbroyden
     optimizer_2: null
-    optimizer_switch_epoch: 5000
+    optimizer_switch_epoch: 10000
     single_corrector: true
+    # Corrector fine-tune only: freeze the leaf experts (true, default) or train
+    # them jointly with the corrector (false). Ignored when single_corrector is false.
+    freeze_experts: true
   initial_train:
     epochs: 45000
     lr: 0.001
@@ -179,7 +187,7 @@ cuda: true
 epochs: 45000
 eval_every: 250
 eval_only: false
-experiment_tag: ac_corr_unfrozen_sig0p20
+experiment_tag: ac_corr_ssb_sig0p20_deep
 experts_architecture:
 - 2
 - 20
@@ -325,11 +333,11 @@ lr_warmup_start_factor: 0.01
 lr_warmup_steps: 0
 min_epochs: 1
 model: AToELeaves
-name: ac_corr_unfrozen_sig0p20
+name: ac_corr_ssb_sig0p20_deep
 optimizer_1: adam
 optimizer_2: ssbroyden
 optimizer_switch_epoch: 5000
-patience_evals: 5
+patience_evals: 99999
 patience_rel_delta: 0.01
 precision: float64
 print_every: 1000
@@ -343,7 +351,7 @@ sampling:
   n_initial_train: 256
   n_residual_train: 10000
   plot_samples_every: 1000
-  resample_every_epochs: 1000
+  resample_every_epochs: 500
   sample_volume_ratio: 35
 save_every: 999999
 schrodinger:
