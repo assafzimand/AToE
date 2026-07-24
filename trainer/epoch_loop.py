@@ -246,19 +246,24 @@ def _train_segment(
         _split_loss_fn = loss_fn if hasattr(loss_fn, '_residual_cache') else None
 
         # Resample training data periodically (in-memory, no disk I/O).
-        # The cadence applies to ALL optimizers, full-batch quasi-Newton
-        # included: the SSBroyden-for-PINNs literature refreshes the sampled
-        # points every ~500 iterations DURING BFGS/SSBroyden training and
-        # warm-starts the optimizer across the refresh (Urbán et al. JCP
-        # 2025: "We refresh the randomly sampled training points every 500
-        # iterations ... avoiding overfitting"; the Kiyani et al. 2025
-        # official code carries hess_inv across RAD resamples). Keeping the
-        # points fixed lets full-batch optimizers memorize the collocation
-        # set (train residual → 1e-15 while the solver-grid residual stalls
-        # orders of magnitude higher and rel-L2 drifts up).
+        # The cadence is optimizer-dependent. Adam/SOAP (stochastic mini-batch)
+        # resample EVERY epoch: refreshing the collocation each step avoids
+        # overfitting the sampled set. The full-batch quasi-Newton optimizers
+        # (LBFGS, SSBroyden) warm-start their curvature state across steps, so
+        # they refresh only every `resample_every` epochs — as in the
+        # SSBroyden-for-PINNs literature: Urbán et al. (JCP 2025) refresh the
+        # sampled points every ~500 iterations and warm-start across the
+        # refresh, and the Kiyani et al. 2025 official code carries hess_inv
+        # across RAD resamples. `resample_every <= 0` disables resampling for
+        # every optimizer. This applies in all segments (initial train, the
+        # phase-3 split, and fine-tune); the optimizer_1 -> optimizer_2 switch
+        # flips the cadence mid-segment along with current_optimizer_name.
+        _effective_resample_every = (
+            1 if current_optimizer_name in ('Adam', 'SOAP') else resample_every)
         _resampled_this_epoch = False
         _split_ctx = getattr(ctx, '_split_context', None)
-        if resample_every > 0 and epoch > 1 and (epoch - 1) % resample_every == 0:
+        if (resample_every > 0
+                and epoch > 1 and (epoch - 1) % _effective_resample_every == 0):
             resample_seed = base_seed + epoch
             _resampled_this_epoch = True
             # Collar sampling (phase 3 + fine-tune only, i.e. whenever leaf
@@ -381,13 +386,14 @@ def _train_segment(
 
         # ── Arm residual caching for THIS epoch (consumed at the NEXT
         # resample). Must run AFTER the resample block: arming clears the
-        # cache, and with resample_every == 1 the arming epoch and the
-        # consuming epoch coincide — arming first would wipe the cache the
-        # resample is about to use.
+        # cache, and with _effective_resample_every == 1 (Adam/SOAP) the arming
+        # epoch and the consuming epoch coincide — arming first would wipe the
+        # cache the resample is about to use. Uses the same optimizer-dependent
+        # cadence as the resample gate above so caching tracks it exactly.
         will_cache_for_resample = (
             adaptive_sampling_enabled
             and resample_every > 0
-            and epoch > 0 and epoch % resample_every == 0
+            and epoch > 0 and epoch % _effective_resample_every == 0
         )
         # Cache residuals for the diagnostic heatmap even when adaptive sampling is
         # off. Cadence is controlled by sampling.plot_samples_every (independent of
@@ -418,7 +424,7 @@ def _train_segment(
             _split_loss_fn is not None
             and adaptive_sampling_enabled
             and resample_every > 0
-            and epoch > 0 and epoch % resample_every == 0
+            and epoch > 0 and epoch % _effective_resample_every == 0
         )
         if _split_loss_fn is not None:
             _cache_split_now = _will_cache_split or _will_cache_split_resample

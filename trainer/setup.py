@@ -1172,9 +1172,9 @@ def _setup_training(
     if resample_every > 0:
         if adaptive_sampling_enabled:
             as_ratio = adaptive_sampling_cfg['adaptive_ratio']
-            logger.info(f"  Resampling: every {resample_every} epochs (adaptive: enabled, ratio={as_ratio})")
+            logger.info(f"  Resampling: every epoch under Adam/SOAP, every {resample_every} epochs under LBFGS/SSBroyden (adaptive: enabled, ratio={as_ratio})")
         else:
-            logger.info(f"  Resampling: every {resample_every} epochs (adaptive: disabled)")
+            logger.info(f"  Resampling: every epoch under Adam/SOAP, every {resample_every} epochs under LBFGS/SSBroyden (adaptive: disabled)")
     else:
         logger.info(f"  Resampling: disabled")
     
