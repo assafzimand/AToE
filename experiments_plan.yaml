@@ -15,7 +15,7 @@ base_config:
     expert_type: mlp
     fine_tune: null
     initial_train:
-      epochs: 45000
+      epochs: 41000
       lr: 0.001
       lr_decay_rate: 0.98
       lr_decay_steps: 1000
@@ -23,7 +23,7 @@ base_config:
       lr_warmup_steps: 0
       optimizer_1: adam
       optimizer_2: ssbroyden
-      optimizer_switch_epoch: 5000
+      optimizer_switch_epoch: 1000
     max_experts: 150
     sigma_fraction: 0.03
     split_icbc:
@@ -72,7 +72,7 @@ base_config:
       update_every: 100
     new_norm_threshold: 0.04
     output_dim: 1
-    pretrained_base_checkpoint: roots_checkpoints/allen_cahn_root.pt
+    pretrained_base_checkpoint: null
     pretrained_local_expert_checkpoint: null
     rwf:
       enabled: false
@@ -158,7 +158,7 @@ base_config:
     window_smoothness_order: 2
     window_type: smoothstep
   cuda: true
-  epochs: 45000
+  epochs: 41000
   eval_every: 1000
   eval_only: false
   kdv:
@@ -302,7 +302,7 @@ base_config:
   model: AToELeaves
   optimizer_1: adam
   optimizer_2: ssbroyden
-  optimizer_switch_epoch: 5000
+  optimizer_switch_epoch: 1000
   patience_evals: 5
   patience_rel_delta: 0.01
   precision: float64
@@ -315,9 +315,9 @@ base_config:
     eval_train_ratio: 0.25
     n_boundary_train: 256
     n_initial_train: 256
-    n_residual_train: 10000
+    n_residual_train: 20000
     plot_samples_every: 1000
-    resample_every_epochs: 1000
+    resample_every_epochs: 99999
     sample_volume_ratio: 35
   save_every: 999999
   schrodinger:
@@ -391,27 +391,11 @@ base_config:
   ssbroyden:
     lr: 1.0
     tolerance_grad: 1.0e-10
-experiment_name: allen_cahn_corrector_unfrozen_experts
+experiment_name: ac_burgers_schrodinger_experts_creation
 experiments:
-- adaptive_pinn:
-    M_experts_num: 8
-    fine_tune:
-      corrector_architecture: null
-      corrector_collar_ratio: 1.0
-      corrector_init: zero
-      epochs: 5000
-      freeze_experts: false
-      lr: 0.0001
-      lr_schedule: none
-      min_epochs: 1
-      optimizer_1: ssbroyden
-      optimizer_2: null
-      optimizer_switch_epoch: 5000
-      single_corrector: true
-    sigma_fraction: 0.2
-  allen_cahn:
-    pretrained_base_checkpoint: null
-    pretrained_local_expert_checkpoint: roots_checkpoints/allen_cahn_experts.pt
+- name: allen_cahn
+  problem: allen_cahn
+  model: AToELeaves
   base_architecture:
   - 2
   - 60
@@ -419,35 +403,15 @@ experiments:
   - 60
   - 60
   - 1
-  eval_every: 250
   experts_architecture:
   - 2
   - 20
   - 20
   - 20
   - 1
+- name: burgers1d
+  problem: burgers1d
   model: AToELeaves
-  name: ac_corr_unfrozen_sig0p20
-  problem: allen_cahn
-- adaptive_pinn:
-    M_experts_num: 8
-    fine_tune:
-      corrector_architecture: null
-      corrector_collar_ratio: 1.0
-      corrector_init: zero
-      epochs: 5000
-      freeze_experts: false
-      lr: 0.0001
-      lr_schedule: none
-      min_epochs: 1
-      optimizer_1: ssbroyden
-      optimizer_2: null
-      optimizer_switch_epoch: 5000
-      single_corrector: true
-    sigma_fraction: 0.1
-  allen_cahn:
-    pretrained_base_checkpoint: null
-    pretrained_local_expert_checkpoint: roots_checkpoints/allen_cahn_experts.pt
   base_architecture:
   - 2
   - 60
@@ -455,85 +419,25 @@ experiments:
   - 60
   - 60
   - 1
-  eval_every: 250
   experts_architecture:
   - 2
   - 20
   - 20
   - 20
   - 1
+- name: schrodinger
+  problem: schrodinger
   model: AToELeaves
-  name: ac_corr_unfrozen_sig0p10
-  problem: allen_cahn
-- adaptive_pinn:
-    M_experts_num: 8
-    fine_tune:
-      corrector_architecture: null
-      corrector_collar_ratio: 1.0
-      corrector_init: zero
-      epochs: 5000
-      freeze_experts: false
-      lr: 0.0001
-      lr_schedule: none
-      min_epochs: 1
-      optimizer_1: ssbroyden
-      optimizer_2: null
-      optimizer_switch_epoch: 5000
-      single_corrector: true
-    sigma_fraction: 0.05
-  allen_cahn:
-    pretrained_base_checkpoint: null
-    pretrained_local_expert_checkpoint: roots_checkpoints/allen_cahn_experts.pt
   base_architecture:
   - 2
   - 60
   - 60
   - 60
   - 60
-  - 1
-  eval_every: 250
+  - 2
   experts_architecture:
   - 2
   - 20
   - 20
   - 20
-  - 1
-  model: AToELeaves
-  name: ac_corr_unfrozen_sig0p05
-  problem: allen_cahn
-- adaptive_pinn:
-    M_experts_num: 8
-    fine_tune:
-      corrector_architecture: null
-      corrector_collar_ratio: 1.0
-      corrector_init: zero
-      epochs: 5000
-      freeze_experts: false
-      lr: 0.0001
-      lr_schedule: none
-      min_epochs: 1
-      optimizer_1: ssbroyden
-      optimizer_2: null
-      optimizer_switch_epoch: 5000
-      single_corrector: true
-    sigma_fraction: 0.03
-  allen_cahn:
-    pretrained_base_checkpoint: null
-    pretrained_local_expert_checkpoint: roots_checkpoints/allen_cahn_experts.pt
-  base_architecture:
   - 2
-  - 60
-  - 60
-  - 60
-  - 60
-  - 1
-  eval_every: 250
-  experts_architecture:
-  - 2
-  - 20
-  - 20
-  - 20
-  - 1
-  model: AToELeaves
-  name: ac_corr_unfrozen_sig0p03
-  problem: allen_cahn
