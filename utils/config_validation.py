@@ -120,6 +120,35 @@ def validate_adaptive_staged_config(cfg: Dict[str, Any]) -> None:
         elif 'epochs' not in initial_train:
             errors.append("adaptive_pinn.initial_train.epochs is required.")
 
+    # ── Collar config ──
+    # sigma_fraction moved under fine_tune when adaptive collars landed.
+    # A stale config left at the old key would otherwise fall through to a
+    # hard-coded default and train with silently wrong window widths.
+    fine_tune = adaptive_cfg.get('fine_tune', {}) or {}
+    if 'sigma_fraction' in adaptive_cfg:
+        errors.append(
+            "adaptive_pinn.sigma_fraction moved to "
+            "adaptive_pinn.fine_tune.sigma_fraction. Move the key.")
+    elif 'sigma_fraction' not in fine_tune:
+        errors.append(
+            "adaptive_pinn.fine_tune.sigma_fraction is required "
+            "(collar half-width fraction; was adaptive_pinn.sigma_fraction).")
+
+    if fine_tune.get('adaptive_collar_size', False):
+        q = fine_tune.get('adaptive_collar_quantile', 0.85)
+        s_min = fine_tune.get('adaptive_collar_sigma_min', 0.02)
+        s_max = fine_tune.get('adaptive_collar_sigma_max', 0.5)
+        if not (0.0 < float(q) < 1.0):
+            errors.append(
+                f"adaptive_pinn.fine_tune.adaptive_collar_quantile must be in "
+                f"(0, 1); got {q}.")
+        if not (0.0 < float(s_min) <= float(s_max)):
+            errors.append(
+                f"adaptive_pinn.fine_tune.adaptive_collar_sigma_min must be "
+                f"> 0 and <= adaptive_collar_sigma_max; got "
+                f"min={s_min}, max={s_max}. A zero floor would collapse a "
+                f"quiet face to a hard indicator and break window smoothness.")
+
     if errors:
         raise ValueError(
             "Invalid adaptive_pinn training config:\n  - "

@@ -47,11 +47,41 @@ class AToELeaves(nn.Module):
         self.adaptive_config = adaptive_config
 
         self.max_experts = adaptive_config['max_experts']
-        self.sigma_fraction = adaptive_config['sigma_fraction']
         self.expert_type = adaptive_config['expert_type']
-        
+
         # Blending mode: 'soft' (PoU) or 'hard' (step functions, mean on shared faces)
         self.blending_mode = adaptive_config.get('blending_mode', 'soft')
+
+        # ── Collar sizing ──
+        # sigma_fraction lives under fine_tune alongside the adaptive-collar
+        # switch, since both describe the same thing: how wide the PoU
+        # transition is. Read it loudly — a silent default here would let a
+        # stale config train with the wrong window geometry unnoticed.
+        _ft = adaptive_config.get('fine_tune', {}) or {}
+        if 'sigma_fraction' in adaptive_config:
+            raise ValueError(
+                "adaptive_pinn.sigma_fraction moved to "
+                "adaptive_pinn.fine_tune.sigma_fraction. Update the config.")
+        if 'sigma_fraction' not in _ft:
+            raise ValueError(
+                "adaptive_pinn.fine_tune.sigma_fraction is required.")
+        self.sigma_fraction = _ft['sigma_fraction']
+
+        # Adaptive collars: size each face from the root's gradient field at
+        # fine-tune start instead of using the fixed sigma_fraction. Both
+        # clamps are in sigma_fraction units (delta = frac x region extent).
+        self.adaptive_collar_size = bool(_ft.get('adaptive_collar_size', False))
+        self.adaptive_collar_quantile = float(
+            _ft.get('adaptive_collar_quantile', 0.85))
+        self.adaptive_collar_sigma_min = float(
+            _ft.get('adaptive_collar_sigma_min', 0.02))
+        self.adaptive_collar_sigma_max = float(
+            _ft.get('adaptive_collar_sigma_max', 0.5))
+        self.adaptive_collar_grid = int(_ft.get('adaptive_collar_grid', 257))
+        # (K, D) per-side collar half-widths; None until sizing has run, in
+        # which case the fixed sigma_fraction is used.
+        self.collar_delta_lo: Optional[torch.Tensor] = None
+        self.collar_delta_hi: Optional[torch.Tensor] = None
 
         # ── Single-corrector fine-tune ──
         # When active, the frozen soft-blend u_soft is augmented by a single
@@ -262,14 +292,71 @@ class AToELeaves(nn.Module):
             return
 
         device = next(self.base_model.parameters()).device
+        # Adaptive deltas are indexed by expert, so they go stale the moment
+        # the expert list grows; drop them rather than mis-index the windows.
+        d_lo, d_hi = self.collar_delta_lo, self.collar_delta_hi
+        if d_lo is not None and d_lo.shape[0] != len(self.regions):
+            logger.warning(
+                f"[AToELeaves] Discarding adaptive collars: sized for "
+                f"{d_lo.shape[0]} experts but the model now has "
+                f"{len(self.regions)}. Falling back to "
+                f"sigma_fraction={self.sigma_fraction}.")
+            self.collar_delta_lo = self.collar_delta_hi = None
+            d_lo = d_hi = None
+
         self.batched_indicators.update(
             regions=self.regions,
             device=device,
             mode=self.blending_mode,
             sigma_fraction=self.sigma_fraction,
             window_type=self.window_type,
-            window_smoothness_order=self.window_smoothness_order
+            window_smoothness_order=self.window_smoothness_order,
+            delta_lo=d_lo,
+            delta_hi=d_hi,
         )
+
+    def set_adaptive_collars(
+        self, delta_lo: torch.Tensor, delta_hi: torch.Tensor
+    ) -> None:
+        """Install per-face collar half-widths and rebuild the windows.
+
+        ``delta_lo``/``delta_hi`` are (K, D) in absolute domain units,
+        indexed by expert (not by leaf). Only psi_j changes; the PoU
+        normalization downstream is untouched.
+        """
+        if delta_lo.shape != delta_hi.shape:
+            raise ValueError(
+                f"delta_lo {tuple(delta_lo.shape)} != "
+                f"delta_hi {tuple(delta_hi.shape)}")
+        if delta_lo.shape[0] != len(self.regions):
+            raise ValueError(
+                f"Collar deltas cover {delta_lo.shape[0]} experts but the "
+                f"model has {len(self.regions)}.")
+        self.collar_delta_lo = delta_lo.detach().clone()
+        self.collar_delta_hi = delta_hi.detach().clone()
+        self.sync_batched_indicators()
+        logger.info(
+            f"[AToELeaves] Adaptive collars installed for "
+            f"{delta_lo.shape[0]} experts "
+            f"(adaptive_collars={self.batched_indicators.adaptive_collars}).")
+
+    def collar_deltas(self) -> tuple:
+        """Effective (delta_lo, delta_hi) as (K, D) tensors, or (None, None).
+
+        Falls back to the fixed sigma_fraction geometry when adaptive
+        sizing has not run, so collar-aware sampling always sees the same
+        widths the windows actually use.
+        """
+        if not self.regions:
+            return None, None
+        if self.collar_delta_lo is not None:
+            return self.collar_delta_lo, self.collar_delta_hi
+        lower = torch.tensor([list(r.bounds_lower) for r in self.regions],
+                             dtype=torch.get_default_dtype())
+        upper = torch.tensor([list(r.bounds_upper) for r in self.regions],
+                             dtype=torch.get_default_dtype())
+        fixed = (self.sigma_fraction * (upper - lower)).clamp(min=1e-6)
+        return fixed, fixed.clone()
 
     def spawn_expert(self, region: RegionDescriptor, copy_from_idx: Optional[int] = None) -> int:
         expert_idx = len(self.experts)
@@ -544,6 +631,12 @@ class AToELeaves(nn.Module):
                     and hasattr(self.corrector, 'layers')) else None),
             'corrector_active': self.corrector_active,
             'corrector_init': self.corrector_init,
+            # Without these a reloaded fine-tuned model would rebuild its
+            # windows from sigma_fraction and silently predict differently.
+            'collar_delta_lo': (self.collar_delta_lo.detach().cpu()
+                                if self.collar_delta_lo is not None else None),
+            'collar_delta_hi': (self.collar_delta_hi.detach().cpu()
+                                if self.collar_delta_hi is not None else None),
         }
 
     def load_state_dict_extended(self, state_dict: Dict):
@@ -619,6 +712,23 @@ class AToELeaves(nn.Module):
             self.corrector = None
             self.corrector_active = False
         self.corrector_init = state_dict.get('corrector_init', self.corrector_init)
+
+        # ── Restore adaptive collars (absent in pre-adaptive checkpoints,
+        # which correctly fall back to the fixed sigma_fraction) ──
+        saved_lo = state_dict.get('collar_delta_lo', None)
+        saved_hi = state_dict.get('collar_delta_hi', None)
+        if saved_lo is not None and saved_hi is not None:
+            ref = next(self.base_model.parameters())
+            self.collar_delta_lo = torch.as_tensor(saved_lo).to(
+                device=ref.device, dtype=torch.get_default_dtype())
+            self.collar_delta_hi = torch.as_tensor(saved_hi).to(
+                device=ref.device, dtype=torch.get_default_dtype())
+            logger.info(
+                f"  [AToELeaves] Restored adaptive collars from checkpoint "
+                f"({self.collar_delta_lo.shape[0]} experts)")
+        else:
+            self.collar_delta_lo = None
+            self.collar_delta_hi = None
 
         self.sync_batched_indicators()
 

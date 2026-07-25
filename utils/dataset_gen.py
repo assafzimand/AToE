@@ -200,43 +200,84 @@ def _compute_phi_pdf(residuals: torch.Tensor, phi_cfg: Dict) -> torch.Tensor:
 
 
 def build_collar_info(leaf_regions, sigma_fraction: float, plot: bool = False,
-                      margin: float = 1.0) -> Dict:
+                      margin: float = 1.0, delta_lo=None, delta_hi=None) -> Dict:
     """Pack leaf-region geometry for collar sampling.
 
     The collar is the set of points covered by >= 2 leaf indicator supports
-    Ω̃_j = ∏_d [a_d − δ_d, b_d + δ_d] with δ_d = max(σ_frac·(b_d − a_d), 1e-6)
-    (matching BatchedIndicators' smoothstep support).
+    Ω̃_j = ∏_d [a_d − δ_lo_d, b_d + δ_hi_d] (matching BatchedIndicators'
+    smoothstep support).
 
     Args:
         leaf_regions: RegionDescriptors of the LEAF experts only.
-        sigma_fraction: The model's collar fraction (adaptive_pinn.sigma_fraction).
+        sigma_fraction: Collar fraction, used only when explicit deltas are
+            not supplied: δ_d = max(σ_frac·(b_d − a_d), 1e-6), same on both
+            sides.
         plot: Whether the caller wants the collar diagnostic plot this resample.
         margin: Widens the SAMPLED collar band relative to the true window
             overlap (sampling.collar_margin): a band of width W is sampled
             over margin*W. Only affects where collar points are drawn (and
             the plot's shaded region) — the PoU windows are untouched.
+        delta_lo/delta_hi: Optional (K, D) per-side collar half-widths for
+            the SAME leaves, in the same order. Supplied once adaptive
+            collar sizing has run, so the sampled band tracks the windows
+            actually in use rather than a fraction that no longer applies.
     """
     lower = torch.tensor([list(r.bounds_lower) for r in leaf_regions],
                          dtype=torch.get_default_dtype())
     upper = torch.tensor([list(r.bounds_upper) for r in leaf_regions],
                          dtype=torch.get_default_dtype())
+
+    if delta_lo is not None and delta_hi is not None:
+        d_lo = torch.as_tensor(delta_lo, dtype=lower.dtype).cpu()
+        d_hi = torch.as_tensor(delta_hi, dtype=lower.dtype).cpu()
+        if d_lo.shape != lower.shape or d_hi.shape != lower.shape:
+            raise ValueError(
+                f"collar deltas {tuple(d_lo.shape)}/{tuple(d_hi.shape)} do "
+                f"not match {tuple(lower.shape)} leaf regions")
+    else:
+        d_lo = (float(sigma_fraction) * (upper - lower)).clamp(min=1e-6)
+        d_hi = d_lo.clone()
+
     return {
         'bounds_lower': lower,
         'bounds_upper': upper,
-        # Effective fraction used for sampling/plotting: margin scales the
-        # support expansion, which scales the overlap band width by margin.
+        # margin scales the support expansion, which scales the overlap
+        # band width by margin.
+        'delta_lo': d_lo * float(margin),
+        'delta_hi': d_hi * float(margin),
         'sigma_fraction': float(sigma_fraction) * float(margin),
         'margin': float(margin),
         'plot': bool(plot),
     }
 
 
+def collar_deltas_for(model, leaf_indices) -> tuple:
+    """Per-side collar half-widths for ``leaf_indices``, or (None, None).
+
+    Before adaptive sizing runs (i.e. through all of phase 3) this returns
+    the fixed sigma_fraction geometry, so collar sampling is unchanged;
+    after it runs, sampling follows the real windows.
+    """
+    if not hasattr(model, 'collar_deltas'):
+        return None, None
+    d_lo, d_hi = model.collar_deltas()
+    if d_lo is None:
+        return None, None
+    idx = list(leaf_indices)
+    return d_lo[idx], d_hi[idx]
+
+
 def _collar_support_bounds(collar_info: Dict, device) -> tuple:
-    """Expanded (support) bounds of each leaf window: (lower−δ, upper+δ), each (K, D)."""
+    """Expanded (support) bounds of each leaf window: (lower−δ_lo, upper+δ_hi), each (K, D)."""
     lower = collar_info['bounds_lower'].to(device)
     upper = collar_info['bounds_upper'].to(device)
-    delta = (collar_info['sigma_fraction'] * (upper - lower)).clamp(min=1e-6)
-    return lower - delta, upper + delta
+    if 'delta_lo' in collar_info:
+        d_lo = collar_info['delta_lo'].to(device)
+        d_hi = collar_info['delta_hi'].to(device)
+    else:  # legacy collar_info dicts
+        d_lo = (collar_info['sigma_fraction'] * (upper - lower)).clamp(min=1e-6)
+        d_hi = d_lo
+    return lower - d_lo, upper + d_hi
 
 
 def _support_overlap_count(pts: torch.Tensor, lo_exp: torch.Tensor,
@@ -326,9 +367,13 @@ def _save_collar_sampling_plot(blocks: Dict, collar_info: Dict,
 
         lower = collar_info['bounds_lower'].cpu().numpy()
         upper = collar_info['bounds_upper'].cpu().numpy()
-        delta = np.maximum(collar_info['sigma_fraction'] * (upper - lower), 1e-6)
-        lo_exp = lower - delta
-        hi_exp = upper + delta
+        if 'delta_lo' in collar_info:
+            lo_exp = lower - collar_info['delta_lo'].cpu().numpy()
+            hi_exp = upper + collar_info['delta_hi'].cpu().numpy()
+        else:  # legacy collar_info dicts
+            delta = np.maximum(
+                collar_info['sigma_fraction'] * (upper - lower), 1e-6)
+            lo_exp, hi_exp = lower - delta, upper + delta
 
         gx = np.linspace(x_lo, x_hi, 400)
         gt = np.linspace(t_min, t_max, 400)

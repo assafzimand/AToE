@@ -264,6 +264,75 @@ def _prepare_pretrained_experts_baseline(ctx: TrainingContext) -> None:
     _plot_after_spawn(ctx, f"epoch_{ctx.epoch}")
 
 
+def _size_adaptive_collars(ctx: TrainingContext, fine_tune_cfg: Dict) -> None:
+    """Replace the fixed sigma collar with per-face widths from the root.
+
+    Runs once, immediately before fine-tuning, so the PoU windows the joint
+    loss sees are the adaptive ones. Only psi_j changes — the normalization
+    and the blend downstream are untouched.
+    """
+    model = ctx.model
+    if not getattr(model, 'adaptive_collar_size', False):
+        return
+    if not hasattr(model, 'set_adaptive_collars') or not model.regions:
+        logger.warning("[FineTune] adaptive_collar_size set but the model "
+                       "carries no regions; keeping fixed sigma collar.")
+        return
+    if getattr(model, 'blending_mode', 'soft') != 'soft':
+        logger.warning(
+            f"[FineTune] adaptive_collar_size has no effect with "
+            f"blending_mode='{model.blending_mode}' (collars are only used "
+            f"by the soft PoU windows); skipping sizing.")
+        return
+
+    from adaptive.collar_sizing import size_collars_from_root
+
+    logger.info("[FineTune] Sizing adaptive collars from the root u_0 "
+                f"(q={model.adaptive_collar_quantile}, "
+                f"sigma in [{model.adaptive_collar_sigma_min}, "
+                f"{model.adaptive_collar_sigma_max}])")
+    t0 = time.time()
+    try:
+        result = size_collars_from_root(
+            model,
+            {
+                'adaptive_collar_quantile': model.adaptive_collar_quantile,
+                'adaptive_collar_sigma_min': model.adaptive_collar_sigma_min,
+                'adaptive_collar_sigma_max': model.adaptive_collar_sigma_max,
+                'adaptive_collar_grid': model.adaptive_collar_grid,
+            },
+            ctx.device,
+        )
+    except Exception as exc:                                   # noqa: BLE001
+        logger.error(f"[FineTune] Adaptive collar sizing FAILED ({exc}); "
+                     f"falling back to sigma_fraction="
+                     f"{model.sigma_fraction}.", exc_info=True)
+        return
+
+    if result is None:
+        return
+
+    delta_lo, delta_hi, diag = result
+    model.set_adaptive_collars(delta_lo, delta_hi)
+    logger.info(f"[FineTune] Adaptive collars sized in {time.time() - t0:.1f}s")
+
+    # Persist the geometry: the windows are no longer reconstructible from
+    # config alone, so the run has to record what it actually trained with.
+    try:
+        out = ctx.run_dir / 'adaptive_collars.json'
+        payload = dict(diag)
+        payload['sigma_fraction_fallback'] = float(model.sigma_fraction)
+        payload['delta_lo'] = delta_lo.detach().cpu().tolist()
+        payload['delta_hi'] = delta_hi.detach().cpu().tolist()
+        payload['bounds_lower'] = [list(r.bounds_lower) for r in model.regions]
+        payload['bounds_upper'] = [list(r.bounds_upper) for r in model.regions]
+        with open(out, 'w', encoding='utf-8') as f:
+            json.dump(payload, f, indent=2)
+        logger.info(f"[FineTune] Collar geometry written to {out}")
+    except Exception as exc:                                   # noqa: BLE001
+        logger.warning(f"[FineTune] Could not write collar geometry: {exc}")
+
+
 def _run_fine_tune(ctx: TrainingContext) -> None:
     """Joint fine-tune of the full PoU composition under the global loss."""
     model = ctx.model
@@ -271,6 +340,10 @@ def _run_fine_tune(ctx: TrainingContext) -> None:
     fine_tune_cfg = ctx.adaptive_cfg.get('fine_tune', None)
     if not fine_tune_cfg:
         return
+
+    # Collars must be final before ANY fine-tune forward — both the joint
+    # path and the corrector path blend through the same windows.
+    _size_adaptive_collars(ctx, fine_tune_cfg)
 
     # ── Single-corrector fine-tune: freeze the blend, train only a collar
     # corrector u = u_soft + χ·c. Interiors are untouched by construction. ──
@@ -735,7 +808,6 @@ def _plot_after_spawn(ctx: TrainingContext, tag: str) -> None:
             or model.num_experts == 0):
         return
     from adaptive.visualization import (plot_expert_regions,
-                                        plot_expert_soft_weights,
                                         plot_capacity_map)
     domain_bounds = ctx.domain_bounds
     adaptive_plots_dir = ctx.adaptive_plots_dir
@@ -757,14 +829,12 @@ def _plot_after_spawn(ctx: TrainingContext, tag: str) -> None:
         problem_type=problem_type,
         ground_truth=gt_grid, grid_x=gt_x, grid_t=gt_t,
     )
-    if adaptive_cfg['blending_mode'] == 'soft' and problem_type == '2d':
-        leaf_indices_set = (set(leaf_expert_indices)
-                            if isinstance(model, AToELeaves) else None)
-        plot_expert_soft_weights(
-            model=model, domain_bounds=domain_bounds,
-            output_path=adaptive_plots_dir / f"soft_weights_{tag}_E{n_experts}.png",
-            leaf_indices=leaf_indices_set,
-        )
+    # Soft weights are deliberately NOT plotted here. Collar sizing runs at
+    # the start of fine-tune, so a snapshot taken now shows windows the run
+    # will not end up using; emitting both led to two near-identical images
+    # with no way to tell which collar geometry each one came from. The
+    # single authoritative plot is written by finalize, with the method in
+    # its filename.
     if problem_type == '2d':
         try:
             expert_params = [sum(p.numel() for p in e.parameters())

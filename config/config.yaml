@@ -25,6 +25,16 @@ adaptive_pinn:
     optimizer_2: null
     optimizer_switch_epoch: 5000
     single_corrector: true
+    # Collar half-width: delta_j = sigma_fraction * (b_j - a_j).
+    sigma_fraction: 0.2
+    # Size each face from the root's gradient field instead of the fixed
+    # fraction above. sigma_min/sigma_max are in the SAME unit as
+    # sigma_fraction and clamp the result.
+    adaptive_collar_size: false
+    adaptive_collar_quantile: 0.85
+    adaptive_collar_sigma_min: 0.02
+    adaptive_collar_sigma_max: 0.5
+    adaptive_collar_grid: 257
   initial_train:
     epochs: 45000
     lr: 0.001
@@ -36,7 +46,6 @@ adaptive_pinn:
     optimizer_2: ssbroyden
     optimizer_switch_epoch: 5000
   max_experts: 150
-  sigma_fraction: 0.2
   split_icbc:
     enabled: true
   tree_max_depth: 15

@@ -214,13 +214,15 @@ def _train_segment(
             and hasattr(model, 'regions') and hasattr(model, 'leaf_indices')):
         _seed_leaf_idx = [i for i in sorted(model.leaf_indices) if i >= 0]
         if len(_seed_leaf_idx) >= 2:
-            from utils.dataset_gen import build_collar_info
+            from utils.dataset_gen import build_collar_info, collar_deltas_for
+            _seed_d_lo, _seed_d_hi = collar_deltas_for(model, _seed_leaf_idx)
             _seed_collar_info = build_collar_info(
                 [model.regions[i] for i in _seed_leaf_idx],
                 getattr(model, 'sigma_fraction', 0.2),
                 plot=False,
                 margin=(cfg.get('sampling', {}) or {}).get(
                     'collar_margin', 1.0) or 1.0,
+                delta_lo=_seed_d_lo, delta_hi=_seed_d_hi,
             )
             train_data = resample_residual_inplace(
                 train_data, cfg, device,
@@ -276,7 +278,9 @@ def _train_segment(
                     and hasattr(model, 'leaf_indices')):
                 _leaf_idx = [i for i in sorted(model.leaf_indices) if i >= 0]
                 if len(_leaf_idx) >= 2:
-                    from utils.dataset_gen import build_collar_info
+                    from utils.dataset_gen import (
+                        build_collar_info, collar_deltas_for)
+                    _d_lo, _d_hi = collar_deltas_for(model, _leaf_idx)
                     _collar_info = build_collar_info(
                         [model.regions[i] for i in _leaf_idx],
                         getattr(model, 'sigma_fraction', 0.2),
@@ -285,6 +289,7 @@ def _train_segment(
                               and _problem_spatial_dim == 1),
                         margin=(cfg.get('sampling', {}) or {}).get(
                             'collar_margin', 1.0) or 1.0,
+                        delta_lo=_d_lo, delta_hi=_d_hi,
                     )
             if _split_ctx is not None:
                 # Adaptive sampling: hand last epoch's per-expert residual

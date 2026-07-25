@@ -1033,3 +1033,153 @@ def plot_capacity_map(
     save_png(output_path, fig=fig)
     plt.close()
     logger.info(f"  Capacity-density map saved to {output_path}")
+
+
+def collar_method_tag(model) -> str:
+    """``'adaptive_collars'`` or ``'fixed_collars'`` for filenames.
+
+    Reports what psi_j was ACTUALLY built from, not what the config asked
+    for: adaptive sizing can decline (too few leaves, hard blending) and
+    fall back, and the filename should say what was really plotted.
+    """
+    bi = getattr(model, 'batched_indicators', None)
+    return ('adaptive_collars' if getattr(bi, 'adaptive_collars', False)
+            else 'fixed_collars')
+
+
+def plot_collar_geometry(
+    model,
+    domain_bounds: Dict[str, List[float]],
+    output_path: Union[str, Path],
+    resolution: int = 400,
+    leaf_indices: Optional[set] = None,
+    title_prefix: str = "",
+) -> None:
+    """Leaf boxes and their PoU collars over the ROOT's own prediction.
+
+    Mirrors ``scripts/buffer_decomposition_demo.py`` but draws the field the
+    method actually saw: the collar widths are sized from u_0's gradient, so
+    plotting them over u_0 shows directly whether each band landed on a
+    feature or in a quiet patch.
+
+    Black outlines are the flat-top regions [a_j, b_j] where psi_j == 1.
+    Red is the collar — the material between the flat top and the support
+    edge, where psi_j ramps C^N from 1 down to exactly 0. Under the fixed
+    collar every band is sigma_fraction x extent; under adaptive sizing each
+    of a region's 2*D faces carries its own width.
+    """
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if len(domain_bounds['lower']) != 2:
+        logger.info("  Warning: collar geometry plot only supports 2D domains")
+        return
+    if not getattr(model, 'regions', None):
+        logger.info("  Warning: no regions to plot")
+        return
+
+    leaf_ids = sorted(i for i in (leaf_indices
+                                  if leaf_indices is not None
+                                  else range(len(model.regions))) if i >= 0)
+    if not leaf_ids:
+        return
+
+    d_lo, d_hi = model.collar_deltas()
+    if d_lo is None:
+        return
+    d_lo = d_lo.detach().cpu().numpy()
+    d_hi = d_hi.detach().cpu().numpy()
+    adaptive = getattr(model.batched_indicators, 'adaptive_collars', False)
+
+    x_min, t_min = domain_bounds['lower']
+    x_max, t_max = domain_bounds['upper']
+    gx = np.linspace(x_min, x_max, resolution)
+    gt = np.linspace(t_min, t_max, resolution)
+    XX, TT = np.meshgrid(gx, gt, indexing='ij')
+
+    device = next(model.parameters()).device
+    dtype = next(model.parameters()).dtype
+    with torch.no_grad():
+        pts = torch.tensor(np.column_stack([XX.ravel(), TT.ravel()]),
+                           dtype=dtype, device=device)
+        u0 = model.base_model(pts).cpu().numpy()
+    field = (np.linalg.norm(u0, axis=1) if u0.ndim > 1 and u0.shape[1] > 1
+             else u0.ravel()).reshape(XX.shape)
+
+    # Collar as four disjoint strips per region, so alpha darkening shows
+    # genuine overlap between neighbours rather than self-overlap.
+    strips, cover = [], np.zeros(XX.shape, dtype=np.int32)
+    for k in leaf_ids:
+        r = model.regions[k]
+        a, b = list(r.bounds_lower), list(r.bounds_upper)
+        o_lo = [max(a[j] - d_lo[k, j], domain_bounds['lower'][j])
+                for j in (0, 1)]
+        o_hi = [min(b[j] + d_hi[k, j], domain_bounds['upper'][j])
+                for j in (0, 1)]
+        for lo, hi in (
+            ([o_lo[0], o_lo[1]], [o_hi[0], a[1]]),
+            ([o_lo[0], b[1]], [o_hi[0], o_hi[1]]),
+            ([o_lo[0], a[1]], [a[0], b[1]]),
+            ([b[0], a[1]], [o_hi[0], b[1]]),
+        ):
+            if hi[0] - lo[0] > 1e-12 and hi[1] - lo[1] > 1e-12:
+                strips.append((lo, hi))
+                cover += ((XX >= lo[0]) & (XX <= hi[0])
+                          & (TT >= lo[1]) & (TT <= hi[1])).astype(np.int32)
+
+    fig, ax = plt.subplots(figsize=(9, 7))
+    ax.pcolormesh(XX, TT, field, shading='auto', cmap='viridis', zorder=0)
+
+    for lo, hi in strips:
+        w, h = hi[0] - lo[0], hi[1] - lo[1]
+        ax.add_patch(patches.Rectangle((lo[0], lo[1]), w, h, linewidth=0.0,
+                                       facecolor='#ffffff', alpha=0.45,
+                                       zorder=4))
+        ax.add_patch(patches.Rectangle((lo[0], lo[1]), w, h, linewidth=0.0,
+                                       facecolor='#d62728', alpha=0.28,
+                                       zorder=5))
+    for k in leaf_ids:
+        r = model.regions[k]
+        ax.add_patch(patches.Rectangle(
+            (r.bounds_lower[0], r.bounds_lower[1]),
+            r.bounds_upper[0] - r.bounds_lower[0],
+            r.bounds_upper[1] - r.bounds_lower[1],
+            linewidth=1.2, edgecolor='black', facecolor='none', zorder=10))
+
+    ext = np.array([[model.regions[k].bounds_upper[j]
+                     - model.regions[k].bounds_lower[j] for j in (0, 1)]
+                    for k in leaf_ids])
+    sig = np.concatenate([(d_lo[leaf_ids] / ext).ravel(),
+                          (d_hi[leaf_ids] / ext).ravel()])
+    if adaptive:
+        mode = (f"ADAPTIVE  q={getattr(model, 'adaptive_collar_quantile', '?')}"
+                f"  clamp [{getattr(model, 'adaptive_collar_sigma_min', '?')}, "
+                f"{getattr(model, 'adaptive_collar_sigma_max', '?')}]")
+    else:
+        mode = f"FIXED  sigma_fraction={model.sigma_fraction}"
+    ax.set_title(
+        f"{title_prefix}Expert regions and PoU collars over the root u_0\n"
+        f"{mode}   |   {len(leaf_ids)} leaves\n"
+        f"sigma-equiv min/mean/max = {sig.min():.3f}/{sig.mean():.3f}/"
+        f"{sig.max():.3f}   collar covers "
+        f"{(cover > 0).mean() * 100:.1f}% of the domain", fontsize=10)
+
+    handles = [
+        patches.Patch(fill=False, edgecolor='black',
+                      label='leaf region (flat top, psi = 1)'),
+        patches.Patch(facecolor='#d62728', alpha=0.45,
+                      label='collar (psi ramps 1 -> 0 at the support edge)'),
+    ]
+    ax.legend(handles=handles, loc='upper left', fontsize=8, framealpha=0.9)
+
+    xr, tr = x_max - x_min, t_max - t_min
+    ax.set_xlim(x_min - 0.03 * xr, x_max + 0.03 * xr)
+    ax.set_ylim(t_min - 0.03 * tr, t_max + 0.03 * tr)
+    ax.set_xlabel('x')
+    ax.set_ylabel('t')
+
+    plt.tight_layout()
+    from utils.plot_io import save_png
+    save_png(output_path, fig=fig)
+    plt.close(fig)
+    logger.info(f"  Collar geometry plot saved to {output_path}")

@@ -89,8 +89,13 @@ def leaf_boxes(model):
     leaf = [i for i in sorted(model.leaf_indices) if i >= 0]
     lower = np.array([model.regions[i].bounds_lower for i in leaf])
     upper = np.array([model.regions[i].bounds_upper for i in leaf])
-    delta = np.maximum(model.sigma_fraction * (upper - lower), 1e-6)
-    return lower, upper, lower - delta, upper + delta
+    d_lo, d_hi = model.collar_deltas()
+    if d_lo is not None:
+        d_lo = d_lo.detach().cpu().numpy()[leaf]
+        d_hi = d_hi.detach().cpu().numpy()[leaf]
+    else:
+        d_lo = d_hi = np.maximum(model.sigma_fraction * (upper - lower), 1e-6)
+    return lower, upper, lower - d_lo, upper + d_hi
 
 
 def draw_boxes(ax, lower, upper, **kw):
@@ -104,7 +109,10 @@ def make_figure(model, cfg, device, run_dir, ckpt_name, sigma, grid_data):
     """One 3-panel figure (GT / hard error / soft error) for a given sigma."""
     x_grid, t_grid, h_sol, xt, gt = grid_data
 
-    # Override the collar width of the soft windows at inference
+    # Override the collar width of the soft windows at inference. Drop any
+    # adaptive collars first, otherwise they would win over the sweep value.
+    model.collar_delta_lo = None
+    model.collar_delta_hi = None
     model.sigma_fraction = float(sigma)
     model.sync_batched_indicators()
 

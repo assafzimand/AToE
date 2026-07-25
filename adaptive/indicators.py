@@ -357,7 +357,12 @@ class BatchedIndicators:
     def __init__(self):
         self.all_lower: Optional[torch.Tensor] = None  # (K, D)
         self.all_upper: Optional[torch.Tensor] = None  # (K, D)
-        self.all_delta: Optional[torch.Tensor] = None  # (K, D) collar/sigma for soft mode
+        # Collar half-width per region per dimension, one tensor per SIDE.
+        # Equal under the fixed sigma_fraction; different once adaptive
+        # collar sizing has run.
+        self.all_delta_lo: Optional[torch.Tensor] = None  # (K, D)
+        self.all_delta_hi: Optional[torch.Tensor] = None  # (K, D)
+        self.adaptive_collars: bool = False
         self.mode: str = 'hard'
         self.sigma_fraction: float = 0.2
         self.window_type: str = 'smoothstep'
@@ -377,13 +382,15 @@ class BatchedIndicators:
         mode: str = 'hard',
         sigma_fraction: float = 0.2,
         window_type: str = 'smoothstep',
-        window_smoothness_order: int = 2
+        window_smoothness_order: int = 2,
+        delta_lo: Optional[torch.Tensor] = None,
+        delta_hi: Optional[torch.Tensor] = None,
     ) -> None:
         """
         Update batched tensors from list of regions.
-        
+
         Call this after spawning new experts to sync the batched state.
-        
+
         Args:
             regions: List of RegionDescriptors for all experts
             device: Target device (cuda or cpu)
@@ -391,6 +398,10 @@ class BatchedIndicators:
             sigma_fraction: For soft mode, fraction of region size to use as collar/sigma
             window_type: For soft mode, 'smoothstep' (compact) or 'sigmoid' (legacy)
             window_smoothness_order: For smoothstep, the C^N order (1, 2, 3, or 4)
+            delta_lo/delta_hi: Optional (K, D) per-side collar half-widths in
+                absolute units, from adaptive collar sizing. When omitted,
+                both sides fall back to sigma_fraction × region size, which
+                reproduces the fixed-collar behaviour exactly.
         """
         self.mode = mode
         self.sigma_fraction = sigma_fraction
@@ -401,7 +412,9 @@ class BatchedIndicators:
         if len(regions) == 0:
             self.all_lower = None
             self.all_upper = None
-            self.all_delta = None
+            self.all_delta_lo = None
+            self.all_delta_hi = None
+            self.adaptive_collars = False
             self._initialized = False
             return
         
@@ -419,16 +432,33 @@ class BatchedIndicators:
         # For soft mode, precompute collar/sigma per region per dimension
         if mode == 'soft':
             region_sizes = self.all_upper - self.all_lower
-            self.all_delta = (sigma_fraction * region_sizes).clamp(min=1e-6)  # (K, D)
+            fixed = (sigma_fraction * region_sizes).clamp(min=1e-6)  # (K, D)
+            if delta_lo is not None and delta_hi is not None:
+                # Keep the incoming dtype: the bounds above are built as
+                # float32, and forcing the collars down to match would cost
+                # precision in a double-precision run. __call__ casts to the
+                # batch dtype anyway.
+                self.all_delta_lo = delta_lo.to(device=device).clamp(min=1e-6)
+                self.all_delta_hi = delta_hi.to(device=device).clamp(min=1e-6)
+                self.adaptive_collars = True
+            else:
+                self.all_delta_lo = fixed
+                self.all_delta_hi = fixed.clone()
+                self.adaptive_collars = False
         else:
-            self.all_delta = None
-        
+            self.all_delta_lo = None
+            self.all_delta_hi = None
+            self.adaptive_collars = False
+
         self._initialized = True
-        
+
         # Log window config on first update with experts
         if len(regions) > 0 and not getattr(self, '_logged_window_config', False):
             window_desc = f"smoothstep C^{window_smoothness_order}" if window_type == 'smoothstep' else "sigmoid (legacy)"
-            print(f"  [BatchedIndicators] Window: {window_desc}, collar_fraction={sigma_fraction}")
+            collar_desc = ("adaptive per-face"
+                           if self.adaptive_collars
+                           else f"fixed collar_fraction={sigma_fraction}")
+            print(f"  [BatchedIndicators] Window: {window_desc}, {collar_desc}")
             self._logged_window_config = True
     
     def __call__(self, inputs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -455,11 +485,17 @@ class BatchedIndicators:
             return psi_base, torch.empty((N_pts, 0), device=device, dtype=dtype)
         
         # Ensure bounds are on correct device and dtype
+        # Each tensor is checked on its own: the collars may carry a
+        # different dtype from the bounds (adaptive sizing runs in the
+        # default dtype, the bounds are built as float32).
         if self.all_lower.device != device or self.all_lower.dtype != dtype:
             self.all_lower = self.all_lower.to(device=device, dtype=dtype)
             self.all_upper = self.all_upper.to(device=device, dtype=dtype)
-            if self.all_delta is not None:
-                self.all_delta = self.all_delta.to(device=device, dtype=dtype)
+        if self.all_delta_lo is not None and (
+                self.all_delta_lo.device != device
+                or self.all_delta_lo.dtype != dtype):
+            self.all_delta_lo = self.all_delta_lo.to(device=device, dtype=dtype)
+            self.all_delta_hi = self.all_delta_hi.to(device=device, dtype=dtype)
         
         if self.mode == 'hard':
             psi_experts = self._compute_hard_masks(inputs)
@@ -514,10 +550,11 @@ class BatchedIndicators:
         x = inputs.unsqueeze(1)              # (N, 1, D)
         lower = self.all_lower.unsqueeze(0)  # (1, K, D)
         upper = self.all_upper.unsqueeze(0)  # (1, K, D)
-        delta = self.all_delta.unsqueeze(0)  # (1, K, D)
+        delta_lo = self.all_delta_lo.unsqueeze(0)  # (1, K, D)
+        delta_hi = self.all_delta_hi.unsqueeze(0)  # (1, K, D)
 
-        dist_lower = (x - lower) / delta    # (N, K, D)
-        dist_upper = (upper - x) / delta    # (N, K, D)
+        dist_lower = (x - lower) / delta_lo    # (N, K, D)
+        dist_upper = (upper - x) / delta_hi    # (N, K, D)
 
         # Product over dimensions: point inside if all dims have high indicator value
         masks = (torch.sigmoid(dist_lower) * torch.sigmoid(dist_upper)).prod(dim=2)  # (N, K)
@@ -533,16 +570,19 @@ class BatchedIndicators:
           Ψ_i = ∏_j ω_{ij}
         """
         N = self.window_smoothness_order
-        
+
         # Broadcasting: (N_pts, 1, D) vs (1, K, D) -> (N_pts, K, D)
         x = inputs.unsqueeze(1)              # (N_pts, 1, D)
         lower = self.all_lower.unsqueeze(0)  # (1, K, D)
         upper = self.all_upper.unsqueeze(0)  # (1, K, D)
-        delta = self.all_delta.unsqueeze(0)  # (1, K, D)
-        
+        # Each side carries its own collar: with the fixed sigma_fraction
+        # both are sigma·size, with adaptive collars they differ per face.
+        delta_lo = self.all_delta_lo.unsqueeze(0)  # (1, K, D)
+        delta_hi = self.all_delta_hi.unsqueeze(0)  # (1, K, D)
+
         # Compute s_lo and s_hi for all points, all regions, all dims
-        s_lo = (x - (lower - delta)) / delta  # (N_pts, K, D)
-        s_hi = ((upper + delta) - x) / delta  # (N_pts, K, D)
+        s_lo = (x - (lower - delta_lo)) / delta_lo  # (N_pts, K, D)
+        s_hi = ((upper + delta_hi) - x) / delta_hi  # (N_pts, K, D)
         
         # Apply compact ramp: clamp to [0,1], then apply smoothstep
         ramp_lo = compact_ramp(s_lo, N)  # (N_pts, K, D)

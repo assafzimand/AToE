@@ -84,7 +84,8 @@ def _finalize_training(ctx: TrainingContext) -> Path:
     if is_adaptive:
         from adaptive.visualization import (
             plot_expert_regions, save_regions_metadata, plot_expert_soft_weights,
-            plot_corrector_indicator, plot_corrector_contributions
+            plot_corrector_indicator, plot_corrector_contributions,
+            plot_collar_geometry, collar_method_tag
         )
 
     # Disable emergency save (loop done or NaN exit)
@@ -200,12 +201,30 @@ def _finalize_training(ctx: TrainingContext) -> Path:
 
         if adaptive_cfg['blending_mode'] == 'soft' and problem_type == '2d':
             leaf_indices_set = set(leaf_expert_indices) if is_leaves_model else None
+            # The only soft-weight plot of the run, written after collar
+            # sizing so it shows the windows actually trained with. The tag
+            # records which collar geometry produced it.
+            _collar_tag = collar_method_tag(model)
             plot_expert_soft_weights(
                 model=model,
                 domain_bounds=domain_bounds,
-                output_path=adaptive_plots_dir / f"soft_weights_final_E{_n_final}.png",
+                output_path=adaptive_plots_dir / (
+                    f"soft_weights_final_E{_n_final}_{_collar_tag}.png"),
                 leaf_indices=leaf_indices_set
             )
+
+            # Collars over the root's own prediction — the field the
+            # adaptive sizing read, so bands can be judged against it.
+            try:
+                plot_collar_geometry(
+                    model=model,
+                    domain_bounds=domain_bounds,
+                    output_path=adaptive_plots_dir / (
+                        f"collar_geometry_final_E{_n_final}_{_collar_tag}.png"),
+                    leaf_indices=leaf_indices_set,
+                )
+            except Exception as _collar_err:
+                logger.info(f"  Could not plot collar geometry: {_collar_err}")
 
             # Single-corrector diagnostics: χ support + per-expert correction.
             if getattr(model, 'corrector', None) is not None:
