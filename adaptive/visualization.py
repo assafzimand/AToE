@@ -954,13 +954,22 @@ def plot_capacity_map(
     output_path: Union[str, Path],
     title_suffix: str = '',
     n_grid: int = 300,
+    delta_lo=None,
+    delta_hi=None,
 ) -> None:
     """Heatmap of parameter DENSITY (params per unit domain volume) per leaf.
 
-    At each point the value is expert_params[k] / volume(region_k) for the
-    leaf region(s) covering it. Density (rather than raw parameter count)
-    makes small, heavily-parameterized regions stand out — the quantity the
-    adaptive decomposition is supposed to concentrate.
+    Each leaf contributes expert_params[k] / volume(region_k) everywhere it
+    is ACTIVE, and contributions add up. Density (rather than raw parameter
+    count) makes small, heavily-parameterized regions stand out — the
+    quantity the adaptive decomposition is supposed to concentrate.
+
+    "Active" means psi_k > 0, i.e. the support [a - delta_lo, b + delta_hi],
+    not the flat-top region: inside a collar several experts are evaluated
+    and all of their parameters bear on the answer there, so collars show
+    up as bands of raised capacity. Passing no deltas falls back to the
+    hard regions, which tile the domain and so reproduce the original
+    per-region constant map.
 
     Only 1D-spatial (x, t) domains are drawn. Regions accept either
     RegionDescriptor objects or dicts with bounds_lower/bounds_upper.
@@ -975,6 +984,9 @@ def plot_capacity_map(
         output_path: Destination PNG path.
         title_suffix: Extra text appended to the title (e.g. a spawn tag).
         n_grid: Heatmap resolution per axis.
+        delta_lo/delta_hi: Optional (K, D) collar half-widths indexed like
+            ``regions``. Supplied by the trainer so the map matches the
+            windows actually in use.
     """
     lower = domain_bounds['lower']
     upper = domain_bounds['upper']
@@ -992,17 +1004,39 @@ def plot_capacity_map(
     X, T = np.meshgrid(x_grid, t_grid, indexing='ij')
     pts = np.column_stack([X.ravel(), T.ravel()])
 
+    if delta_lo is not None:
+        delta_lo = np.asarray(
+            delta_lo.detach().cpu() if hasattr(delta_lo, 'detach') else delta_lo,
+            dtype=float)
+        delta_hi = np.asarray(
+            delta_hi.detach().cpu() if hasattr(delta_hi, 'detach') else delta_hi,
+            dtype=float)
+
     leaf_set = set(int(i) for i in leaf_indices)
     density = np.zeros(pts.shape[0])
+    supports = {}
+    n_active = np.zeros(pts.shape[0], dtype=np.int32)
     for i in sorted(leaf_set):
         if i >= len(regions) or i >= len(expert_params):
             continue
         lo, hi = _bounds(regions[i])
+        # Density stays the expert's own capacity over its FLAT TOP; only
+        # the extent over which it is counted grows with the collar. That is
+        # what makes overlaps add rather than dilute.
         vol = 1.0
         for a, b in zip(lo, hi):
             vol *= max(b - a, 1e-12)
-        mask = np.all((pts >= np.array(lo)) & (pts <= np.array(hi)), axis=1)
+        if delta_lo is not None and i < delta_lo.shape[0]:
+            s_lo = np.asarray(lo, dtype=float) - delta_lo[i]
+            s_hi = np.asarray(hi, dtype=float) + delta_hi[i]
+        else:
+            s_lo, s_hi = np.asarray(lo, dtype=float), np.asarray(hi, dtype=float)
+        supports[i] = (s_lo, s_hi)
+        mask = np.all((pts >= s_lo) & (pts <= s_hi), axis=1)
         density[mask] += expert_params[i] / vol
+        n_active[mask] += 1
+
+    max_active = int(n_active.max()) if n_active.size else 0
     density = density.reshape(n_grid, n_grid)
 
     fig, ax = plt.subplots(figsize=(9, 7))
@@ -1011,7 +1045,9 @@ def plot_capacity_map(
         extent=[x_grid[0], x_grid[-1], t_grid[0], t_grid[-1]],
         origin='lower', aspect='auto', cmap='YlOrRd',
     )
-    plt.colorbar(im, ax=ax, label='Parameters / unit volume')
+    label = ('Active parameters / unit volume (summed over overlapping experts)'
+             if delta_lo is not None else 'Parameters / unit volume')
+    plt.colorbar(im, ax=ax, label=label)
 
     for i, region in enumerate(regions):
         lo, hi = _bounds(region)
@@ -1020,6 +1056,13 @@ def plot_capacity_map(
         ax.add_patch(patches.Rectangle(
             (lo[0], lo[1]), hi[0] - lo[0], hi[1] - lo[1],
             linewidth=lw, edgecolor=color, facecolor='none', linestyle=ls))
+    # Support outlines make it readable WHY a band is hot: it is where the
+    # neighbouring supports reach past each other's flat tops.
+    for i, (s_lo, s_hi) in supports.items():
+        ax.add_patch(patches.Rectangle(
+            (s_lo[0], s_lo[1]), s_hi[0] - s_lo[0], s_hi[1] - s_lo[1],
+            linewidth=0.7, edgecolor='#1f77b4', facecolor='none',
+            linestyle=':'))
 
     # Paper-ready: no title, no legend — leaf/param counts belong in the
     # filename (see the caller) and the paper caption; the red leaf outlines
@@ -1032,7 +1075,9 @@ def plot_capacity_map(
     from utils.plot_io import save_png
     save_png(output_path, fig=fig)
     plt.close()
-    logger.info(f"  Capacity-density map saved to {output_path}")
+    logger.info(f"  Capacity-density map saved to {output_path} "
+                f"(peak {density.max():.4g} params/vol, up to {max_active} "
+                f"experts active at a point)")
 
 
 def collar_method_tag(model) -> str:

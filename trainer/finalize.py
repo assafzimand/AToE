@@ -85,7 +85,7 @@ def _finalize_training(ctx: TrainingContext) -> Path:
         from adaptive.visualization import (
             plot_expert_regions, save_regions_metadata, plot_expert_soft_weights,
             plot_corrector_indicator, plot_corrector_contributions,
-            plot_collar_geometry, collar_method_tag
+            plot_collar_geometry, collar_method_tag, plot_capacity_map
         )
 
     # Disable emergency save (loop done or NaN exit)
@@ -225,6 +225,29 @@ def _finalize_training(ctx: TrainingContext) -> Path:
                 )
             except Exception as _collar_err:
                 logger.info(f"  Could not plot collar geometry: {_collar_err}")
+
+            # Capacity density, counting every expert active at a point —
+            # so the collars read as bands of raised capacity.
+            try:
+                _d_lo, _d_hi = model.collar_deltas()
+                _eparams = [sum(p.numel() for p in e.parameters())
+                            for e in model.experts]
+                _bparams = sum(p.numel() for p in model.base_model.parameters())
+                _leafp = sum(_eparams[i] for i in leaf_expert_indices
+                             if i < len(_eparams))
+                plot_capacity_map(
+                    regions=model.regions,
+                    expert_params=_eparams,
+                    leaf_indices=leaf_expert_indices,
+                    base_params=_bparams,
+                    domain_bounds=domain_bounds,
+                    output_path=adaptive_plots_dir / (
+                        f"capacity_map_final_L{_n_final}_leafp{_leafp}"
+                        f"_rootp{_bparams}_{_collar_tag}.png"),
+                    delta_lo=_d_lo, delta_hi=_d_hi,
+                )
+            except Exception as _cap_err:
+                logger.info(f"  [CapacityMap] Failed: {_cap_err}")
 
             # Single-corrector diagnostics: χ support + per-expert correction.
             if getattr(model, 'corrector', None) is not None:

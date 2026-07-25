@@ -807,8 +807,7 @@ def _plot_after_spawn(ctx: TrainingContext, tag: str) -> None:
     if (not ctx.is_adaptive or not hasattr(model, 'num_experts')
             or model.num_experts == 0):
         return
-    from adaptive.visualization import (plot_expert_regions,
-                                        plot_capacity_map)
+    from adaptive.visualization import plot_expert_regions
     domain_bounds = ctx.domain_bounds
     adaptive_plots_dir = ctx.adaptive_plots_dir
     gt_grid, gt_x, gt_t = ctx.gt_grid, ctx.gt_x, ctx.gt_t
@@ -835,25 +834,9 @@ def _plot_after_spawn(ctx: TrainingContext, tag: str) -> None:
     # with no way to tell which collar geometry each one came from. The
     # single authoritative plot is written by finalize, with the method in
     # its filename.
-    if problem_type == '2d':
-        try:
-            expert_params = [sum(p.numel() for p in e.parameters())
-                             for e in model.experts]
-            base_params = sum(p.numel() for p in model.base_model.parameters())
-            leaf_total = sum(expert_params[i] for i in leaf_expert_indices
-                             if i < len(expert_params))
-            plot_capacity_map(
-                regions=model.regions,
-                expert_params=expert_params,
-                leaf_indices=leaf_expert_indices,
-                base_params=base_params,
-                domain_bounds=domain_bounds,
-                output_path=adaptive_plots_dir / (
-                    f"capacity_map_{tag}_L{n_experts}"
-                    f"_leafp{leaf_total}_rootp{base_params}.png"),
-            )
-        except Exception as _cap_err:
-            logger.info(f"  [CapacityMap] Failed: {_cap_err}")
+    # The capacity map is likewise deferred to finalize: it now counts every
+    # expert active at a point, so it depends on the collar widths and would
+    # be misleading if drawn before sizing.
 
 
 def _check_output_continuity(ctx: TrainingContext, label: str = "spawn") -> Dict:
