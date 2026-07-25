@@ -82,7 +82,7 @@ base_config:
     new_norm_threshold: 0.04
     output_dim: 1
     pretrained_base_checkpoint: null
-    pretrained_local_expert_checkpoint: roots_checkpoints/float64/allen_cahn_experts.pt
+    pretrained_local_expert_checkpoint: roots_checkpoints/allen_cahn_experts.pt
     rwf:
       enabled: false
       mean: 1.0
@@ -145,7 +145,7 @@ base_config:
     nu: 0.01
     output_dim: 1
     pretrained_base_checkpoint: null
-    pretrained_local_expert_checkpoint: roots_checkpoints/float64/burgers_experts.pt
+    pretrained_local_expert_checkpoint: roots_checkpoints/burgers_experts.pt
     rwf:
       enabled: false
       mean: 1.0
@@ -369,7 +369,7 @@ base_config:
     new_norm_threshold: 2.0
     output_dim: 2
     pretrained_base_checkpoint: null
-    pretrained_local_expert_checkpoint: roots_checkpoints/float64/schrodinger_experts.pt
+    pretrained_local_expert_checkpoint: roots_checkpoints/schrodinger_experts.pt
     rwf:
       enabled: false
       mean: 1.0
