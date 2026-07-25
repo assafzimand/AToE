@@ -279,9 +279,12 @@ def _run_fine_tune(ctx: TrainingContext) -> None:
         return
 
     blending = model.blending_mode if hasattr(model, 'blending_mode') else 'soft'
-    logger.info("[FineTune] Unfreezing ALL params for final joint fine-tune.")
+    # Train the leaf experts only; the root/base is retired from the composition
+    # (forward = Σ_j ψ̃_j·u_j) so it receives no gradient — keeping it frozen
+    # avoids bloating SSBroyden's dense (n_params²) Hessian for no benefit.
+    logger.info("[FineTune] Unfreezing leaf experts (root stays frozen) for final joint fine-tune.")
     logger.info(f"[FineTune] Using composed loss with blending_mode='{blending}' (matches inference)")
-    _set_trainable(model, 'all')
+    _set_trainable(model, 'leaves')
 
     # Ensure split_context is cleared so eval uses configured blending_mode
     ctx._split_context = None

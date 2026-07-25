@@ -16,7 +16,7 @@ base_config:
     fine_tune:
       corrector_architecture: null
       corrector_init: zero
-      epochs: 10000
+      epochs: 40000
       lr: 0.0001
       lr_schedule: none
       min_epochs: 1
@@ -400,133 +400,9 @@ base_config:
   ssbroyden:
     lr: 1.0
     tolerance_grad: 1.0e-10
-experiment_name: finetune_corrector_ablation
+experiment_name: finetune_nocorr_40k
 experiments:
-# ── Allen–Cahn ──────────────────────────────────────────────
-- name: allen_cahn_nocorr
-  problem: allen_cahn
-  model: AToELeaves
-  adaptive_pinn:
-    fine_tune:
-      single_corrector: false
-  base_architecture:
-  - 2
-  - 60
-  - 60
-  - 60
-  - 60
-  - 1
-  experts_architecture:
-  - 2
-  - 20
-  - 20
-  - 20
-  - 1
-- name: allen_cahn_corr_frozen
-  problem: allen_cahn
-  model: AToELeaves
-  adaptive_pinn:
-    fine_tune:
-      single_corrector: true
-      freeze_experts: true
-      corrector_collar_ratio: 1.0
-  base_architecture:
-  - 2
-  - 60
-  - 60
-  - 60
-  - 60
-  - 1
-  experts_architecture:
-  - 2
-  - 20
-  - 20
-  - 20
-  - 1
-- name: allen_cahn_corr_unfrozen
-  problem: allen_cahn
-  model: AToELeaves
-  adaptive_pinn:
-    fine_tune:
-      single_corrector: true
-      freeze_experts: false
-      corrector_collar_ratio: 0.0
-  base_architecture:
-  - 2
-  - 60
-  - 60
-  - 60
-  - 60
-  - 1
-  experts_architecture:
-  - 2
-  - 20
-  - 20
-  - 20
-  - 1
-# ── Burgers ─────────────────────────────────────────────────
-- name: burgers1d_nocorr
-  problem: burgers1d
-  model: AToELeaves
-  adaptive_pinn:
-    fine_tune:
-      single_corrector: false
-  base_architecture:
-  - 2
-  - 60
-  - 60
-  - 60
-  - 60
-  - 1
-  experts_architecture:
-  - 2
-  - 20
-  - 20
-  - 20
-  - 1
-- name: burgers1d_corr_frozen
-  problem: burgers1d
-  model: AToELeaves
-  adaptive_pinn:
-    fine_tune:
-      single_corrector: true
-      freeze_experts: true
-      corrector_collar_ratio: 1.0
-  base_architecture:
-  - 2
-  - 60
-  - 60
-  - 60
-  - 60
-  - 1
-  experts_architecture:
-  - 2
-  - 20
-  - 20
-  - 20
-  - 1
-- name: burgers1d_corr_unfrozen
-  problem: burgers1d
-  model: AToELeaves
-  adaptive_pinn:
-    fine_tune:
-      single_corrector: true
-      freeze_experts: false
-      corrector_collar_ratio: 0.0
-  base_architecture:
-  - 2
-  - 60
-  - 60
-  - 60
-  - 60
-  - 1
-  experts_architecture:
-  - 2
-  - 20
-  - 20
-  - 20
-  - 1
-# ── Schrödinger (output_dim 2) ──────────────────────────────
+# ── Schrödinger (output_dim 2) — first, to confirm the OOM fix ──
 - name: schrodinger_nocorr
   problem: schrodinger
   model: AToELeaves
@@ -546,45 +422,44 @@ experiments:
   - 20
   - 20
   - 2
-- name: schrodinger_corr_frozen
-  problem: schrodinger
+# ── Allen–Cahn (sigma_fraction 0.05 from base) ──
+- name: allen_cahn_nocorr
+  problem: allen_cahn
   model: AToELeaves
   adaptive_pinn:
     fine_tune:
-      single_corrector: true
-      freeze_experts: true
-      corrector_collar_ratio: 1.0
+      single_corrector: false
   base_architecture:
   - 2
   - 60
   - 60
   - 60
   - 60
-  - 2
+  - 1
   experts_architecture:
   - 2
   - 20
   - 20
   - 20
-  - 2
-- name: schrodinger_corr_unfrozen
-  problem: schrodinger
+  - 1
+# ── Burgers (sigma_fraction 0.2) ──
+- name: burgers1d_nocorr
+  problem: burgers1d
   model: AToELeaves
   adaptive_pinn:
+    sigma_fraction: 0.2
     fine_tune:
-      single_corrector: true
-      freeze_experts: false
-      corrector_collar_ratio: 0.0
+      single_corrector: false
   base_architecture:
   - 2
   - 60
   - 60
   - 60
   - 60
-  - 2
+  - 1
   experts_architecture:
   - 2
   - 20
   - 20
   - 20
-  - 2
+  - 1
