@@ -13,7 +13,16 @@ base_config:
     enable_timing: false
     enabled: true
     expert_type: mlp
-    fine_tune: null
+    fine_tune:
+      corrector_architecture: null
+      corrector_init: zero
+      epochs: 10000
+      lr: 0.0001
+      lr_schedule: none
+      min_epochs: 1
+      optimizer_1: ssbroyden
+      optimizer_2: null
+      optimizer_switch_epoch: 99999
     initial_train:
       epochs: 41000
       lr: 0.001
@@ -25,7 +34,7 @@ base_config:
       optimizer_2: ssbroyden
       optimizer_switch_epoch: 1000
     max_experts: 150
-    sigma_fraction: 0.03
+    sigma_fraction: 0.05
     split_icbc:
       enabled: true
     tree_max_depth: 15
@@ -73,7 +82,7 @@ base_config:
     new_norm_threshold: 0.04
     output_dim: 1
     pretrained_base_checkpoint: null
-    pretrained_local_expert_checkpoint: null
+    pretrained_local_expert_checkpoint: roots_checkpoints/float64/allen_cahn_experts.pt
     rwf:
       enabled: false
       mean: 1.0
@@ -136,7 +145,7 @@ base_config:
     nu: 0.01
     output_dim: 1
     pretrained_base_checkpoint: null
-    pretrained_local_expert_checkpoint: null
+    pretrained_local_expert_checkpoint: roots_checkpoints/float64/burgers_experts.pt
     rwf:
       enabled: false
       mean: 1.0
@@ -360,7 +369,7 @@ base_config:
     new_norm_threshold: 2.0
     output_dim: 2
     pretrained_base_checkpoint: null
-    pretrained_local_expert_checkpoint: null
+    pretrained_local_expert_checkpoint: roots_checkpoints/float64/schrodinger_experts.pt
     rwf:
       enabled: false
       mean: 1.0
@@ -391,11 +400,15 @@ base_config:
   ssbroyden:
     lr: 1.0
     tolerance_grad: 1.0e-10
-experiment_name: ac_burgers_schrodinger_experts_creation
+experiment_name: finetune_corrector_ablation
 experiments:
-- name: allen_cahn
+# ── Allen–Cahn ──────────────────────────────────────────────
+- name: allen_cahn_nocorr
   problem: allen_cahn
   model: AToELeaves
+  adaptive_pinn:
+    fine_tune:
+      single_corrector: false
   base_architecture:
   - 2
   - 60
@@ -409,9 +422,55 @@ experiments:
   - 20
   - 20
   - 1
-- name: burgers1d
+- name: allen_cahn_corr_frozen
+  problem: allen_cahn
+  model: AToELeaves
+  adaptive_pinn:
+    fine_tune:
+      single_corrector: true
+      freeze_experts: true
+      corrector_collar_ratio: 1.0
+  base_architecture:
+  - 2
+  - 60
+  - 60
+  - 60
+  - 60
+  - 1
+  experts_architecture:
+  - 2
+  - 20
+  - 20
+  - 20
+  - 1
+- name: allen_cahn_corr_unfrozen
+  problem: allen_cahn
+  model: AToELeaves
+  adaptive_pinn:
+    fine_tune:
+      single_corrector: true
+      freeze_experts: false
+      corrector_collar_ratio: 0.0
+  base_architecture:
+  - 2
+  - 60
+  - 60
+  - 60
+  - 60
+  - 1
+  experts_architecture:
+  - 2
+  - 20
+  - 20
+  - 20
+  - 1
+# ── Burgers ─────────────────────────────────────────────────
+- name: burgers1d_nocorr
   problem: burgers1d
   model: AToELeaves
+  adaptive_pinn:
+    fine_tune:
+      single_corrector: false
   base_architecture:
   - 2
   - 60
@@ -425,9 +484,97 @@ experiments:
   - 20
   - 20
   - 1
-- name: schrodinger
+- name: burgers1d_corr_frozen
+  problem: burgers1d
+  model: AToELeaves
+  adaptive_pinn:
+    fine_tune:
+      single_corrector: true
+      freeze_experts: true
+      corrector_collar_ratio: 1.0
+  base_architecture:
+  - 2
+  - 60
+  - 60
+  - 60
+  - 60
+  - 1
+  experts_architecture:
+  - 2
+  - 20
+  - 20
+  - 20
+  - 1
+- name: burgers1d_corr_unfrozen
+  problem: burgers1d
+  model: AToELeaves
+  adaptive_pinn:
+    fine_tune:
+      single_corrector: true
+      freeze_experts: false
+      corrector_collar_ratio: 0.0
+  base_architecture:
+  - 2
+  - 60
+  - 60
+  - 60
+  - 60
+  - 1
+  experts_architecture:
+  - 2
+  - 20
+  - 20
+  - 20
+  - 1
+# ── Schrödinger (output_dim 2) ──────────────────────────────
+- name: schrodinger_nocorr
   problem: schrodinger
   model: AToELeaves
+  adaptive_pinn:
+    fine_tune:
+      single_corrector: false
+  base_architecture:
+  - 2
+  - 60
+  - 60
+  - 60
+  - 60
+  - 2
+  experts_architecture:
+  - 2
+  - 20
+  - 20
+  - 20
+  - 2
+- name: schrodinger_corr_frozen
+  problem: schrodinger
+  model: AToELeaves
+  adaptive_pinn:
+    fine_tune:
+      single_corrector: true
+      freeze_experts: true
+      corrector_collar_ratio: 1.0
+  base_architecture:
+  - 2
+  - 60
+  - 60
+  - 60
+  - 60
+  - 2
+  experts_architecture:
+  - 2
+  - 20
+  - 20
+  - 20
+  - 2
+- name: schrodinger_corr_unfrozen
+  problem: schrodinger
+  model: AToELeaves
+  adaptive_pinn:
+    fine_tune:
+      single_corrector: true
+      freeze_experts: false
+      corrector_collar_ratio: 0.0
   base_architecture:
   - 2
   - 60
