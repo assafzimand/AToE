@@ -53,6 +53,7 @@ _DEFAULTS = {
     'active': 50,
     'top_k': 30,
     'record_shapes': False,
+    'with_stack': False,
     'emit_trace': False,
 }
 
@@ -87,6 +88,7 @@ class SegmentProfiler:
         self._active = max(1, int(c['active']))
         self._top_k = max(1, int(c['top_k']))
         self._record_shapes = bool(c['record_shapes'])
+        self._with_stack = bool(c['with_stack'])
         self._emit_trace = bool(c['emit_trace'])
         self._prof = None
         self._steps = 0
@@ -137,7 +139,7 @@ class SegmentProfiler:
                 wait=0, warmup=self._warmup, active=self._active, repeat=1),
             record_shapes=self._record_shapes,
             profile_memory=False,
-            with_stack=False,
+            with_stack=self._with_stack,
         )
         self._prof.start()
         self._steps = 0
@@ -198,6 +200,22 @@ class SegmentProfiler:
                     "window are inflated by the profiler itself.\n\n")
             f.write(ka.table(sort_by=sort_by, row_limit=self._top_k))
             f.write("\n")
+
+            # With stacks recorded, add a second table grouped by Python
+            # source location. This is what localises host-side time that the
+            # op-name view leaves unattributed -- it names the calling frame.
+            if self._with_stack:
+                try:
+                    ka_stack = prof.key_averages(group_by_stack_n=5)
+                    f.write("\n\n" + "=" * 78 + "\n")
+                    f.write("GROUPED BY PYTHON SOURCE LOCATION\n")
+                    f.write("=" * 78 + "\n\n")
+                    f.write(ka_stack.table(sort_by='self_cpu_time_total',
+                                           row_limit=self._top_k,
+                                           max_src_column_width=120))
+                    f.write("\n")
+                except Exception as exc:                        # noqa: BLE001
+                    f.write(f"\n(stack-grouped table unavailable: {exc})\n")
 
         kind = 'device' if on_cuda else 'cpu'
         rows = sorted(((e.key, self._total(e, kind)) for e in ka),

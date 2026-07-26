@@ -81,6 +81,91 @@ def _face_counts(cfg: Dict) -> tuple:
     return max(1, int(n_ic_per_face)), max(1, int(n_bc_per_face))
 
 
+def _sample_per_expert_direct(
+    new_expert_indices: List[int],
+    regions,
+    pc: Dict,
+    spatial_dim: int,
+    output_dim: int,
+    n_res_total: int,
+    min_per_expert: int,
+    device: torch.device,
+    epoch=None,
+) -> Dict[str, torch.Tensor]:
+    """Draw each expert's residual points directly inside its own region.
+
+    Per-expert budget is its share of the domain volume,
+
+        n_e = max(min_per_expert, round(n_res_total * vol_e / vol_domain)),
+
+    so the point DENSITY matches a plain global collocation set — the same
+    thing filtering a global draw gives, but without any data-dependent
+    shapes (hence no device->host syncs) and with the points already grouped
+    by expert.
+    """
+    dom_lo = [pc['spatial_domain'][d][0] for d in range(spatial_dim)]
+    dom_hi = [pc['spatial_domain'][d][1] for d in range(spatial_dim)]
+    dom_lo.append(pc['temporal_domain'][0])
+    dom_hi.append(pc['temporal_domain'][1])
+    dom_vol = 1.0
+    for lo, hi in zip(dom_lo, dom_hi):
+        dom_vol *= max(float(hi) - float(lo), 1e-30)
+
+    dtype = torch.get_default_dtype()
+    xs, ts, gs, eids, ks, bc_fids = [], [], [], [], [], []
+    counts, floored = {}, 0
+
+    for eidx in new_expert_indices:
+        region = regions[eidx]
+        bl, bu = region.bounds_lower, region.bounds_upper
+
+        vol_e = 1.0
+        for d in range(spatial_dim + 1):
+            vol_e *= max(float(bu[d]) - float(bl[d]), 0.0)
+        n_prop = int(round(n_res_total * vol_e / dom_vol))
+        n_e = max(min_per_expert, n_prop)
+        if n_e > n_prop:
+            floored += 1
+        counts[eidx] = (n_e, n_prop)
+        if n_e <= 0:
+            continue
+
+        x_e = torch.empty(n_e, spatial_dim, device=device, dtype=dtype)
+        for d in range(spatial_dim):
+            x_e[:, d].uniform_(float(bl[d]), float(bu[d]))
+        t_e = torch.empty(n_e, 1, device=device, dtype=dtype)
+        t_e.uniform_(float(bl[spatial_dim]), float(bu[spatial_dim]))
+
+        xs.append(x_e)
+        ts.append(t_e)
+        gs.append(torch.zeros(n_e, output_dim, device=device))
+        eids.append(torch.full((n_e,), eidx, dtype=torch.long, device=device))
+        ks.append(torch.full((n_e,), KIND_RESIDUAL, dtype=torch.long, device=device))
+        bc_fids.append(torch.full((n_e,), -1, dtype=torch.long, device=device))
+
+    if epoch is None or epoch <= 1 or epoch % 1000 == 0:
+        _tot = sum(n for n, _ in counts.values())
+        logger.info(
+            f"  [SubdomainData] per-expert draw: {_tot} residual points over "
+            f"{len(counts)} experts (budget {n_res_total}, "
+            f"{floored} at the {min_per_expert}-point floor)")
+
+    if not xs:
+        return _empty(spatial_dim, output_dim, device)
+
+    n_pts = sum(x.shape[0] for x in xs)
+    return {
+        'x': torch.cat(xs, dim=0),
+        't': torch.cat(ts, dim=0),
+        'h_gt': torch.cat(gs, dim=0),
+        'expert_id': torch.cat(eids, dim=0),
+        'kind': torch.cat(ks, dim=0),
+        'bc_face_id': torch.cat(bc_fids, dim=0),
+        'cont_neighbor': torch.full((n_pts,), -1, dtype=torch.long, device=device),
+        'cont_dim': torch.full((n_pts,), -1, dtype=torch.long, device=device),
+    }
+
+
 def sample_subdomain_residuals(
     new_expert_indices: List[int],
     regions,
@@ -108,6 +193,35 @@ def sample_subdomain_residuals(
     spatial_dim = pc['spatial_dim']
     output_dim = pc['output_dim']
     n_res_total = cfg.get('sampling', {}).get('n_residual_train', 10000)
+    _samp = cfg.get('sampling', {}) or {}
+    min_per_expert = int(_samp.get('min_points_per_expert', 0) or 0)
+
+    # ── Fast path: draw each expert's points directly inside its own box ──
+    # The global-draw-then-filter path below needs a boolean mask per expert,
+    # and `x_g[mask]` has a DATA-DEPENDENT output shape — the count must be
+    # copied device->host before the result can be allocated. That is a hard
+    # pipeline stall, and with one draw per epoch it showed up as ~163
+    # Memcpy DtoH per step in the phase-3 profile.
+    #
+    # Drawing n_e = n_res_total * vol_e / vol_domain points directly inside
+    # each region has no data-dependent shapes and therefore no syncs, while
+    # giving each expert the same expected count (and thus the same point
+    # density) as filtering would. It is objective-neutral because the split
+    # loss reduces the residual PER EXPERT (`r2[s:e].mean()`), so per-expert
+    # counts do not reweight experts against each other. Points also come out
+    # already grouped by expert, which is the order the split loss wants.
+    #
+    # Adaptive (residual-weighted) and collar-focused draws are inherently
+    # global, so those keep the original path.
+    _as_cfg = pc.get('adaptive_sampling') or cfg.get('adaptive_sampling', {})
+    _adaptive_active = bool(_as_cfg.get('enabled')) and bool(cached_residuals)
+    _collar_active = (collar_info is not None
+                      and (_samp.get('collar_data_ratio', 0.0) or 0.0) > 0)
+
+    if not _adaptive_active and not _collar_active:
+        return _sample_per_expert_direct(
+            new_expert_indices, regions, pc, spatial_dim, output_dim,
+            n_res_total, min_per_expert, device, epoch)
 
     if cached_residuals:
         # Split-loss cache tensors live on CPU; the sampler mixes them with
@@ -126,9 +240,6 @@ def sample_subdomain_residuals(
     # effectively stop training. Any expert under the floor is topped up with
     # a uniform draw inside its OWN box. Residual points only; the IC/BC/
     # interface/continuity sets are built separately in build_subdomain_static.
-    min_per_expert = int(
-        cfg.get('sampling', {}).get('min_points_per_expert', 0) or 0)
-
     xs, ts, gs, eids, ks, bc_fids = [], [], [], [], [], []
     counts, topped = {}, {}
     for eidx in new_expert_indices:

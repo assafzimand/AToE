@@ -226,6 +226,16 @@ base_config:
   patience_rel_delta: 0.01
   precision: float32
   print_every: 1
+  # Tiny window so the profiler is exercised inside the 5-epoch segments.
+  profiling:
+    enabled: true
+    segments: all
+    start_epoch: 1
+    warmup: 1
+    active: 2
+    top_k: 10
+    record_shapes: false
+    emit_trace: false
   problem: burgers1d
   resume_from: null
   sampling:
