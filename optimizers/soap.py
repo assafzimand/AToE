@@ -4,6 +4,17 @@ Source: https://github.com/nikhilvyas/SOAP
 Paper: https://arxiv.org/abs/2409.11321
 
 Copied verbatim from the official repository (MIT License).
+
+Two local edits had drifted from upstream and were reverted so the algorithm
+matches the paper: the first step is skipped again (rather than taking one
+unpreconditioned Adam step), and the eigendecomposition no longer falls back
+to an identity matrix on failure (which silently demoted SOAP to Adam). Both
+had been introduced to smooth over mid-run optimizer switches, which this
+project no longer uses.
+
+``shampoo_beta`` stays upstream's ``-1`` sentinel meaning "reuse betas[1]",
+but it is now settable from config (adaptive_pinn/base ``soap.shampoo_beta``)
+so the preconditioner's memory can be chosen independently of Adam's beta2.
 """
 
 import torch
@@ -130,11 +141,13 @@ class SOAP(optim.Optimizer):
                                                max_precond_dim=group['max_precond_dim'],
                                                merge_dims=group["merge_dims"],
                                                precondition_1d=group["precondition_1d"])
-                    # First step: preconditioner just initialized, use raw gradient (no projection yet)
-                    grad_projected = grad
-                else:
-                    grad_projected = self.project(grad, state, merge_dims=group["merge_dims"],
-                                                  max_precond_dim=group['max_precond_dim'])
+                    # first step is skipped so that we never use the current
+                    # gradients in the projection. (Upstream behaviour: the
+                    # parameter is left untouched and state["step"] stays 0.)
+                    continue
+
+                grad_projected = self.project(grad, state, merge_dims=group["merge_dims"],
+                                              max_precond_dim=group['max_precond_dim'])
 
                 exp_avg, exp_avg_sq = state["exp_avg"], state["exp_avg_sq"]
                 beta1, beta2 = group["betas"]
@@ -307,14 +320,15 @@ class SOAP(optim.Optimizer):
             if len(m) == 0:
                 final.append([])
                 continue
+            # Upstream retries in float64 and lets a second failure propagate.
+            # Do NOT add an identity fallback here: it would silently demote
+            # SOAP to plain Adam for this parameter (an eigh failure means GG
+            # has gone non-finite) with nothing in the logs to show for it.
             try:
                 _, Q = torch.linalg.eigh(m + 1e-30 * torch.eye(m.shape[0], device=m.device))
             except Exception:
-                try:
-                    _, Q = torch.linalg.eigh(m.to(torch.float64) + 1e-30 * torch.eye(m.shape[0], device=m.device))
-                    Q = Q.to(m.dtype)
-                except Exception:
-                    Q = torch.eye(m.shape[0], device=m.device, dtype=m.dtype)
+                _, Q = torch.linalg.eigh(m.to(torch.float64) + 1e-30 * torch.eye(m.shape[0], device=m.device))
+                Q = Q.to(m.dtype)
             Q = torch.flip(Q, [1])
 
             if not float_data:

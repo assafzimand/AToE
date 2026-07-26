@@ -39,6 +39,12 @@ base_config:
     betas:
     - 0.9
     - 0.999
+    # EMA decay of the Shampoo preconditioner. Upstream's -1 sentinel reuses
+    # betas[1], which would silently stretch the preconditioner's memory to
+    # 0.999 (~1000 steps) purely as a side effect of the beta2 above. The SOAP
+    # paper runs betas (0.95, 0.95), i.e. a 0.95 preconditioner EMA, so pin it
+    # there and let beta2 govern Adam's second moment alone.
+    shampoo_beta: 0.95
     precondition_frequency: 2
     weight_decay: 0.0
   adaptive_pinn:

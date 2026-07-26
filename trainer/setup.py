@@ -194,14 +194,27 @@ def _create_soap_optimizer(model: nn.Module, cfg: Dict) -> torch.optim.Optimizer
     """Create SOAP optimizer (quasi-second-order, Shampoo-preconditioned Adam).
 
     Only includes trainable parameters (requires_grad=True).
+
+    ``shampoo_beta`` is the EMA decay of the Shampoo preconditioner. Upstream
+    leaves it at the sentinel -1, which silently reuses ``betas[1]`` — so
+    picking Adam's beta2 also picks the preconditioner's memory. Set
+    ``soap.shampoo_beta`` to decouple them; -1 keeps upstream's coupling.
+
+    ``eps`` is read from the ``adam`` sub-dict (SOAP's inner update is Adam),
+    with ``soap.eps`` honoured if given.
     """
     from optimizers.soap import SOAP
     trainable_params = [p for p in model.parameters() if p.requires_grad]
+    _eps = _opt_cfg(cfg, 'soap', 'eps', 'soap_eps', None)
+    if _eps is None:
+        _eps = _opt_cfg(cfg, 'adam', 'eps', 'adam_eps', 1e-8)
     return SOAP(
         trainable_params,
         lr=cfg['lr'],
         betas=tuple(_opt_cfg(cfg, 'soap', 'betas', 'soap_betas', (0.95, 0.95))),
-        eps=_opt_cfg(cfg, 'adam', 'eps', 'adam_eps', 1e-8),
+        shampoo_beta=_opt_cfg(cfg, 'soap', 'shampoo_beta',
+                              'soap_shampoo_beta', -1),
+        eps=_eps,
         precondition_frequency=_opt_cfg(cfg, 'soap', 'precondition_frequency',
                                         'soap_precondition_frequency', 10),
         weight_decay=_opt_cfg(cfg, 'soap', 'weight_decay', 'soap_weight_decay', 0.0),
