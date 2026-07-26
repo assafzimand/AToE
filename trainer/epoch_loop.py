@@ -109,9 +109,14 @@ def _train_segment(
     grad_clip_norm = ctx.grad_clip_norm
     expert_grad_clip_norm = ctx.expert_grad_clip_norm
     adaptive_sampling_enabled = ctx.adaptive_sampling_enabled
-    # Diagnostic residual-heatmap plot cadence (defaults to the resample cadence).
-    plot_samples_every = cfg.get('sampling', {}).get(
-        'plot_samples_every', resample_every) or resample_every
+    # Diagnostic residual-heatmap plot cadence. Absent -> follow the resample
+    # cadence; 0 -> never plot. The old `... or resample_every` turned an
+    # explicit 0 back into the resample cadence, so the documented way to
+    # disable plotting silently enabled it — and under Adam/SOAP, which
+    # resample EVERY epoch, that meant a matplotlib savefig per step (measured
+    # at ~450 ms/step wall against ~9 ms/step of actual GPU work).
+    _pse = cfg.get('sampling', {}).get('plot_samples_every', None)
+    plot_samples_every = resample_every if _pse is None else int(_pse)
 
     # ── Segment setup: fresh optimizer + scheduler over current requires_grad params ──
     seg_cfg = dict(segment_cfg)
@@ -346,6 +351,7 @@ def _train_segment(
                         and _split_loss_fn is not None
                         and _split_loss_fn._residual_cache
                         and _problem_spatial_dim == 1
+                        and plot_samples_every > 0
                         and (epoch - 1) % plot_samples_every == 0):
                     _rc = _split_loss_fn._residual_cache
                     all_x = torch.cat([r[0] for r in _rc], dim=0)
@@ -363,6 +369,7 @@ def _train_segment(
                 model._residual_cache_enabled = False
                 if (not adaptive_sampling_enabled and cached_residuals
                         and _problem_spatial_dim == 1
+                        and plot_samples_every > 0
                         and (epoch - 1) % plot_samples_every == 0):
                     all_x = torch.cat([r[0] for r in cached_residuals], dim=0)
                     all_t = torch.cat([r[1] for r in cached_residuals], dim=0)

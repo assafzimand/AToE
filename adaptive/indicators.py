@@ -590,9 +590,21 @@ class BatchedIndicators:
         
         # Per-dimension window: product of left and right ramps
         omega_per_dim = ramp_lo * ramp_hi  # (N_pts, K, D)
-        
-        # Tensor product over all dimensions → region indicator
-        masks = omega_per_dim.prod(dim=2)  # (N_pts, K)
+
+        # Tensor product over all dimensions → region indicator.
+        #
+        # Written as an explicit chain of multiplies rather than
+        # omega_per_dim.prod(dim=2). These windows have COMPACT support, so
+        # omega is EXACTLY zero outside the collar — and with zeros present
+        # torch.prod's backward cannot use the cheap divide-by-input path and
+        # falls back to a zero-safe cumprod/cumsum scan. Profiling on GPU put
+        # that scan at ~39% of fine-tune device time (aten::cumprod 20.5% +
+        # aten::cumsum 18.9%, via tensor_kernel_scan_innermost_dim at ~638us
+        # per call). The chain below is the same product with an ordinary
+        # multiply backward. D is 2 (x,t) or 3, so the loop is trivial.
+        masks = omega_per_dim[..., 0]
+        for d in range(1, omega_per_dim.shape[-1]):
+            masks = masks * omega_per_dim[..., d]
         return masks
     
     def compute_hard_masks_only(self, inputs: torch.Tensor) -> torch.Tensor:
