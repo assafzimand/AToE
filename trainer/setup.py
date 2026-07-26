@@ -466,7 +466,22 @@ def _create_split_dataloader(
     batch_size: int,
     shuffle: bool,
 ) -> DataLoader:
-    """Create DataLoader for split-loss subdomain data (expert_id + kind + bc_face_id + continuity schema)."""
+    """Create DataLoader for split-loss subdomain data (expert_id + kind + bc_face_id + continuity schema).
+
+    Takes the same full-batch shortcut as _create_dataloader when one batch
+    covers the whole set; the per-row collate is even costlier here (8 fields).
+    """
+    _SPLIT_FIELDS = ('x', 't', 'h_gt', 'expert_id', 'kind', 'bc_face_id',
+                     'cont_neighbor', 'cont_dim')
+    n_samples = data['x'].shape[0]
+    if batch_size >= n_samples:
+        logger.info(
+            f"  Split dataloader: full-batch shortcut "
+            f"(batch_size={batch_size} >= {n_samples} samples); "
+            f"skipping per-row collation")
+        return _FullBatchLoader(
+            lambda: {k: data[k] for k in _SPLIT_FIELDS})
+
     dataset = TensorDataset(
         data['x'], data['t'], data['h_gt'],
         data['expert_id'], data['kind'], data['bc_face_id'],
@@ -491,13 +506,45 @@ def _create_split_dataloader(
     )
 
 
+class _FullBatchLoader:
+    """Single-batch stand-in for DataLoader when one batch holds everything.
+
+    With ``batch_size >= len(dataset)`` the DataLoader still walks the dataset
+    row by row — one ``TensorDataset.__getitem__`` per sample, then a
+    ``torch.stack`` per field — only to hand back the whole set unchanged.
+    That pass costs ~200 ms/epoch at ~8.7k rows and scales with ROW COUNT, not
+    model size, so on small PINN models it dominates the step. It also fell
+    only on Adam/SOAP: the quasi-Newton path calls ``loss_fn(model, train_data)``
+    directly and never paid it.
+
+    Yields the same dict the collate_fn below builds, but referencing the
+    original tensors instead of stacked copies. In-place resampling
+    (``resample_residual_inplace`` writes through ``train_data['x'][mask]``) is
+    therefore visible on the next iteration, exactly as before. Safe because
+    every loss clones/detaches before setting requires_grad, so nothing
+    mutates the batch tensors.
+    """
+
+    def __init__(self, make_batch):
+        self._make_batch = make_batch
+
+    def __iter__(self):
+        yield self._make_batch()
+
+    def __len__(self):
+        return 1
+
+
 def _create_dataloader(
     data: Dict,
     batch_size: int,
     shuffle: bool
-) -> DataLoader:
+):
     """
     Create DataLoader from data dictionary.
+
+    Returns a full-batch shortcut when ``batch_size`` covers the whole
+    dataset (the usual PINN setup, batch_size 99999) — see _FullBatchLoader.
 
     Args:
         data: Dictionary with 'x', 't', 'h_gt', 'mask'
@@ -505,8 +552,25 @@ def _create_dataloader(
         shuffle: Whether to shuffle
 
     Returns:
-        DataLoader
+        DataLoader, or _FullBatchLoader for the single-batch case
     """
+    n_samples = data['x'].shape[0]
+    if batch_size >= n_samples:
+        logger.info(
+            f"  Dataloader: full-batch shortcut "
+            f"(batch_size={batch_size} >= {n_samples} samples); "
+            f"skipping per-row collation")
+        return _FullBatchLoader(lambda: {
+            'x': data['x'],
+            't': data['t'],
+            'h_gt': data['h_gt'],
+            'mask': {
+                'residual': data['mask']['residual'],
+                'IC': data['mask']['IC'],
+                'BC': data['mask']['BC'],
+            },
+        })
+
     dataset = TensorDataset(
         data['x'],
         data['t'],
