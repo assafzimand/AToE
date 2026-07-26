@@ -1,30 +1,22 @@
-# SOAP 100k: root-only vs. full phase-3 pipeline.
+# Smoke test for the SOAP root-vs-phase3 plan. Structure only, not accuracy.
 #
-# THIS PASS RUNS ONLY VARIANT A -- three runs, one per PDE. The B variants are
-# written out but commented at the bottom of this file; they will be enabled
-# later and pointed at the root checkpoints these A runs produce, so the 100k
-# root segment is trained once rather than twice.
+# Mirrors experiment_plans/soap_100k_root_vs_phase3.yaml but with tiny
+# architectures, 512 residual points and 5 epochs per segment, so all six
+# flows execute end to end in minutes on CPU.
 #
-#   A  root -> fine_tune          (adaptive_pinn.epochs = 0)      [ACTIVE]
-#      The root is trained, the tree is built from it, all leaves are spawned,
-#      and phase 3 is SKIPPED. The joint PoU composition is then trained
-#      directly. NOTE: root (6x100) and experts (3x20) have different shapes,
-#      so no parent-weight copy is possible -- the experts start from a fresh
-#      init and only the tree GEOMETRY carries over from the root.
+# What it is meant to prove:
+#   * the A-variant really skips phase 3 (epochs: 0) and still spawns the
+#     decomposition, then fine-tunes the composition
+#   * the B-variant still runs root -> phase 3 -> fine-tune
+#   * min_points_per_expert tops up starved experts (floor 128 against a
+#     512-point global draw, so it must fire)
+#   * SOAP + float32 + smoothstep C^4 + sigma_fraction 0.03 all work
+#   * output_dim 2 (schrodinger) works alongside the scalar problems
 #
-#   B  root -> phase 3 -> fine_tune   (the regular flow)          [DISABLED]
-#      Reuses A's root, then phase 3 for 100k and fine_tune for 30k.
+# Warmup/decay are set to 2 steps so both scheduler branches are exercised
+# within the 5-epoch budget.
 #
-# Every segment uses SOAP with the jaxpi schedule (linear warmup 5k to 1e-3,
-# then exponential decay 0.9 every 2k -> ~5.2e-6 final). Deliberately plain:
-# no adaptive collars, no adaptive sampling, no collar data, no LRA, no causal
-# training. sigma_fraction is fixed at 0.03 and the smoothstep order at 4 for
-# every PDE (not tied to the PDE's own order).
-#
-# Budget: A = 200k iters/run (3 runs = 600k). B later = 130k iters/run on top
-# of a reused root.
-#
-# Run:  python run_experiments.py experiment_plans/soap_100k_root_vs_phase3.yaml
+# Run:  python run_experiments.py experiment_plans/smoke_soap_root_vs_phase3.yaml
 base_config:
   activation: tanh
   adam:
@@ -33,9 +25,6 @@ base_config:
     - 0.999
     eps: 1.0e-08
   soap:
-    # Released jaxpi SOAP config (examples/*/configs/*soap.py), which is the
-    # artifact behind the published PINN numbers. The paper text instead
-    # recommends beta1=0.99 from its ablation -- worth a later sweep.
     betas:
     - 0.9
     - 0.999
@@ -43,7 +32,7 @@ base_config:
     weight_decay: 0.0
   adaptive_pinn:
     AToE_threshold_capacity: null
-    M_experts_num: 8
+    M_experts_num: 4
     blending_mode: soft
     enable_gradient_diagnostics: false
     enable_timing: false
@@ -53,17 +42,13 @@ base_config:
       corrector_architecture: null
       corrector_init: zero
       single_corrector: false
-      epochs: 100000
+      epochs: 5
       lr: 0.001
       lr_schedule: exponential
-      lr_warmup_steps: 5000
+      lr_warmup_steps: 2
       lr_decay_rate: 0.9
-      lr_decay_steps: 2000
-      # Grace period before the plateau test can fire. Covers the 5k-step
-      # warmup plus 5k of decay, so a noisy/flat rel-L2 during the LR ramp
-      # cannot early-stop the segment. Fine-tune reads this key; root and
-      # phase 3 read the top-level min_epochs instead.
-      min_epochs: 10000
+      lr_decay_steps: 2
+      min_epochs: 1
       optimizer_1: soap
       optimizer_2: null
       optimizer_switch_epoch: 99999
@@ -72,14 +57,14 @@ base_config:
       adaptive_collar_quantile: 0.9
       adaptive_collar_sigma_min: 0.02
       adaptive_collar_sigma_max: 0.5
-      adaptive_collar_grid: 257
+      adaptive_collar_grid: 65
     initial_train:
-      epochs: 100000
+      epochs: 5
       lr: 0.001
       lr_schedule: exponential
-      lr_warmup_steps: 5000
+      lr_warmup_steps: 2
       lr_decay_rate: 0.9
-      lr_decay_steps: 2000
+      lr_decay_steps: 2
       optimizer_1: soap
       optimizer_2: null
       optimizer_switch_epoch: 99999
@@ -87,7 +72,7 @@ base_config:
     split_icbc:
       enabled: true
     tree_max_depth: 15
-    tree_min_samples_leaf: 50
+    tree_min_samples_leaf: 10
     variable_for_expert_size: norm
     variable_for_node_accept: norm
   allen_cahn:
@@ -215,9 +200,9 @@ base_config:
     wavelet_threshold: 0.001
     window_smoothness_order: 4
     window_type: smoothstep
-  cuda: true
-  epochs: 100000
-  eval_every: 1000
+  cuda: false
+  epochs: 5
+  eval_every: 1
   eval_only: false
   lbfgs:
     history_size: 100
@@ -228,37 +213,29 @@ base_config:
     tolerance_grad: 0.0
   lr: 0.001
   lr_decay_rate: 0.9
-  lr_decay_steps: 2000
+  lr_decay_steps: 2
   lr_schedule: exponential
   lr_warmup_start_factor: 0.01
-  lr_warmup_steps: 5000
-  # Applies to the root and phase-3 segments (fine_tune has its own key).
-  min_epochs: 10000
+  lr_warmup_steps: 2
+  min_epochs: 1
   model: AToELeaves
   optimizer_1: soap
   optimizer_2: null
   optimizer_switch_epoch: 99999
-  # Stop a segment after 10 consecutive evals (= 10k epochs at eval_every
-  # 1000) without a >1% rel-L2 improvement over the patience-local best.
-  # The counter resets on any qualifying improvement, so this is "10k epochs
-  # since the last real gain", not a wall-clock cap.
-  patience_evals: 10
+  patience_evals: 99999
   patience_rel_delta: 0.01
   precision: float32
-  print_every: 1000
+  print_every: 1
   problem: burgers1d
   resume_from: null
   sampling:
     collar_data_ratio: 0.0
     collar_margin: 1.0
     eval_train_ratio: 0.25
-    # Floor on RESIDUAL points per expert in phase 3. The global draw is
-    # filtered by region, so thin leaves would otherwise get very few points;
-    # anything short is topped up with a uniform draw inside its own box.
-    min_points_per_expert: 1024
-    n_boundary_train: 256
-    n_initial_train: 256
-    n_residual_train: 8192
+    min_points_per_expert: 128
+    n_boundary_train: 32
+    n_initial_train: 32
+    n_residual_train: 512
     plot_samples_every: 0
     resample_every_epochs: 1
     sample_volume_ratio: 35
@@ -328,65 +305,43 @@ base_config:
   ssbroyden:
     lr: 1.0
     tolerance_grad: 1.0e-10
-experiment_name: soap_100k_root_vs_phase3
+experiment_name: smoke_soap_root_vs_phase3
 experiments:
-# ── A: root -> fine_tune (phase 3 skipped via epochs: 0) ──
+# ── A: root -> fine_tune (phase 3 skipped) ──
 - name: burgers1d_A_root_finetune
   problem: burgers1d
   model: AToELeaves
   epochs: 0
-  base_architecture: [2, 100, 100, 100, 100, 100, 100, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
+  base_architecture: [2, 20, 20, 1]
+  experts_architecture: [2, 8, 1]
 - name: allen_cahn_A_root_finetune
   problem: allen_cahn
   model: AToELeaves
   epochs: 0
-  base_architecture: [2, 100, 100, 100, 100, 100, 100, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
+  base_architecture: [2, 20, 20, 1]
+  experts_architecture: [2, 8, 1]
 - name: schrodinger_A_root_finetune
   problem: schrodinger
   model: AToELeaves
   epochs: 0
-  base_architecture: [2, 100, 100, 100, 100, 100, 100, 2]
-  experts_architecture: [2, 20, 20, 20, 2]
-# ── B: root -> phase 3 -> fine_tune (regular flow) ── DISABLED FOR NOW ──
-#
-# Enabled in a later pass, reusing the root that the A runs above produce, so
-# the 100k root segment is not retrained. Before uncommenting, point each
-# problem's pretrained_base_checkpoint at the corresponding A run's root
-# checkpoint, e.g.
-#
-#     <problem>:
-#       pretrained_base_checkpoint: outputs/experiments/soap_100k_root_vs_phase3_<ts>/
-#                                   <arch-dir>/<run-ts>/checkpoints/best_model_root.pt
-#
-# With the root loaded the orchestrator logs "Root skipped" and goes straight
-# to the tree build, so these become phase3(100k) -> fine_tune(30k).
-#
-# - name: burgers1d_B_phase3_finetune
-#   problem: burgers1d
-#   model: AToELeaves
-#   epochs: 100000
-#   adaptive_pinn:
-#     fine_tune:
-#       epochs: 30000
-#   base_architecture: [2, 100, 100, 100, 100, 100, 100, 1]
-#   experts_architecture: [2, 20, 20, 20, 1]
-# - name: allen_cahn_B_phase3_finetune
-#   problem: allen_cahn
-#   model: AToELeaves
-#   epochs: 100000
-#   adaptive_pinn:
-#     fine_tune:
-#       epochs: 30000
-#   base_architecture: [2, 100, 100, 100, 100, 100, 100, 1]
-#   experts_architecture: [2, 20, 20, 20, 1]
-# - name: schrodinger_B_phase3_finetune
-#   problem: schrodinger
-#   model: AToELeaves
-#   epochs: 100000
-#   adaptive_pinn:
-#     fine_tune:
-#       epochs: 30000
-#   base_architecture: [2, 100, 100, 100, 100, 100, 100, 2]
-#   experts_architecture: [2, 20, 20, 20, 2]
+  base_architecture: [2, 20, 20, 2]
+  experts_architecture: [2, 8, 2]
+# ── B: root -> phase 3 -> fine_tune ──
+- name: burgers1d_B_phase3_finetune
+  problem: burgers1d
+  model: AToELeaves
+  epochs: 5
+  base_architecture: [2, 20, 20, 1]
+  experts_architecture: [2, 8, 1]
+- name: allen_cahn_B_phase3_finetune
+  problem: allen_cahn
+  model: AToELeaves
+  epochs: 5
+  base_architecture: [2, 20, 20, 1]
+  experts_architecture: [2, 8, 1]
+- name: schrodinger_B_phase3_finetune
+  problem: schrodinger
+  model: AToELeaves
+  epochs: 5
+  base_architecture: [2, 20, 20, 2]
+  experts_architecture: [2, 8, 2]

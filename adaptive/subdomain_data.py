@@ -39,6 +39,11 @@ KIND_NAMES = {
 # Tolerance for face-neighbor adjacency checks
 ADJACENCY_TOL = 1e-8
 
+# (min_points_per_expert, expert-set) combinations whose top-up has already
+# been logged, so the message fires on each segment's first draw rather than
+# on every resample.
+_TOPUP_LOGGED = set()
+
 # Highest spatial derivative order m appearing in each PDE. Interior
 # interfaces and the periodic seam must transmit the field plus its spatial
 # derivatives up to order m-1 (C^{m-1} continuity) for the local high-order
@@ -115,7 +120,17 @@ def sample_subdomain_residuals(
         cfg, device, n_res_total, cached_residuals,
         run_dir=run_dir, epoch=epoch, collar_info=collar_info)
 
+    # Floor on residual points per expert. The global draw is filtered by
+    # region, so a leaf's share is proportional to its volume — a thin leaf
+    # around a sharp feature can end up with almost no residual points and
+    # effectively stop training. Any expert under the floor is topped up with
+    # a uniform draw inside its OWN box. Residual points only; the IC/BC/
+    # interface/continuity sets are built separately in build_subdomain_static.
+    min_per_expert = int(
+        cfg.get('sampling', {}).get('min_points_per_expert', 0) or 0)
+
     xs, ts, gs, eids, ks, bc_fids = [], [], [], [], [], []
+    counts, topped = {}, {}
     for eidx in new_expert_indices:
         region = regions[eidx]
         bl, bu = region.bounds_lower, region.bounds_upper
@@ -125,14 +140,47 @@ def sample_subdomain_residuals(
             mask &= (x_g[:, d] >= bl[d]) & (x_g[:, d] <= bu[d])
         mask &= (t_g[:, 0] >= bl[spatial_dim]) & (t_g[:, 0] <= bu[spatial_dim])
 
-        n = mask.sum().item()
-        if n > 0:
-            xs.append(x_g[mask])
-            ts.append(t_g[mask])
-            gs.append(torch.zeros(n, output_dim, device=device))
-            eids.append(torch.full((n,), eidx, dtype=torch.long, device=device))
-            ks.append(torch.full((n,), KIND_RESIDUAL, dtype=torch.long, device=device))
-            bc_fids.append(torch.full((n,), -1, dtype=torch.long, device=device))
+        x_e, t_e = x_g[mask], t_g[mask]
+        n = x_e.shape[0]
+        counts[eidx] = n
+
+        n_extra = max(0, min_per_expert - n)
+        if n_extra > 0:
+            x_add = torch.empty(n_extra, spatial_dim, device=device,
+                                dtype=x_g.dtype)
+            for d in range(spatial_dim):
+                x_add[:, d].uniform_(float(bl[d]), float(bu[d]))
+            t_add = torch.empty(n_extra, 1, device=device, dtype=t_g.dtype)
+            t_add.uniform_(float(bl[spatial_dim]), float(bu[spatial_dim]))
+            x_e = torch.cat([x_e, x_add], dim=0)
+            t_e = torch.cat([t_e, t_add], dim=0)
+            topped[eidx] = n_extra
+
+        n_tot = x_e.shape[0]
+        if n_tot > 0:
+            xs.append(x_e)
+            ts.append(t_e)
+            gs.append(torch.zeros(n_tot, output_dim, device=device))
+            eids.append(torch.full((n_tot,), eidx, dtype=torch.long, device=device))
+            ks.append(torch.full((n_tot,), KIND_RESIDUAL, dtype=torch.long, device=device))
+            bc_fids.append(torch.full((n_tot,), -1, dtype=torch.long, device=device))
+
+    # Resampling runs every epoch under Adam/SOAP, so throttle the log: once
+    # per (floor, expert-set) the first time it is seen — which covers each
+    # segment's opening draw wherever its epochs happen to fall — and then at
+    # the usual reporting cadence.
+    _sig = (min_per_expert, tuple(sorted(new_expert_indices)))
+    _first = _sig not in _TOPUP_LOGGED
+    if _first:
+        _TOPUP_LOGGED.add(_sig)
+    if (min_per_expert > 0 and topped
+            and (_first or epoch is None or epoch % 1000 == 0)):
+        _worst = min(counts.values())
+        logger.info(
+            f"  [SubdomainData] min_points_per_expert={min_per_expert}: "
+            f"topped up {len(topped)}/{len(new_expert_indices)} experts "
+            f"(+{sum(topped.values())} uniform residual points; "
+            f"sparsest expert had {_worst} from the global draw)")
 
     if not xs:
         return _empty(spatial_dim, output_dim, device)

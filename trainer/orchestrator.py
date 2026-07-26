@@ -206,13 +206,25 @@ def train_orchestrator(ctx: TrainingContext) -> None:
         logger.info("[Orchestrator] Zero experts spawned — finishing after root.")
         ctx.total_epochs = ctx.epoch
         return
-    logger.info(f"[Phase 3] Training {total} leaf experts (base retired from composition)")
     _set_trainable(model, 'leaves')
 
-    if split_enabled:
-        _run_split_segment(ctx, 'phase3', cfg['epochs'], cfg)
+    # A zero (or negative) phase-3 budget means "spawn the decomposition, then
+    # go straight to the joint fine-tune". Returning early rather than running
+    # a no-op segment avoids swapping in the split data/loss, forcing hard
+    # blending, and emitting an empty segment event and its plots.
+    _phase3_budget = int(cfg['epochs'])
+    if _phase3_budget <= 0:
+        logger.info(
+            f"[Phase 3] Skipped (epochs={_phase3_budget}): {total} leaf experts "
+            f"spawned but not individually trained; the joint fine-tune trains "
+            f"the composition directly.")
     else:
-        res = _train_segment(ctx, 'phase3', cfg['epochs'], cfg)
+        logger.info(f"[Phase 3] Training {total} leaf experts "
+                    f"(base retired from composition)")
+        if split_enabled:
+            _run_split_segment(ctx, 'phase3', _phase3_budget, cfg)
+        else:
+            res = _train_segment(ctx, 'phase3', _phase3_budget, cfg)
 
     # ── Final joint fine-tune with the PoU-composed loss ──
     _run_fine_tune(ctx)
