@@ -312,8 +312,14 @@ def _train_segment(
                                      and _split_loss_fn._residual_cache)
                                  else None)
                 _mode = 'adaptive' if _split_cached else 'uniform'
-                logger.info(f"  [Resample-Split] Redrawing residual interiors "
-                            f"({_mode}) at epoch {epoch}")
+                # Fires on every resample, i.e. every epoch under Adam/SOAP.
+                # Report it on the same cadence as the sampling plots so a
+                # 100k-epoch segment does not emit 100k identical lines.
+                if (epoch <= segment_start_epoch + 1
+                        or (plot_samples_every > 0
+                            and (epoch - 1) % plot_samples_every == 0)):
+                    logger.info(f"  [Resample-Split] Redrawing residual "
+                                f"interiors ({_mode}) at epoch {epoch}")
                 # Static faces + interface targets are cached for the segment;
                 # only the residual collocation points are redrawn.
                 train_data = build_subdomain_data(
