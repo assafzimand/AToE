@@ -252,6 +252,21 @@ base_config:
   patience_rel_delta: 0.01
   precision: float32
   print_every: 1000
+  # Bounded torch.profiler window per segment, written to
+  # <run_dir>/profile_<segment>.txt. Observer only: no RNG or tensor math is
+  # touched, so results are bit-identical with it on or off, and any profiler
+  # error disables itself and lets training continue. 55 of 100k epochs are
+  # recorded, so the cost is seconds. Read the PERCENTAGES in the report --
+  # absolute times inside a profiled window are inflated by the profiler.
+  profiling:
+    enabled: true
+    segments: all
+    start_epoch: 2000
+    warmup: 5
+    active: 50
+    top_k: 30
+    record_shapes: false
+    emit_trace: false
   problem: burgers1d
   resume_from: null
   sampling:

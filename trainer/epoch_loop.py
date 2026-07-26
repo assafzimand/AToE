@@ -201,6 +201,12 @@ def _train_segment(
     _seg_err_start = None   # (err_grid, epoch) at the segment's first eval
     _seg_gt_ref = None      # (gt_sq_grid, x_grid, t_grid)
 
+    # Bounded torch.profiler window for this segment. Disabled by default and
+    # fail-safe: any profiler error logs once and training continues.
+    from trainer.profiling import make_segment_profiler
+    _profiler = make_segment_profiler(cfg, segment_name, segment_start_epoch,
+                                      run_dir)
+
     # ── Initial collar seeding ──
     # When collar-focused sampling is active (sampling.collar_data_ratio > 0),
     # draw the FIRST collocation with collar focus too, not only at resamples.
@@ -989,6 +995,11 @@ def _train_segment(
         # End epoch timing (handles printing based on print_every)
         timer.end_epoch()
 
+        # Bounded profiling window (no-op unless profiling.enabled). Placed
+        # before the plateau block so a fast-forward `continue` cannot skip it.
+        if _profiler is not None:
+            _profiler.step(epoch)
+
         # Print progress
         if should_evaluate:
             elapsed = time.time() - start_time
@@ -1327,6 +1338,11 @@ def _train_segment(
             except Exception as _pe_err:
                 logger.warning(f"  [Segment:{segment_name}] per-expert region "
                                f"report failed: {_pe_err}")
+    # Report a window the segment ended in the middle of (early stop, NaN,
+    # or a budget shorter than start_epoch + warmup + active).
+    if _profiler is not None:
+        _profiler.close()
+
     _final_tl = train_loss if train_loss is not None else float('nan')
     _final_rl2 = rel_l2 if rel_l2 is not None else float('nan')
     _oom_stopped = getattr(ctx, 'oom_stopped', False)
