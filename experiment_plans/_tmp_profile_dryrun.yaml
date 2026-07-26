@@ -1,18 +1,3 @@
-# One short run to verify torch.profiler works on the GPU box.
-#
-# Same scale as the real campaign -- 6x100 root, 3x20 experts, 8192 residual
-# points resampled every epoch, SOAP with precondition_frequency 2, float32 --
-# but only 500 epochs per segment, and it runs ALL THREE phases (root ->
-# phase 3 -> fine_tune) so every profiled segment is exercised.
-#
-# Profiling window: 50 recorded steps (5 warmup) starting 200 epochs into each
-# segment, i.e. well past the 50-step LR warmup and in steady state. Writes
-# <run_dir>/profile_root.txt, profile_phase3.txt, profile_fine_tune.txt --
-# PyTorch key_averages tables; read the Self CUDA % column.
-#
-# Purpose is the profile, NOT accuracy. 500 epochs proves nothing about rel-L2.
-#
-# Run:  bash AWS_scripts/run_profile_check.sh
 base_config:
   activation: tanh
   adam:
@@ -22,7 +7,7 @@ base_config:
     eps: 1.0e-08
   adaptive_pinn:
     AToE_threshold_capacity: null
-    M_experts_num: 8
+    M_experts_num: 4
     blending_mode: soft
     enable_gradient_diagnostics: false
     enable_timing: false
@@ -36,7 +21,7 @@ base_config:
       adaptive_collar_size: false
       corrector_architecture: null
       corrector_init: zero
-      epochs: 500
+      epochs: 20
       lr: 0.001
       lr_decay_rate: 0.9
       lr_decay_steps: 100
@@ -49,7 +34,7 @@ base_config:
       sigma_fraction: 0.03
       single_corrector: false
     initial_train:
-      epochs: 500
+      epochs: 20
       lr: 0.001
       lr_decay_rate: 0.9
       lr_decay_steps: 100
@@ -62,7 +47,7 @@ base_config:
     split_icbc:
       enabled: true
     tree_max_depth: 15
-    tree_min_samples_leaf: 50
+    tree_min_samples_leaf: 10
     variable_for_expert_size: norm
     variable_for_node_accept: norm
   allen_cahn:
@@ -190,9 +175,9 @@ base_config:
     wavelet_threshold: 0.001
     window_smoothness_order: 4
     window_type: smoothstep
-  cuda: true
-  epochs: 500
-  eval_every: 100
+  cuda: false
+  epochs: 20
+  eval_every: 5
   eval_only: false
   lbfgs:
     history_size: 100
@@ -215,26 +200,26 @@ base_config:
   patience_evals: 99999
   patience_rel_delta: 0.01
   precision: float32
-  print_every: 100
+  print_every: 5
   problem: burgers1d
   profiling:
-    active: 50
+    active: 5
     emit_trace: false
     enabled: true
     record_shapes: false
     segments: all
-    start_epoch: 200
-    top_k: 40
-    warmup: 5
+    start_epoch: 5
+    top_k: 12
+    warmup: 2
   resume_from: null
   sampling:
     collar_data_ratio: 0.0
     collar_margin: 1.0
     eval_train_ratio: 0.25
-    min_points_per_expert: 1024
-    n_boundary_train: 256
-    n_initial_train: 256
-    n_residual_train: 8192
+    min_points_per_expert: 64
+    n_boundary_train: 32
+    n_initial_train: 32
+    n_residual_train: 512
     plot_samples_every: 0
     resample_every_epochs: 1
     sample_volume_ratio: 35
@@ -311,23 +296,17 @@ base_config:
   ssbroyden:
     lr: 1.0
     tolerance_grad: 1.0e-10
-experiment_name: profile_soap_gpu_check
+experiment_name: profile_local_dryrun
 experiments:
 - base_architecture:
   - 2
-  - 100
-  - 100
-  - 100
-  - 100
-  - 100
-  - 100
+  - 20
+  - 20
   - 1
-  epochs: 500
+  epochs: 20
   experts_architecture:
   - 2
-  - 20
-  - 20
-  - 20
+  - 8
   - 1
   model: AToELeaves
   name: burgers1d_profile_all_phases

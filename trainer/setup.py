@@ -461,6 +461,9 @@ def _cast_data_to_dtype(batch: Dict, dtype: torch.dtype) -> Dict:
     return result
 
 
+_SPLIT_SHORTCUT_LOGGED = False
+
+
 def _create_split_dataloader(
     data: Dict,
     batch_size: int,
@@ -475,10 +478,15 @@ def _create_split_dataloader(
                      'cont_neighbor', 'cont_dim')
     n_samples = data['x'].shape[0]
     if batch_size >= n_samples:
-        logger.info(
-            f"  Split dataloader: full-batch shortcut "
-            f"(batch_size={batch_size} >= {n_samples} samples); "
-            f"skipping per-row collation")
+        # Rebuilt on every resample (i.e. every epoch under Adam/SOAP), so
+        # announce the mechanism once rather than 100k times.
+        global _SPLIT_SHORTCUT_LOGGED
+        if not _SPLIT_SHORTCUT_LOGGED:
+            _SPLIT_SHORTCUT_LOGGED = True
+            logger.info(
+                f"  Split dataloader: full-batch shortcut "
+                f"(batch_size={batch_size} >= {n_samples} samples); "
+                f"skipping per-row collation (logged once per run)")
         return _FullBatchLoader(
             lambda: {k: data[k] for k in _SPLIT_FIELDS})
 

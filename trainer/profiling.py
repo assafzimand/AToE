@@ -173,45 +173,37 @@ class SegmentProfiler:
         return 0.0
 
     def _write_report(self, prof) -> None:
+        """Dump PyTorch's own key_averages table.
+
+        The percentage columns (Self CUDA % / Self CPU %) come straight from
+        torch.profiler rather than from arithmetic here, so the report is the
+        canonical format and there is no custom measurement code in the path.
+        """
         if self._run_dir is None:
             return
-        evts = list(prof.key_averages())
+        ka = prof.key_averages()
         on_cuda = torch.cuda.is_available()
-        kind = 'device' if on_cuda else 'cpu'
-        rows = [(e.key, self._total(e, kind), self._total(e, 'cpu'),
-                 getattr(e, 'count', 0)) for e in evts]
-        total = sum(r[1] for r in rows) or 1.0
-        rows.sort(key=lambda r: r[1], reverse=True)
+        label = 'CUDA' if on_cuda else 'CPU'
+        sort_by = 'self_device_time_total' if on_cuda else 'self_cpu_time_total'
 
         path = self._run_dir / f"profile_{self._segment}.txt"
         path.parent.mkdir(parents=True, exist_ok=True)
-        label = 'CUDA' if on_cuda else 'CPU'
         with open(path, 'w', encoding='utf-8') as f:
             f.write(f"Profile - segment '{self._segment}'\n")
-            f.write(f"  window        : {self._active} recorded steps "
+            f.write(f"  window : {self._active} recorded steps "
                     f"({self._warmup} warmup) starting "
                     f"{self._start_epoch} epochs into the segment\n")
-            f.write(f"  device        : {label}\n")
-            f.write(f"  total self {label}: {total / 1e3:.1f} ms over the window "
-                    f"({total / 1e3 / self._active:.3f} ms/step)\n\n")
-            f.write("ABSOLUTE TIMES INSIDE A PROFILED WINDOW ARE INFLATED BY THE\n"
-                    "PROFILER. Use the percentages, not the milliseconds.\n\n")
-            if on_cuda:
-                f.write(f"{'%':>7}  {'self CUDA (ms)':>16}  "
-                        f"{'self CPU (ms)':>14}  {'calls':>8}  op\n")
-                f.write("-" * 96 + "\n")
-                for key, dev_us, cpu_us, n in rows[:self._top_k]:
-                    f.write(f"{100.0 * dev_us / total:7.2f}  {dev_us / 1e3:16.3f}  "
-                            f"{cpu_us / 1e3:14.3f}  {n:8d}  {key}\n")
-            else:
-                f.write(f"{'%':>7}  {'self CPU (ms)':>16}  {'calls':>8}  op\n")
-                f.write("-" * 80 + "\n")
-                for key, dev_us, _cpu, n in rows[:self._top_k]:
-                    f.write(f"{100.0 * dev_us / total:7.2f}  {dev_us / 1e3:16.3f}  "
-                            f"{n:8d}  {key}\n")
+            f.write(f"  device : {label}   (sorted by {sort_by})\n\n")
+            f.write("Read the PERCENT columns. Absolute times inside a profiled\n"
+                    "window are inflated by the profiler itself.\n\n")
+            f.write(ka.table(sort_by=sort_by, row_limit=self._top_k))
+            f.write("\n")
 
-        top = ", ".join(f"{k} {100.0 * d / total:.0f}%"
-                        for k, d, _, _ in rows[:3])
+        kind = 'device' if on_cuda else 'cpu'
+        rows = sorted(((e.key, self._total(e, kind)) for e in ka),
+                      key=lambda r: r[1], reverse=True)
+        total = sum(r[1] for r in rows) or 1.0
+        top = ", ".join(f"{k} {100.0 * d / total:.0f}%" for k, d in rows[:3])
         logger.info(f"  [Profiler] {self._segment}: wrote {path.name} "
                     f"({len(rows)} ops, {total / 1e3 / self._active:.3f} ms/step "
                     f"self-{label} in-window). Top: {top}")
