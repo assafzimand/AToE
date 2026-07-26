@@ -28,8 +28,8 @@ base_config:
       # Size each face from the root's gradient field instead of the fixed
       # fraction above. sigma_min/sigma_max are in the SAME unit as
       # sigma_fraction and clamp the result.
-      adaptive_collar_size: false
-      adaptive_collar_quantile: 0.85
+      adaptive_collar_size: true
+      adaptive_collar_quantile: 0.9
       adaptive_collar_sigma_min: 0.02
       adaptive_collar_sigma_max: 0.5
       adaptive_collar_grid: 257
@@ -409,30 +409,19 @@ base_config:
   ssbroyden:
     lr: 1.0
     tolerance_grad: 1.0e-10
-experiment_name: finetune_nocorr_40k
+experiment_name: adaptive_collar_40k
+# All runs load pretrained leaf experts, so root and phase 3 are skipped and
+# the run is fine-tune only: 40k SSBroyden under the adaptive-collar windows
+# (q=0.9, sigma clamped to [0.02, 0.5]) sized from the root at fine-tune start.
+#
+# sigma_fraction (0.05 from base) is only the fallback here — with
+# adaptive_collar_size on, the clamps are what bound the real widths.
+#
+# One baseline per problem, then two Burgers variants that change only where
+# the residual points go, so any difference is attributable to sampling.
 experiments:
-# ── Schrödinger (output_dim 2) — first, to confirm the OOM fix ──
-- name: schrodinger_nocorr
-  problem: schrodinger
-  model: AToELeaves
-  adaptive_pinn:
-    fine_tune:
-      single_corrector: false
-  base_architecture:
-  - 2
-  - 60
-  - 60
-  - 60
-  - 60
-  - 2
-  experts_architecture:
-  - 2
-  - 20
-  - 20
-  - 20
-  - 2
 # ── Allen–Cahn (sigma_fraction 0.05 from base) ──
-- name: allen_cahn_nocorr
+- name: allen_cahn_adaptive_collar
   problem: allen_cahn
   model: AToELeaves
   adaptive_pinn:
@@ -452,13 +441,68 @@ experiments:
   - 20
   - 1
 # ── Burgers (sigma_fraction 0.2) ──
-- name: burgers1d_nocorr
+- name: burgers1d_adaptive_collar
   problem: burgers1d
   model: AToELeaves
   adaptive_pinn:
     fine_tune:
-      sigma_fraction: 0.2
       single_corrector: false
+  base_architecture:
+  - 2
+  - 60
+  - 60
+  - 60
+  - 60
+  - 1
+  experts_architecture:
+  - 2
+  - 20
+  - 20
+  - 20
+  - 1
+# ── Burgers again, with half the residual budget drawn inside the collars.
+# The collar band is now derived from the ADAPTIVE deltas, so the extra
+# points land in the bands the sensor actually chose — this is the run that
+# tests whether concentrating residual there helps fine-tune reconcile the
+# experts across the overlap. ──
+- name: burgers1d_adaptive_collar_data05
+  problem: burgers1d
+  model: AToELeaves
+  adaptive_pinn:
+    fine_tune:
+      single_corrector: false
+  sampling:
+    collar_data_ratio: 0.5
+  base_architecture:
+  - 2
+  - 60
+  - 60
+  - 60
+  - 60
+  - 1
+  experts_architecture:
+  - 2
+  - 20
+  - 20
+  - 20
+  - 1
+# ── Burgers with residual-driven adaptive sampling instead: half the budget
+# redrawn every 1k epochs, weighted by the PDE residual. Where the collar
+# variant above targets the overlap bands by construction, this one lets the
+# residual decide — so the two together separate "points in the collars help"
+# from "points where the loss is large help". ──
+- name: burgers1d_adaptive_collar_adaptsamp05
+  problem: burgers1d
+  model: AToELeaves
+  adaptive_pinn:
+    fine_tune:
+      single_corrector: false
+  burgers1d:
+    adaptive_sampling:
+      enabled: true
+      adaptive_ratio: 0.5
+  sampling:
+    resample_every_epochs: 500
   base_architecture:
   - 2
   - 60
