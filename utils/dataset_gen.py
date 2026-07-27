@@ -13,6 +13,11 @@ from utils.logging_config import get_logger
 
 logger = get_logger(__name__)
 
+# (n_collar, n_uniform, n_adaptive) splits already reported, so the collar
+# sampling line fires on a segment's first draw and on any later change to the
+# mix rather than on every resample. See _sample_residual_points.
+_COLLAR_MIX_LOGGED = set()
+
 
 def calculate_dataset_sizes(config: Dict) -> Dict[str, int]:
     """
@@ -852,8 +857,17 @@ def sample_residual_points(
             n_collar, collar_info, config, device)
         x_res[idx:idx + n_collar] = x_col
         t_res[idx:idx + n_collar] = t_col
-        logger.info(f"  [Resample] Collar: {n_collar} points "
-                    f"(uniform={n_uniform}, adaptive={n_adaptive})")
+        # Once per distinct split, not once per epoch. Adam/SOAP resample
+        # EVERY epoch, so an ungated line here writes one identical row per
+        # epoch — 100k of them in a 100k-epoch segment. The mix only changes
+        # when the config or the collar geometry does, so logging per distinct
+        # (collar, uniform, adaptive) tuple still reports the segment's first
+        # draw and any later change, and says nothing in between.
+        _mix = (n_collar, n_uniform, n_adaptive)
+        if _mix not in _COLLAR_MIX_LOGGED:
+            _COLLAR_MIX_LOGGED.add(_mix)
+            logger.info(f"  [Resample] Collar: {n_collar} points "
+                        f"(uniform={n_uniform}, adaptive={n_adaptive})")
         if (collar_info.get('plot') and run_dir is not None
                 and epoch is not None and spatial_dim == 1):
             _save_collar_sampling_plot(
