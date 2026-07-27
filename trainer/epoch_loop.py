@@ -1193,6 +1193,30 @@ def _train_segment(
                 if expert_grads:
                     logger.info(f"  [DIAG] Expert grad norms: {[f'{x:.3e}' for x in expert_grads[:5]]}" + ("..." if len(expert_grads) > 5 else ""))
 
+        # ── Incremental metrics dump ──────────────────────────────────────
+        # metrics.json used to be written only by finalize(), so anything that
+        # killed the process discarded the whole run's history — training
+        # curves, per-expert rel-L2, LR/grad-norm traces. A SIGKILL (the OOM
+        # killer) cannot be caught, so no amount of exception handling helps;
+        # the only fix is to have the file already on disk. Rewriting it at
+        # every eval caps the loss at one eval interval.
+        #
+        # Written to a temp file and renamed, so a kill mid-write leaves the
+        # previous complete metrics.json rather than a truncated one. Compact
+        # (no indent) because this runs ~200x per segment; finalize still
+        # writes the pretty version at the end.
+        if should_evaluate and run_dir is not None:
+            try:
+                _mp = run_dir / "metrics.json"
+                _mp_tmp = run_dir / "metrics.json.tmp"
+                with open(_mp_tmp, 'w') as _f:
+                    json.dump(metrics, _f, cls=_NumpySafeEncoder)
+                _mp_tmp.replace(_mp)
+            except Exception as _e:                             # noqa: BLE001
+                logger.warning(f"  [Metrics] incremental write failed "
+                               f"({type(_e).__name__}: {_e}); the end-of-run "
+                               f"write is unaffected.")
+
         # Save checkpoint periodically (only when we have grid metrics)
         if epoch % save_every == 0 and rel_l2 is not None:
             checkpoint_path = checkpoint_dir / f"checkpoint_epoch_{epoch}.pt"

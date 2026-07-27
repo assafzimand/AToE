@@ -38,8 +38,7 @@
 #
 # This is the DEFAULT plan: `python run_experiments.py` with no argument reads
 # experiments_plan.yaml, so AWS_scripts/run_and_terminate.sh launches it as-is.
-# A copy is kept at experiment_plans/soap_capacity_vs_phase3.yaml; the previous
-# campaign's plan is preserved unchanged at soap_100k_root_vs_phase3.yaml.
+# A copy is kept at experiment_plans/soap_100k_root_vs_phase3.yaml.
 #
 # Run:  python run_experiments.py
 #   or: bash AWS_scripts/run_and_terminate.sh      (runs, then stops the box)
@@ -391,7 +390,7 @@ base_config:
   ssbroyden:
     lr: 1.0
     tolerance_grad: 1.0e-10
-experiment_name: soap_capacity_vs_phase3
+experiment_name: soap_100k_root_vs_phase3
 experiments:
 # ── A: fine_tune only, phase 3 skipped (epochs: 0), experts 4x35 ──
 - name: burgers1d_A_root_finetune

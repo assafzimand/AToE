@@ -13,6 +13,10 @@ __pycache__/
 *.pyo
 *.pyd
 *.pt
+# Re-include root checkpoints at any depth. `!roots_checkpoints/*.pt` alone
+# only rescues files sitting directly in the folder, so the precision
+# subfolders (single_precision/, double_precision/) stayed ignored.
+!roots_checkpoints/**/*.pt
 !roots_checkpoints/*.pt
 *.png
 .Python
