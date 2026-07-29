@@ -77,21 +77,36 @@ def _build_rad_pool(model, loss_fn, cfg, device, train_data):
         t = torch.empty(n_pool, 1, device=device, dtype=dtype)
         t.uniform_(float(pc['temporal_domain'][0]), float(pc['temporal_domain'][1]))
 
-        true_ = torch.ones(n_pool, dtype=torch.bool, device=device)
-        false_ = torch.zeros(n_pool, dtype=torch.bool, device=device)
-        batch = {
-            'x': x, 't': t,
-            'h_gt': torch.zeros(n_pool, pc['output_dim'],
-                                device=device, dtype=dtype),
-            'mask': {'residual': true_, 'IC': false_, 'BC': false_},
-        }
+        # Chunked: the residual needs 2nd derivatives, and in the fine-tune the
+        # forward is the full PoU composition (every leaf evaluated at every
+        # point). A single 100k-point graph over ~10 experts is a large
+        # allocation for one diagnostic draw, and this process has been
+        # OOM-killed before. Chunks are independent -- no cross-chunk graph --
+        # so this is numerically identical to one shot.
+        chunk = int((cfg.get('sampling', {}) or {}).get('rad_pool_chunk', 20000)
+                    or 20000)
         was_training = model.training
         model.eval()
-        out = loss_fn(model, batch, for_tree_spawning=True,
-                      update_causal_state=False)
+        r2_parts = []
+        for s in range(0, n_pool, chunk):
+            e = min(s + chunk, n_pool)
+            m = e - s
+            batch = {
+                'x': x[s:e], 't': t[s:e],
+                'h_gt': torch.zeros(m, pc['output_dim'],
+                                    device=device, dtype=dtype),
+                'mask': {
+                    'residual': torch.ones(m, dtype=torch.bool, device=device),
+                    'IC': torch.zeros(m, dtype=torch.bool, device=device),
+                    'BC': torch.zeros(m, dtype=torch.bool, device=device),
+                },
+            }
+            out = loss_fn(model, batch, for_tree_spawning=True,
+                          update_causal_state=False)
+            r2_parts.append(out['residual'].detach())
         if was_training:
             model.train()
-        r2 = out['residual'].detach()
+        r2 = torch.cat(r2_parts)
     except Exception as exc:                                    # noqa: BLE001
         logger.warning(f"  [RAD] pool refresh failed ({type(exc).__name__}: "
                        f"{exc}); keeping the previous pool.")
