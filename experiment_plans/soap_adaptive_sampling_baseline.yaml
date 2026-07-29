@@ -329,7 +329,7 @@ base_config:
     n_boundary_train: 256
     n_initial_train: 256
     n_residual_train: 8192
-    plot_samples_every: 5000
+    plot_samples_every: 0
     resample_every_epochs: 1
     sample_volume_ratio: 35
   save_every: 999999

@@ -527,21 +527,36 @@ def _sample_adaptive_residual_points(
     t_selected += torch.randn(n_points, 1, device=device) * t_noise_std
     t_selected = torch.clamp(t_selected, min=t_min, max=t_max)
     
-    # Diagnostic logging
-    r_min = residuals.min().item()
-    r_max = residuals.max().item()
-    r_mean = residuals.mean().item()
-    logger.info(f"  [Resample] Adaptive: residual_pdf min={r_min:.6f}, max={r_max:.6f}, mean={r_mean:.6f} (from cached PDE residuals)")
-    
+    # Diagnostics. Adam/SOAP resample EVERY epoch, so both of these have to be
+    # throttled or they dominate the step. The heatmap was unconditional: a
+    # matplotlib savefig per epoch, the same failure already fixed at the other
+    # plot sites (measured there at ~450 ms/step against ~9 ms of real GPU
+    # work) -- it only escaped because adaptive sampling was off in every SOAP
+    # campaign since. It now follows sampling.plot_samples_every like every
+    # other plot (0 = never). The three .item() calls below are device->host
+    # syncs, so the log line is tied to print_every rather than run per epoch.
+    _pse = int((config.get('sampling', {}) or {}).get('plot_samples_every', 0) or 0)
+    _print_every = int(config.get('print_every', 1000) or 1000)
+
+    if epoch is None or epoch % _print_every == 0:
+        r_min = residuals.min().item()
+        r_max = residuals.max().item()
+        r_mean = residuals.mean().item()
+        logger.info(f"  [Resample] Adaptive: residual_pdf min={r_min:.6f}, "
+                    f"max={r_max:.6f}, mean={r_mean:.6f} "
+                    f"(from cached PDE residuals)")
+
     # Save diagnostic heatmap (only for 1D spatial problems)
-    if run_dir is not None and epoch is not None and spatial_dim == 1:
+    if (_pse > 0 and run_dir is not None and epoch is not None
+            and (epoch - 1) % _pse == 0 and spatial_dim == 1):
         _save_adaptive_sampling_heatmap(
             x_cached, t_cached, r2_cached,
             x_selected, t_selected,
             run_dir, epoch, config,
             causal_state=causal_state,
         )
-    
+
+
     return x_selected, t_selected
 
 
