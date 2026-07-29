@@ -157,6 +157,35 @@ def _train_segment(
     grad_clip_norm = ctx.grad_clip_norm
     expert_grad_clip_norm = ctx.expert_grad_clip_norm
     adaptive_sampling_enabled = ctx.adaptive_sampling_enabled
+    # ── Phase 3 always samples UNIFORMLY, whatever the config says ──────────
+    # Phase 3 trains each leaf on its own subdomain, with the interfaces
+    # mounted from the root's prediction, so the expert only has to learn a
+    # local PDE with no transition inside its box. The decomposition has
+    # ALREADY done the spatial adaptation: the wavelet tree makes boxes small
+    # where the solution is hard and large where it is smooth, and each box is
+    # accepted only once it is locally smooth enough. Residual-weighted
+    # sampling inside such a box has little left to concentrate on.
+    #
+    # It would also be near-useless here even if it did: the split loss reduces
+    # per expert (`{eidx: r2[s:e].mean()}`, summed with equal weight across
+    # experts), so drawing more points into one leaf does not raise its weight
+    # -- only the within-box distribution could change. And routing through the
+    # global-draw-then-filter path to get it would give up the direct
+    # per-expert draw, whose whole point is avoiding the data-dependent mask
+    # shapes that cost ~163 device->host copies per step.
+    #
+    # Adaptive sampling stays on for the root and, deliberately, for the joint
+    # fine-tune: that is the only segment where an expert is evaluated OUTSIDE
+    # its own box (the PoU blends it across the collar), so it is the only
+    # segment where residual-weighted sampling can teach it its collar
+    # behaviour. On the phase-3 checkpoints, 99.7-99.97% of the composed
+    # residual sits in those collars, so the fine-tune's adaptive draw lands
+    # there without being aimed.
+    if segment_name == 'phase3' and adaptive_sampling_enabled:
+        adaptive_sampling_enabled = False
+        logger.info(
+            "  [Sampling] phase3: adaptive sampling force-disabled for this "
+            "segment (uniform per-expert draw); resample cadence is unchanged.")
     # Diagnostic residual-heatmap plot cadence. Absent -> follow the resample
     # cadence; 0 -> never plot. The old `... or resample_every` turned an
     # explicit 0 back into the resample cadence, so the documented way to
