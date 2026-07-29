@@ -51,6 +51,54 @@ from trainer.setup import (
 )
 
 
+def _build_rad_pool(model, loss_fn, cfg, device, train_data):
+    """Fresh uniform candidate pool + its PDE residual, for RAD re-targeting.
+
+    Wu et al. (CMAME 2023) draw a large uniform pool each RAD cycle and select
+    the collocation set from it. Reusing the previous epoch's own points, as
+    this path used to, is a bootstrap filter: the support feeds on itself and
+    only the uniform half rejuvenates it.
+
+    Returns ``[(x, t, r2)]`` in the shape the sampler expects, or None if the
+    residual probe fails (in which case the caller keeps the previous pool and
+    training is unaffected).
+    """
+    n_pool = int((cfg.get('sampling', {}) or {}).get(
+        'rad_pool_size', 100000) or 100000)
+    problem = cfg['problem']
+    pc = cfg[problem]
+    sd = pc['spatial_dim']
+    dtype = train_data['x'].dtype
+    try:
+        x = torch.empty(n_pool, sd, device=device, dtype=dtype)
+        for d in range(sd):
+            lo, hi = pc['spatial_domain'][d]
+            x[:, d].uniform_(float(lo), float(hi))
+        t = torch.empty(n_pool, 1, device=device, dtype=dtype)
+        t.uniform_(float(pc['temporal_domain'][0]), float(pc['temporal_domain'][1]))
+
+        true_ = torch.ones(n_pool, dtype=torch.bool, device=device)
+        false_ = torch.zeros(n_pool, dtype=torch.bool, device=device)
+        batch = {
+            'x': x, 't': t,
+            'h_gt': torch.zeros(n_pool, pc['output_dim'],
+                                device=device, dtype=dtype),
+            'mask': {'residual': true_, 'IC': false_, 'BC': false_},
+        }
+        was_training = model.training
+        model.eval()
+        out = loss_fn(model, batch, for_tree_spawning=True,
+                      update_causal_state=False)
+        if was_training:
+            model.train()
+        r2 = out['residual'].detach()
+    except Exception as exc:                                    # noqa: BLE001
+        logger.warning(f"  [RAD] pool refresh failed ({type(exc).__name__}: "
+                       f"{exc}); keeping the previous pool.")
+        return None
+    return [(x.detach(), t.detach(), r2)]
+
+
 def _train_segment(
     ctx: TrainingContext,
     segment_name: str,
@@ -167,6 +215,12 @@ def _train_segment(
     _stop_reason = 'budget'
     _lra_updated_epoch = -1
     _native_fallback_logged = False  # log the native-grid fallback once per segment
+    # RAD candidate pool, rebuilt every sampling.resample_every_epochs when
+    # adaptive sampling is on. Segment-local: each segment re-targets from
+    # scratch rather than inheriting the previous segment's residual field.
+    _rad_pool = None
+    _rad_pool_epoch = -1
+    _rad_pool_logged = None
 
     _n_train_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     _switch_str = (f" -> {optimizer_2_name.upper()}@{switch_epoch}"
@@ -373,6 +427,36 @@ def _train_segment(
             else:
                 cached_residuals = getattr(model, '_residual_cache', [])
                 model._residual_cache_enabled = False
+                # ── RAD re-target (adaptive sampling only) ──────────────────
+                # Two cadences, deliberately different:
+                #   * the UNIFORM half is redrawn every epoch (jaxpi/SOAP
+                #     behaviour -- stops the net memorising a frozen set),
+                #   * the residual DISTRIBUTION the adaptive half draws from
+                #     is rebuilt only every sampling.resample_every_epochs.
+                # Re-targeting every epoch, as this did before, meant chasing a
+                # one-step-old single-forward-pass residual estimate while
+                # SOAP's preconditioner EMA tried to track a moving objective.
+                # Wu et al. (CMAME 2023), the RAD reference, re-target every
+                # 1000 iterations from a FRESH uniform pool; drawing from last
+                # epoch's own points instead makes it a bootstrap filter.
+                if adaptive_sampling_enabled:
+                    _pool_every = max(1, int(resample_every))
+                    _need_pool = (
+                        _rad_pool is None
+                        or (epoch - _rad_pool_epoch) >= _pool_every)
+                    if _need_pool:
+                        _new_pool = _build_rad_pool(
+                            model, loss_fn, cfg, device, train_data)
+                        if _new_pool is not None:
+                            _rad_pool, _rad_pool_epoch = _new_pool, epoch
+                            if _rad_pool_logged != _pool_every:
+                                _rad_pool_logged = _pool_every
+                                logger.info(
+                                    f"  [RAD] re-targeting every {_pool_every} "
+                                    f"epochs from a fresh pool of "
+                                    f"{_rad_pool[0][0].shape[0]} uniform points")
+                    if _rad_pool is not None:
+                        cached_residuals = _rad_pool
                 if (not adaptive_sampling_enabled and cached_residuals
                         and _problem_spatial_dim == 1
                         and plot_samples_every > 0

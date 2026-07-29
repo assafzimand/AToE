@@ -43,6 +43,24 @@ def fix_long_path(path):
     return abs_path
 
 
+def _seed_everything(config, logger):
+    """Seed the global RNG BEFORE any weights are drawn.
+
+    _setup_training() also seeds, but it runs after the model already exists
+    (trainer/orchestrator.py hands it a built model), so it never controlled
+    the initialisation. Weight init therefore inherited whatever RNG state the
+    process happened to be in -- which depends on dataset generation and, in a
+    multi-experiment batch, on every run that came before. Two campaigns with
+    the same seed produced measurably different epoch-1 rel-L2 on all three
+    PDEs because of this, which made cross-campaign comparison meaningless.
+    """
+    seed = config['seed']
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    logger.info(f"  Seeded RNG with seed={seed} before model construction")
+
+
 def _build_model(config, adaptive_cfg, architecture, activation, logger):
     """Build the model configured by `model` / `adaptive_pinn`."""
     is_adaptive = adaptive_cfg.get('enabled', False)
@@ -227,6 +245,7 @@ def main():
 
         else:
             logger.info("5. Building model...")
+            _seed_everything(config, logger)
             model = _build_model(config, adaptive_cfg, architecture, activation, logger)
 
             if precision == 'float64':
@@ -272,6 +291,7 @@ def main():
             raise FileNotFoundError(f"Checkpoint not found: {resume_from}")
         logger.info(f"  Using checkpoint: {checkpoint_path}")
 
+        _seed_everything(config, logger)
         model = _build_model(config, adaptive_cfg, architecture, activation, logger)
         if precision == 'float64':
             model = model.double()

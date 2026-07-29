@@ -195,6 +195,19 @@ def _compute_phi_pdf(residuals: torch.Tensor, phi_cfg: Dict) -> torch.Tensor:
     if phi == 'exponential':
         eps = phi_cfg['phi_epsilon']
         w = torch.exp(residuals / eps)
+    elif phi == 'rad':
+        # Wu et al., CMAME 2023 (lu-group/pinn-sampling):
+        #     err = |r|^k / mean(|r|^k) + c
+        # phi_power is k, phi_epsilon is c. The mean-normalisation makes the
+        # weights scale-free (so the same k/c work as the residual shrinks by
+        # orders of magnitude during training) and the +c floor keeps every
+        # region at nonzero probability -- without it the draw can abandon a
+        # region entirely and never revisit it. Plain 'quadratic'/'power' have
+        # neither property.
+        k = phi_cfg['phi_power']
+        c = phi_cfg['phi_epsilon']
+        wk = residuals ** k
+        w = wk / (wk.mean() + 1e-30) + c
     elif phi == 'power':
         p = phi_cfg['phi_power']
         w = residuals ** p
@@ -503,9 +516,21 @@ def _sample_adaptive_residual_points(
     # Compute sampling probability from residual magnitudes
     residuals = torch.sqrt(r2_cached + 1e-10)  # sqrt to get |r| from r²
     probs = _compute_phi_pdf(residuals, phi_cfg)
+    n_cached_total = residuals.shape[0]
     
-    # Draw n_points indices (with replacement) weighted by residual
-    indices = torch.multinomial(probs, num_samples=n_points, replacement=True)
+    # Draw indices weighted by residual. WITHOUT replacement when the pool is
+    # big enough, matching Wu et al.: with replacement a peaked residual field
+    # returns the same few candidates over and over, and the Gaussian jitter
+    # below only smears the duplicates into tight clusters rather than
+    # restoring coverage -- the effective sample size ends up far below
+    # n_points. Without replacement every selected point is distinct. This is
+    # only safe when the pool comfortably exceeds the draw (the RAD pool is
+    # ~100k against a few thousand draws); on a small pool, sampling without
+    # replacement would force in most of the low-residual tail and destroy the
+    # targeting, so fall back to replacement there.
+    _no_replace = n_cached_total >= 4 * n_points
+    indices = torch.multinomial(probs, num_samples=n_points,
+                                replacement=not _no_replace)
     
     # Get selected coordinates
     x_selected = x_cached[indices]
