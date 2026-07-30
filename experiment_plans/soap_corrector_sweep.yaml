@@ -375,7 +375,7 @@ base_config:
   # 1000) without a >1% rel-L2 improvement over the patience-local best.
   # The counter resets on any qualifying improvement, so this is "10k epochs
   # since the last real gain", not a wall-clock cap.
-  patience_evals: 5
+  patience_evals: 10
   patience_rel_delta: 0.01
   precision: float32
   print_every: 1000
