@@ -256,10 +256,15 @@ def region_tiling(leaves, buffers, domain, mode='atomic'):
     t-extended collar keeps only what x-collars left. Same-direction
     collars that overlap are merged into a single region.
 
+    mode='components': every maximal CONNECTED union of collar-covered
+    cells is one region, so a transition subdomain is always contiguous —
+    crossing and touching collars merge, and nothing is ever split into
+    disconnected remnants.
+
     Returns a dict with the cut coordinates ``xs``/``ts``, the per-cell
     ``labels`` array, the ``is_buf`` mask (cell belongs to a transition
     region), and ``keys`` mapping label id -> ('leaf', i) | ('buf', ids)
-    | ('bufx'|'buft', root id).
+    | ('bufx'|'buft', root id) | ('bufc', component id).
     """
     live = [b for b in buffers if b['width'] > TOL]
 
@@ -299,7 +304,32 @@ def region_tiling(leaves, buffers, domain, mode='atomic'):
             a = parent[a]
         return a
 
+    # Connected components of the collar-covered cells (4-connectivity),
+    # used by mode='components'.
+    comp = np.full(is_buf.shape, -1, dtype=np.int64)
+    if mode == 'components':
+        n_comp = 0
+        for i0 in range(is_buf.shape[0]):
+            for j0 in range(is_buf.shape[1]):
+                if not is_buf[i0, j0] or comp[i0, j0] >= 0:
+                    continue
+                todo = [(i0, j0)]
+                comp[i0, j0] = n_comp
+                while todo:
+                    ci, cj = todo.pop()
+                    for ni, nj in ((ci + 1, cj), (ci - 1, cj),
+                                   (ci, cj + 1), (ci, cj - 1)):
+                        if (0 <= ni < is_buf.shape[0]
+                                and 0 <= nj < is_buf.shape[1]
+                                and is_buf[ni, nj] and comp[ni, nj] < 0):
+                            comp[ni, nj] = n_comp
+                            todo.append((ni, nj))
+                n_comp += 1
+
     def _cell_key(i, j):
+        if mode == 'components':
+            return (('bufc', int(comp[i, j])) if is_buf[i, j]
+                    else ('leaf', int(leaf_id[i, j])))
         cov = np.nonzero(stack[:, i, j])[0] if live else ()
         if mode == 'atomic':
             return (('buf', tuple(cov)) if len(cov)
@@ -581,54 +611,55 @@ def collar_heatmap_figure(problem, leaves, buffers, domain, gt_grid, grid_x,
     return path
 
 
-def tiling_figure(problem, leaves, tilings, domain, gt_grid, grid_x, grid_t,
-                  out_dir):
-    """One panel per quantile: outlines of the x-first re-tiling.
+def tiling_figure(problem, leaves, buffers, q, domain, gt_grid, grid_x,
+                  grid_t, out_dir):
+    """Outlines of the re-tiling with CONTIGUOUS transition subdomains.
 
-    Collars own their full band (including what they cover of the cores);
-    at collar crossings the x-extended collar takes the overlap, and
-    overlapping same-direction collars merge. Only region boundaries are
+    Every maximal connected union of collar-covered cells is one
+    transition region, so crossing/touching collars merge and no region
+    is ever split into disconnected remnants. Only region boundaries are
     drawn: dark red where they bound a transition subdomain, black where
     an original leaf interface survived untouched.
     """
-    n = len(tilings)
-    fig, axes = plt.subplots(1, n, figsize=(6.4 * n, 5.6))
-    axes = np.atleast_1d(axes)
+    fig, ax = plt.subplots(figsize=(10.5, 7.0))
+    draw_heatmap(ax, gt_grid, grid_x, grid_t)
 
-    for col, (ax, (q, buffers)) in enumerate(zip(axes, tilings)):
-        draw_heatmap(ax, gt_grid, grid_x, grid_t)
+    tiling = region_tiling(leaves, buffers, domain, mode='components')
+    red, black = tiling_segments(tiling)
+    ax.add_collection(LineCollection(black, colors='black',
+                                     linewidths=1.4, zorder=10))
+    ax.add_collection(LineCollection(red, colors='#8c0d0d',
+                                     linewidths=1.1, zorder=10))
 
-        tiling = region_tiling(leaves, buffers, domain, mode='x-first')
-        red, black = tiling_segments(tiling)
-        ax.add_collection(LineCollection(black, colors='black',
-                                         linewidths=1.4, zorder=10))
-        ax.add_collection(LineCollection(red, colors='#8c0d0d',
-                                         linewidths=1.1, zorder=10))
+    # The original decision-tree leaves, for reference under the re-tiling.
+    for leaf in leaves:
+        lo, hi = leaf['bounds_lower'], leaf['bounds_upper']
+        ax.add_patch(patches.Rectangle(
+            (lo[0], lo[1]), hi[0] - lo[0], hi[1] - lo[1],
+            linewidth=0.9, linestyle=(0, (4, 3)), edgecolor='black',
+            facecolor='none', zorder=9))
 
-        kinds = tiling['keys'].values()
-        n_core = sum(1 for k in kinds if k[0] == 'leaf')
-        n_x = sum(1 for k in tiling['keys'].values() if k[0] == 'bufx')
-        n_t = sum(1 for k in tiling['keys'].values() if k[0] == 'buft')
-        ax.set_xlim(domain['lower'][0], domain['upper'][0])
-        ax.set_ylim(domain['lower'][1], domain['upper'][1])
-        ax.set_xlabel('x')
-        ax.set_ylabel('t')
-        ax.set_title(f'q = {q:.2f}   |   {n_core} cores + {n_x} '
-                     f'x-transitions + {n_t} t-transitions '
-                     f'= {n_core + n_x + n_t} subdomains', fontsize=10)
+    kinds = list(tiling['keys'].values())
+    n_core = sum(1 for k in kinds if k[0] == 'leaf')
+    n_trans = sum(1 for k in kinds if k[0] == 'bufc')
+    ax.set_xlim(domain['lower'][0], domain['upper'][0])
+    ax.set_ylim(domain['lower'][1], domain['upper'][1])
+    ax.set_xlabel('x')
+    ax.set_ylabel('t')
+    ax.set_title(f'{problem} — re-tiling, contiguous transitions   |   '
+                 f'q = {q:.2f}\n{n_core} cores + {n_trans} transition '
+                 f'regions = {n_core + n_trans} subdomains', fontsize=11)
+    _legend(ax, [
+        Line2D([], [], color='#8c0d0d', lw=1.1,
+               label='transition boundary'),
+        Line2D([], [], color='black', lw=0.9, linestyle=(0, (4, 3)),
+               label='original tree leaf'),
+        Line2D([], [], color='black', lw=1.4,
+               label='untouched leaf interface'),
+    ])
 
-        if col == 0:
-            _legend(ax, [
-                Line2D([], [], color='#8c0d0d', lw=1.1,
-                       label='transition boundary'),
-                Line2D([], [], color='black', lw=1.4,
-                       label='untouched leaf interface'),
-            ])
-
-    fig.suptitle(f'{problem} — x-first re-tiling: collars as subdomains, '
-                 f'x-collars win crossings', fontsize=12)
-    plt.tight_layout(rect=(0, 0, 1, 0.95))
-    path = save_png(out_dir / f'tiling_{problem}.png', fig=fig)
+    plt.tight_layout()
+    path = save_png(out_dir / f'tiling_{problem}_q{q:.2f}.png', fig=fig)
     plt.close(fig)
     return path
 
@@ -900,15 +931,12 @@ def process_problem(problem, tree, base_cfg, quantiles, sigmas, min_frac,
         plt.close(fig)
         print(f"    saved {path}")
 
-    if tiling_quantiles:
-        tilings = []
-        for tq in tiling_quantiles:
-            match = next((s for s in sweeps if abs(s[0] - tq) < 1e-9), None)
-            bufs = match[1] if match is not None else build_buffers(
-                leaves, domain, grads, (grid_x, grid_t), tq,
-                min_frac, max_frac)[0]
-            tilings.append((tq, bufs))
-        path = tiling_figure(problem, leaves, tilings, domain, gt_grid,
+    for tq in tiling_quantiles:
+        match = next((s for s in sweeps if abs(s[0] - tq) < 1e-9), None)
+        bufs = match[1] if match is not None else build_buffers(
+            leaves, domain, grads, (grid_x, grid_t), tq,
+            min_frac, max_frac)[0]
+        path = tiling_figure(problem, leaves, bufs, tq, domain, gt_grid,
                              grid_x, grid_t, out_dir)
         print(f"    saved {path}")
 

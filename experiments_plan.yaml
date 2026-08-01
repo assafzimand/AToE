@@ -216,7 +216,7 @@ base_config:
   cuda: true
   # PHASE 3 budget (the top-level `epochs` key is the phase-3 segment).
   epochs: 40000
-  eval_every: 1000
+  eval_every: 500
   eval_only: false
   kdv:
     adaptive_sampling:
