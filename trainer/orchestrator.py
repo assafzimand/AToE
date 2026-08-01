@@ -352,6 +352,16 @@ def _run_fine_tune(ctx: TrainingContext) -> None:
     fine_tune_cfg = ctx.adaptive_cfg.get('fine_tune', None)
     if not fine_tune_cfg:
         return
+    # A zero (or negative) budget means "skip the fine-tune" — mirror the
+    # phase-3 skip. The block itself must still exist in the config: the
+    # model reads its collar geometry (sigma_fraction, adaptive_collar_*)
+    # from fine_tune at CONSTRUCTION time, so `fine_tune: null` fails long
+    # before this point.
+    _ft_budget = int(fine_tune_cfg.get('epochs', 0) or 0)
+    if _ft_budget <= 0:
+        logger.info(f"[FineTune] Skipped (epochs={_ft_budget}); "
+                    f"phase-3 composition is final.")
+        return
 
     # Collars must be final before ANY fine-tune forward — both the joint
     # path and the corrector path blend through the same windows.

@@ -57,11 +57,29 @@ base_config:
     enable_timing: false
     enabled: true
     expert_type: mlp
-    # Fine-tune SKIPPED for this A/B (null => _run_fine_tune returns
-    # immediately; an {epochs: 0} block would still run collar sizing and an
-    # empty segment). The full fine_tune block to restore lives in
-    # experiment_plans/full_flow_root64x5_rad.yaml.
-    fine_tune: null
+    # Fine-tune SKIPPED for this A/B via epochs: 0 (the orchestrator skips
+    # the segment before collar sizing). The BLOCK must stay: AToELeaves
+    # reads its collar geometry (sigma_fraction, adaptive_collar_*) from
+    # here at construction time — fine_tune: null fails in _build_model.
+    # Values match experiment_plans/full_flow_root64x5_rad.yaml; only
+    # epochs differs (40000 there).
+    fine_tune:
+      adaptive_collar_grid: 257
+      adaptive_collar_quantile: 0.9
+      adaptive_collar_sigma_max: 0.5
+      adaptive_collar_sigma_min: 0.03
+      adaptive_collar_size: true
+      corrector_architecture: null
+      corrector_init: zero
+      epochs: 0
+      lr: 0.0001
+      lr_schedule: none
+      min_epochs: 1
+      optimizer_1: ssbroyden
+      optimizer_2: null
+      optimizer_switch_epoch: 99999
+      sigma_fraction: 0.05
+      single_corrector: false
     initial_train:
       # ROOT segment — SKIPPED in this run (burgers1d.pretrained_base_checkpoint
       # is set, which bypasses root training entirely; this block is ignored).
