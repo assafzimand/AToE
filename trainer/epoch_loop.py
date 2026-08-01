@@ -200,7 +200,27 @@ def _train_segment(
         adaptive_sampling_enabled = False
         logger.info(
             "  [Sampling] phase3: adaptive sampling force-disabled for this "
-            "segment (uniform per-expert draw); resample cadence is unchanged.")
+            "segment (uniform per-expert draw).")
+    # ── Phase 3 under a full-batch optimizer trains on a STATIC draw ────────
+    # Redrawing the per-expert interiors mid-segment turned phase 3 into a
+    # moving-target problem the experts cannot converge on. Measured on the
+    # full_flow_root64x5_rad burgers run (500-epoch cadence, SSBroyden):
+    # each 921-param expert ground its ~3k-point draw to ~2e-8 loss, and the
+    # SAME weights scored ~1e-6 on the next fresh draw — a 50-250x
+    # memorization gap, repeating at every redraw, with rel-L2 plateauing at
+    # ~1e-5 (50x worse than the static-draw regime, which reached ≈ root
+    # accuracy). The ROOT survives the same cadence because its redraw
+    # perturbs one RAD-targeted 20k-point global mean; phase 3's objective is
+    # a sum of small per-expert means with shock-concentrated tails, so the
+    # per-redraw jolt is orders larger. Adam/SOAP keep their every-epoch
+    # refresh (stochastic steps average over draws — the proven warmup
+    # regime); only the deterministic full-batch phase goes static.
+    _phase3_static = (segment_name == 'phase3')
+    if _phase3_static and resample_every > 0:
+        logger.info(
+            "  [Sampling] phase3: residual draw is STATIC under full-batch "
+            "optimizers for this segment (one draw at segment start; "
+            "Adam/SOAP would still refresh every epoch).")
     # Diagnostic residual-heatmap plot cadence. Absent -> follow the resample
     # cadence; 0 -> never plot. The old `... or resample_every` turned an
     # explicit 0 back into the resample cadence, so the documented way to
@@ -371,9 +391,14 @@ def _train_segment(
         # flips the cadence mid-segment along with current_optimizer_name.
         _effective_resample_every = (
             1 if current_optimizer_name in ('Adam', 'SOAP') else resample_every)
+        # Phase 3 static draw: no periodic redraw under the full-batch
+        # optimizers (see the segment-setup comment). 0 disables the redraw
+        # below without touching the Adam/SOAP every-epoch branch above.
+        if _phase3_static and current_optimizer_name not in ('Adam', 'SOAP'):
+            _effective_resample_every = 0
         _resampled_this_epoch = False
         _split_ctx = getattr(ctx, '_split_context', None)
-        if (resample_every > 0
+        if (resample_every > 0 and _effective_resample_every > 0
                 and epoch > 1 and (epoch - 1) % _effective_resample_every == 0):
             resample_seed = base_seed + epoch
             _resampled_this_epoch = True
@@ -544,7 +569,7 @@ def _train_segment(
         # cadence as the resample gate above so caching tracks it exactly.
         will_cache_for_resample = (
             adaptive_sampling_enabled
-            and resample_every > 0
+            and resample_every > 0 and _effective_resample_every > 0
             and epoch > 0 and epoch % _effective_resample_every == 0
         )
         # Cache residuals for the diagnostic heatmap even when adaptive sampling is
@@ -575,7 +600,7 @@ def _train_segment(
         _will_cache_split_resample = (
             _split_loss_fn is not None
             and adaptive_sampling_enabled
-            and resample_every > 0
+            and resample_every > 0 and _effective_resample_every > 0
             and epoch > 0 and epoch % _effective_resample_every == 0
         )
         if _split_loss_fn is not None:

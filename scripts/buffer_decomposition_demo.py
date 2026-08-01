@@ -22,7 +22,12 @@ z0, with s(z) < ref_z(q). If no such face exists inside the cap, the
 argmin of s over the scan window is used instead, so the growth always
 terminates. Each side is capped at ``--max-frac`` of that side's own
 extent in z, so a buffer can never reach a second interface, and is
-clipped to the domain box.
+clipped to the domain box. Mirroring the production collar sizing
+(adaptive/collar_sizing.py), each side is then clamped UP to a floor of
+``--min-frac`` of the same extent (default 0.03, the run configs'
+adaptive_collar_sigma_min): the scan runs from the interface itself, and
+a side whose sensor pick lands below the floor is widened to the floor
+and drawn with a distinct hatch.
 
 Low q  = strict bar = wide buffers.  High q = loose bar = thin buffers.
 
@@ -150,9 +155,13 @@ def find_interfaces(leaves):
 def build_buffers(leaves, domain, grads, grid, q, min_frac, max_frac):
     """Grow a buffer band across every interior interface.
 
-    Returns ``(buffers, refs)`` where each buffer carries its box, the
-    interface it straddles, and whether each edge actually met the
-    threshold (vs. falling back to the local argmin).
+    The scan on each side runs from the interface out to
+    ``max_frac * span`` of that side's own leaf; the picked half-width is
+    then clamped UP to a floor of ``min_frac * span``, exactly as the
+    production sizing clamps to sigma_min * extent. Returns
+    ``(buffers, refs)`` where each buffer carries its box, whether each
+    edge met the threshold (vs. the argmin fallback), and whether it was
+    floor-clamped.
     """
     coords = list(grid)
     refs = [float(np.quantile(g, q)) for g in grads]
@@ -170,30 +179,36 @@ def build_buffers(leaves, domain, grads, grid, q, min_frac, max_frac):
             o_mask[np.argmin(np.abs(o_coord - 0.5 * (itf['o_lo']
                                                      + itf['o_hi'])))] = True
 
-        edges, hits = {}, {}
+        edges, hits, floored, edge_g = {}, {}, {}, {}
         for side, leaf, sign in (('lo', itf['low'], -1),
                                  ('hi', itf['high'], +1)):
             span = leaf['bounds_upper'][dim] - leaf['bounds_lower'][dim]
-            near = z0 + sign * min_frac * span
+            floor = min_frac * span
             far = z0 + sign * max_frac * span
             far = min(max(far, domain['lower'][dim]), domain['upper'][dim])
 
-            lo_b, hi_b = sorted((near, far))
+            lo_b, hi_b = sorted((z0, far))
             cand = np.nonzero((z_coord >= lo_b - TOL)
                               & (z_coord <= hi_b + TOL))[0]
-            if cand.size == 0:
-                edges[side], hits[side] = near, False
-                continue
-            cand = cand[np.argsort(np.abs(z_coord[cand] - z0))]
-
-            stats = np.array([face_mean(g, int(i), dim, o_mask)
-                              for i in cand])
-            below = np.nonzero(stats < ref)[0]
-            if below.size:
-                pick, hits[side] = cand[below[0]], True
+            if cand.size == 0:                  # grid coarser than the cap
+                delta, hits[side] = 0.0, False
             else:
-                pick, hits[side] = cand[int(np.argmin(stats))], False
-            edges[side] = float(z_coord[pick])
+                cand = cand[np.argsort(np.abs(z_coord[cand] - z0))]
+                stats = np.array([face_mean(g, int(i), dim, o_mask)
+                                  for i in cand])
+                below = np.nonzero(stats < ref)[0]
+                if below.size:
+                    pick, hits[side] = cand[below[0]], True
+                else:
+                    pick, hits[side] = cand[int(np.argmin(stats))], False
+                delta = abs(float(z_coord[pick]) - z0)
+
+            floored[side] = delta < floor - TOL
+            edges[side] = z0 + sign * max(delta, floor)
+            # Sensor value at the FINAL edge (after clamping): the mean
+            # directional gradient the blend transition actually lands on.
+            eidx = int(np.argmin(np.abs(z_coord - edges[side])))
+            edge_g[side] = face_mean(g, eidx, dim, o_mask)
 
         lower, upper = [0.0, 0.0], [0.0, 0.0]
         lower[dim], upper[dim] = edges['lo'], edges['hi']
@@ -209,23 +224,42 @@ def build_buffers(leaves, domain, grads, grid, q, min_frac, max_frac):
             'width_hi': edges['hi'] - z0,
             'threshold_met_lo': hits['lo'],
             'threshold_met_hi': hits['hi'],
+            'floor_clamped_lo': floored['lo'],
+            'floor_clamped_hi': floored['hi'],
+            'edge_grad_lo': edge_g['lo'],
+            'edge_grad_hi': edge_g['hi'],
+            'edge_grad_ratio_lo': edge_g['lo'] / ref if ref > 0 else 0.0,
+            'edge_grad_ratio_hi': edge_g['hi'] / ref if ref > 0 else 0.0,
+            # Percentile of the edge's gradient within the GLOBAL |du/dz|
+            # field -- 0.10 means the edge sits in the quietest 10% of the
+            # domain, 0.95 means it landed on near-worst-case terrain.
+            'edge_grad_rank_lo': float((g < edge_g['lo']).mean()),
+            'edge_grad_rank_hi': float((g < edge_g['hi']).mean()),
         })
     return buffers, refs
 
 
-def build_region_tiling(leaves, buffers, domain):
+def region_tiling(leaves, buffers, domain, mode='atomic'):
     """Partition the domain into regions, with buffers counted as regions.
 
     Cuts the domain on every leaf and buffer coordinate, then labels each
-    atomic cell by the SET of buffers covering it, falling back to the
-    containing leaf where no buffer covers it. Cells sharing a label are
-    one region, so a buffer band is a single region straddling its
-    interface, and the corner where an x-buffer crosses a t-buffer becomes
-    a region of its own. The result tiles the domain by construction.
+    atomic cell. Cells sharing a label are one region, and the result
+    tiles the domain by construction.
 
-    Returns ``(red_segments, black_segments, n_regions)``. A segment is
-    red when it bounds a buffer region, black when it is an original leaf
-    interface that no buffer touched.
+    mode='atomic': label by the SET of buffers covering the cell, falling
+    back to the containing leaf. Every band overlap (the corner where an
+    x-buffer crosses a t-buffer) becomes a region of its own.
+
+    mode='x-first': every collar keeps its whole band as ONE region.
+    Overlap over a core belongs to the collar; where collars cross, the
+    x-extended collar (interface normal to x) takes the overlap, and the
+    t-extended collar keeps only what x-collars left. Same-direction
+    collars that overlap are merged into a single region.
+
+    Returns a dict with the cut coordinates ``xs``/``ts``, the per-cell
+    ``labels`` array, the ``is_buf`` mask (cell belongs to a transition
+    region), and ``keys`` mapping label id -> ('leaf', i) | ('buf', ids)
+    | ('bufx'|'buft', root id).
     """
     live = [b for b in buffers if b['width'] > TOL]
 
@@ -253,31 +287,87 @@ def build_region_tiling(leaves, buffers, domain):
     for i, leaf in enumerate(leaves):
         leaf_id[_inside(leaf)] = i
 
+    is_buf = stack.any(axis=0) if live else np.zeros(CX.shape, dtype=bool)
+
+    # Union-find over live buffers, used by mode='x-first' to merge
+    # same-direction collars that overlap.
+    parent = list(range(len(live)))
+
+    def _find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    def _cell_key(i, j):
+        cov = np.nonzero(stack[:, i, j])[0] if live else ()
+        if mode == 'atomic':
+            return (('buf', tuple(cov)) if len(cov)
+                    else ('leaf', int(leaf_id[i, j])))
+        xcov = [k for k in cov if live[k]['dim'] == 0]
+        tcov = [k for k in cov if live[k]['dim'] == 1]
+        if xcov:
+            return ('bufx', _find(xcov[0]))
+        if tcov:
+            return ('buft', _find(tcov[0]))
+        return ('leaf', int(leaf_id[i, j]))
+
+    if mode == 'x-first':
+        # First pass: union overlapping same-direction collars. t-collars
+        # only union through cells no x-collar claimed, so two t-bands
+        # bridged by an x-band stay separate regions.
+        for i in range(CX.shape[0]):
+            for j in range(CX.shape[1]):
+                cov = np.nonzero(stack[:, i, j])[0] if live else ()
+                xcov = [k for k in cov if live[k]['dim'] == 0]
+                tcov = [k for k in cov if live[k]['dim'] == 1]
+                group = xcov if xcov else tcov
+                for k in group[1:]:
+                    ra, rb = _find(group[0]), _find(k)
+                    if ra != rb:
+                        parent[rb] = ra
+
     key_to_id = {}
     labels = np.empty(CX.shape, dtype=np.int64)
-    is_buf = stack.any(axis=0) if live else np.zeros(CX.shape, dtype=bool)
     for i in range(CX.shape[0]):
         for j in range(CX.shape[1]):
-            covering = tuple(np.nonzero(stack[:, i, j])[0]) if live else ()
-            key = ('buf', covering) if covering \
-                else ('leaf', int(leaf_id[i, j]))
-            labels[i, j] = key_to_id.setdefault(key, len(key_to_id))
+            labels[i, j] = key_to_id.setdefault(_cell_key(i, j),
+                                                len(key_to_id))
+
+    return {'xs': xs, 'ts': ts, 'labels': labels, 'is_buf': is_buf,
+            'keys': {v: k for k, v in key_to_id.items()}}
+
+
+def tiling_segments(tiling):
+    """Region-boundary segments of a tiling, split by kind.
+
+    Returns ``(red, black)``: red segments bound a transition region,
+    black ones are original leaf interfaces no buffer touched.
+    """
+    xs, ts = tiling['xs'], tiling['ts']
+    labels, is_buf = tiling['labels'], tiling['is_buf']
 
     red, black = [], []
-    for i in range(CX.shape[0] - 1):          # faces normal to x
-        for j in range(CX.shape[1]):
+    for i in range(labels.shape[0] - 1):      # faces normal to x
+        for j in range(labels.shape[1]):
             if labels[i, j] != labels[i + 1, j]:
                 seg = [(xs[i + 1], ts[j]), (xs[i + 1], ts[j + 1])]
                 bucket = red if (is_buf[i, j] or is_buf[i + 1, j]) else black
                 bucket.append(seg)
-    for i in range(CX.shape[0]):              # faces normal to t
-        for j in range(CX.shape[1] - 1):
+    for i in range(labels.shape[0]):          # faces normal to t
+        for j in range(labels.shape[1] - 1):
             if labels[i, j] != labels[i, j + 1]:
                 seg = [(xs[i], ts[j + 1]), (xs[i + 1], ts[j + 1])]
                 bucket = red if (is_buf[i, j] or is_buf[i, j + 1]) else black
                 bucket.append(seg)
+    return red, black
 
-    return red, black, len(key_to_id)
+
+def build_region_tiling(leaves, buffers, domain):
+    """Back-compat wrapper: ``(red_segments, black_segments, n_regions)``."""
+    tiling = region_tiling(leaves, buffers, domain)
+    red, black = tiling_segments(tiling)
+    return red, black, len(tiling['keys'])
 
 
 def collar_strips(leaves, sigma, domain):
@@ -354,21 +444,35 @@ def draw_panel(ax, leaves, buffers, domain, gt_grid, grid_x, grid_t, title,
                legend=False, channel=None):
     draw_heatmap(ax, gt_grid, grid_x, grid_t, channel=channel)
 
+    # Each buffer is drawn as its two halves, split at the interface, so
+    # every SIDE shows its own outcome: plain red where the edge met the
+    # threshold, '///' where it hit the cap and fell back to the argmin,
+    # dotted where the sensor pick was clamped UP to the min_frac floor.
     for b in buffers:
-        lo, hi = b['bounds_lower'], b['bounds_upper']
-        w, h = hi[0] - lo[0], hi[1] - lo[1]
-        if w <= 0 or h <= 0:
-            continue
-        # Hatched where an edge fell back to the local argmin instead of
-        # actually crossing the threshold, i.e. the growth hit its cap.
-        capped = not (b['threshold_met_lo'] and b['threshold_met_hi'])
-        ax.add_patch(patches.Rectangle(
-            (lo[0], lo[1]), w, h, linewidth=0.0, facecolor='#ffffff',
-            alpha=0.45, zorder=4))
-        ax.add_patch(patches.Rectangle(
-            (lo[0], lo[1]), w, h, linewidth=1.0, facecolor='#d62728',
-            alpha=0.28, hatch='///' if capped else None,
-            edgecolor='#8c0d0d', zorder=5))
+        dim = b['dim']
+        z0 = b['interface_coord']
+        for side in ('lo', 'hi'):
+            lo = list(b['bounds_lower'])
+            hi = list(b['bounds_upper'])
+            if side == 'lo':
+                hi[dim] = z0
+            else:
+                lo[dim] = z0
+            w, h = hi[0] - lo[0], hi[1] - lo[1]
+            if w <= 0 or h <= 0:
+                continue
+            if b.get(f'floor_clamped_{side}', False):
+                hatch = '...'
+            elif not b[f'threshold_met_{side}']:
+                hatch = '///'
+            else:
+                hatch = None
+            ax.add_patch(patches.Rectangle(
+                (lo[0], lo[1]), w, h, linewidth=0.0, facecolor='#ffffff',
+                alpha=0.45, zorder=4))
+            ax.add_patch(patches.Rectangle(
+                (lo[0], lo[1]), w, h, linewidth=1.0, facecolor='#d62728',
+                alpha=0.28, hatch=hatch, edgecolor='#8c0d0d', zorder=5))
 
     for leaf in leaves:
         lo, hi = leaf['bounds_lower'], leaf['bounds_upper']
@@ -390,12 +494,15 @@ def draw_panel(ax, leaves, buffers, domain, gt_grid, grid_x, grid_t, title,
                           label='leaf region (from the tree)'),
             patches.Patch(facecolor='#d62728', alpha=0.45,
                           edgecolor='#8c0d0d',
-                          label='buffer — both edges met the threshold'),
+                          label='collar half — edge met the threshold'),
             patches.Patch(facecolor='#d62728', alpha=0.45, hatch='///',
                           edgecolor='#8c0d0d',
-                          label='buffer — an edge hit its cap, so it fell\n'
-                                'back to the local argmin (width not set\n'
-                                'by the sensor)'),
+                          label='collar half — hit its cap, fell back to\n'
+                                'the local argmin (not set by the sensor)'),
+            patches.Patch(facecolor='#d62728', alpha=0.45, hatch='...',
+                          edgecolor='#8c0d0d',
+                          label='collar half — clamped UP to the floor\n'
+                                '(min_frac, i.e. adaptive_collar_sigma_min)'),
         ])
 
 
@@ -436,6 +543,232 @@ def draw_collar_panel(ax, leaves, strips, domain, gt_grid, grid_x, grid_t,
         ])
 
 
+def side_outcome_counts(buffers):
+    """(n_floor, n_capped) over buffer SIDES, mutually exclusive.
+
+    A side counts as floor-clamped when the sensor pick was widened to the
+    min_frac floor; otherwise as capped when it never met the threshold.
+    """
+    n_floor = n_capped = 0
+    for b in buffers:
+        for side in ('lo', 'hi'):
+            if b.get(f'floor_clamped_{side}', False):
+                n_floor += 1
+            elif not b[f'threshold_met_{side}']:
+                n_capped += 1
+    return n_floor, n_capped
+
+
+def collar_heatmap_figure(problem, leaves, buffers, domain, gt_grid, grid_x,
+                          grid_t, q, out_dir):
+    """Single large heatmap of the adaptive collars at one quantile, with
+    every side's outcome (threshold / cap-argmin / floor-clamped) visible.
+    """
+    n_floor, n_capped = side_outcome_counts(buffers)
+    stats = coverage_stats(buffers, grid_x, grid_t)
+    fig, ax = plt.subplots(figsize=(10.5, 7.0))
+    draw_panel(
+        ax, leaves, buffers, domain, gt_grid, grid_x, grid_t,
+        f'{problem} — adaptive collars   |   q = {q:.2f}\n'
+        f'{len(buffers)} buffers: {n_capped} sides capped (argmin), '
+        f'{n_floor} clamped to the floor   |   '
+        f'covered {stats["covered_fraction"] * 100:.1f}%',
+        legend=True)
+    plt.tight_layout()
+    path = save_png(out_dir / f'collar_heatmap_{problem}_q{q:.2f}.png',
+                    fig=fig)
+    plt.close(fig)
+    return path
+
+
+def tiling_figure(problem, leaves, tilings, domain, gt_grid, grid_x, grid_t,
+                  out_dir):
+    """One panel per quantile: outlines of the x-first re-tiling.
+
+    Collars own their full band (including what they cover of the cores);
+    at collar crossings the x-extended collar takes the overlap, and
+    overlapping same-direction collars merge. Only region boundaries are
+    drawn: dark red where they bound a transition subdomain, black where
+    an original leaf interface survived untouched.
+    """
+    n = len(tilings)
+    fig, axes = plt.subplots(1, n, figsize=(6.4 * n, 5.6))
+    axes = np.atleast_1d(axes)
+
+    for col, (ax, (q, buffers)) in enumerate(zip(axes, tilings)):
+        draw_heatmap(ax, gt_grid, grid_x, grid_t)
+
+        tiling = region_tiling(leaves, buffers, domain, mode='x-first')
+        red, black = tiling_segments(tiling)
+        ax.add_collection(LineCollection(black, colors='black',
+                                         linewidths=1.4, zorder=10))
+        ax.add_collection(LineCollection(red, colors='#8c0d0d',
+                                         linewidths=1.1, zorder=10))
+
+        kinds = tiling['keys'].values()
+        n_core = sum(1 for k in kinds if k[0] == 'leaf')
+        n_x = sum(1 for k in tiling['keys'].values() if k[0] == 'bufx')
+        n_t = sum(1 for k in tiling['keys'].values() if k[0] == 'buft')
+        ax.set_xlim(domain['lower'][0], domain['upper'][0])
+        ax.set_ylim(domain['lower'][1], domain['upper'][1])
+        ax.set_xlabel('x')
+        ax.set_ylabel('t')
+        ax.set_title(f'q = {q:.2f}   |   {n_core} cores + {n_x} '
+                     f'x-transitions + {n_t} t-transitions '
+                     f'= {n_core + n_x + n_t} subdomains', fontsize=10)
+
+        if col == 0:
+            _legend(ax, [
+                Line2D([], [], color='#8c0d0d', lw=1.1,
+                       label='transition boundary'),
+                Line2D([], [], color='black', lw=1.4,
+                       label='untouched leaf interface'),
+            ])
+
+    fig.suptitle(f'{problem} — x-first re-tiling: collars as subdomains, '
+                 f'x-collars win crossings', fontsize=12)
+    plt.tight_layout(rect=(0, 0, 1, 0.95))
+    path = save_png(out_dir / f'tiling_{problem}.png', fig=fig)
+    plt.close(fig)
+    return path
+
+
+# --------------------------------------------------------------------------
+# 1-D slice view
+# --------------------------------------------------------------------------
+
+SLICE_COLORS = ('#ff7f0e', '#e377c2', '#17becf', '#bcbd22', '#9467bd')
+
+
+def slice_cut_positions(interfaces, buffers, dim, other_val):
+    """Cut-line positions for a 1-D slice running along dimension ``dim``.
+
+    Returns ``(leaf_cuts, buffer_cuts)``: the tree's subdomain boundaries
+    the slice actually crosses (the interface's shared extent must contain
+    the fixed coordinate), and the collar (buffer) edges straddling them.
+    """
+    o = 1 - dim
+    leaf_cuts = sorted({itf['z0'] for itf in interfaces
+                        if itf['dim'] == dim
+                        and itf['o_lo'] - TOL <= other_val
+                        and other_val <= itf['o_hi'] + TOL})
+    buffer_cuts = []
+    for b in buffers:
+        if b['dim'] != dim:
+            continue
+        if (b['bounds_lower'][o] - TOL <= other_val
+                <= b['bounds_upper'][o] + TOL):
+            buffer_cuts += [b['bounds_lower'][dim], b['bounds_upper'][dim]]
+    return leaf_cuts, buffer_cuts
+
+
+def slice_curves(problem, gt_grid, fixed_dim, idx):
+    """Curves of the solution on one grid line, as ``(labels, arrays)``.
+
+    ``fixed_dim`` is the dimension held constant at grid index ``idx``;
+    the returned arrays run along the other dimension. Multi-output
+    problems get one curve per channel plus the magnitude.
+    """
+    sl = gt_grid[idx, :] if fixed_dim == 0 else gt_grid[:, idx]
+    if sl.ndim == 1:
+        return ['u'], [sl]
+    names = CHANNEL_NAMES.get(
+        problem, tuple(f'c{c}' for c in range(sl.shape[1])))
+    labels = [names[c] if c < len(names) else f'c{c}'
+              for c in range(sl.shape[1])]
+    curves = [sl[:, c] for c in range(sl.shape[1])]
+    labels.append('|·|')
+    curves.append(np.linalg.norm(sl, axis=1))
+    return labels, curves
+
+
+def slice_view_figure(problem, leaves, buffers, domain, gt_grid, grid_x,
+                      grid_t, q, n_slices, out_dir):
+    """Snapshot figure: heatmaps with marked slice positions on top, then
+    ``n_slices`` rows of 1-D slices — u(x) at fixed t on the left, u(t) at
+    fixed x on the right. Black dashed lines mark the tree's subdomain
+    boundaries crossed by the slice, red dotted lines the collar (buffer)
+    edges around them.
+    """
+    interfaces = find_interfaces(leaves)
+
+    t_vals = np.linspace(domain['lower'][1], domain['upper'][1],
+                         n_slices + 2)[1:-1]
+    x_vals = np.linspace(domain['lower'][0], domain['upper'][0],
+                         n_slices + 2)[1:-1]
+    jt = [int(np.argmin(np.abs(grid_t - t))) for t in t_vals]
+    ix = [int(np.argmin(np.abs(grid_x - x))) for x in x_vals]
+    t_vals = [float(grid_t[j]) for j in jt]
+    x_vals = [float(grid_x[i]) for i in ix]
+
+    fig, axes = plt.subplots(n_slices + 1, 2,
+                             figsize=(13.0, 2.9 * (n_slices + 1)))
+
+    for col, (title, marks, horizontal) in enumerate((
+            (f'{problem} — t-snapshots   |   q = {q:.2f}', t_vals, True),
+            (f'{problem} — x-snapshots   |   q = {q:.2f}', x_vals, False))):
+        ax = axes[0, col]
+        draw_panel(ax, leaves, buffers, domain, gt_grid, grid_x, grid_t,
+                   title, legend=(col == 0))
+        for i, v in enumerate(marks):
+            color = SLICE_COLORS[i % len(SLICE_COLORS)]
+            line = ax.axhline if horizontal else ax.axvline
+            line(v, color='white', lw=2.4, zorder=14)
+            line(v, color=color, lw=1.4, ls='--', zorder=15)
+
+    cut_handles = [
+        Line2D([], [], color='black', ls='--', lw=1.0,
+               label='tree subdomain boundary'),
+        Line2D([], [], color='#d62728', ls=':', lw=1.2,
+               label='collar (buffer) edge'),
+    ]
+
+    for row in range(n_slices):
+        for col in range(2):
+            ax = axes[row + 1, col]
+            if col == 0:                    # u(x) at t = t_row
+                coord, cut_dim = grid_x, 0
+                fixed_dim, idx, fixed_val = 1, jt[row], t_vals[row]
+                xlabel, fixed_name = 'x', 't'
+            else:                           # u(t) at x = x_row
+                coord, cut_dim = grid_t, 1
+                fixed_dim, idx, fixed_val = 0, ix[row], x_vals[row]
+                xlabel, fixed_name = 't', 'x'
+
+            labels, curves = slice_curves(problem, gt_grid, fixed_dim, idx)
+            for lab, y in zip(labels, curves):
+                ax.plot(coord, y, lw=1.1, label=lab)
+
+            leaf_cuts, buf_cuts = slice_cut_positions(
+                interfaces, buffers, cut_dim, fixed_val)
+            for c in leaf_cuts:
+                ax.axvline(c, color='black', ls='--', lw=1.0)
+            for c in buf_cuts:
+                ax.axvline(c, color='#d62728', ls=':', lw=1.2)
+
+            color = SLICE_COLORS[row % len(SLICE_COLORS)]
+            ax.set_xlim(float(coord[0]), float(coord[-1]))
+            ax.set_xlabel(xlabel, fontsize=8)
+            ax.tick_params(labelsize=7)
+            ax.set_title(f'{fixed_name} = {fixed_val:.3f}',
+                         fontsize=9, color=color, fontweight='bold')
+            for spine in ax.spines.values():
+                spine.set_edgecolor(color)
+
+            if row == 0:
+                handles = list(cut_handles)
+                if len(labels) > 1:
+                    handles += ax.get_legend_handles_labels()[0]
+                ax.legend(handles=handles, loc='best', fontsize=6.5,
+                          framealpha=0.9)
+
+    plt.tight_layout()
+    path = save_png(out_dir / f'buffer_slices_{problem}_q{q:.2f}.png',
+                    fig=fig)
+    plt.close(fig)
+    return path
+
+
 def background_variants(problem, gt_grid):
     """Which field backgrounds to render, as ``(channel, suffix, label)``.
 
@@ -455,7 +788,8 @@ def background_variants(problem, gt_grid):
 
 
 def process_problem(problem, tree, base_cfg, quantiles, sigmas, min_frac,
-                    max_frac, out_dir):
+                    max_frac, out_dir, slice_quantiles=(0.9,), n_slices=5,
+                    tiling_quantiles=()):
     leaves = [n for n in tree['accepted_nodes_bfs']
               if n['is_leaf_in_pruned_tree']]
     domain = tree['domain_bounds']
@@ -495,16 +829,16 @@ def process_problem(problem, tree, base_cfg, quantiles, sigmas, min_frac,
                                       (grid_x, grid_t), q, min_frac, max_frac)
         stats = coverage_stats(buffers, grid_x, grid_t)
         widths = [b['width'] for b in buffers]
-        n_capped = sum(1 for b in buffers
-                       if not (b['threshold_met_lo'] and b['threshold_met_hi']))
+        n_floor, n_capped = side_outcome_counts(buffers)
         _, _, n_regions = build_region_tiling(leaves, buffers, domain)
-        sweeps.append((q, buffers, stats, n_capped))
+        sweeps.append((q, buffers, stats, n_capped, n_floor))
 
         record['sweep'].append({
             'quantile': q,
             'ref_dx': refs[0], 'ref_dt': refs[1],
             'n_buffers': len(buffers),
-            'n_capped': n_capped,
+            'n_capped_sides': n_capped,
+            'n_floor_sides': n_floor,
             'n_regions': n_regions,
             'mean_width': float(np.mean(widths)) if widths else 0.0,
             'max_width': float(np.max(widths)) if widths else 0.0,
@@ -512,10 +846,22 @@ def process_problem(problem, tree, base_cfg, quantiles, sigmas, min_frac,
             'buffers': buffers,
         })
         print(f"    q={q:.2f}  ref=({refs[0]:.4g}, {refs[1]:.4g})  "
-              f"{len(buffers)} buffers ({n_capped} capped)  "
+              f"{len(buffers)} buffers ({n_capped} sides capped, "
+              f"{n_floor} at floor)  "
               f"covered {stats['covered_fraction'] * 100:5.1f}%  "
               f"mean width {np.mean(widths) if widths else 0:.4f}  "
               f"-> {n_regions} regions")
+        ranks = [b[f'edge_grad_rank_{s}']
+                 for b in buffers for s in ('lo', 'hi')]
+        ratios = [b[f'edge_grad_ratio_{s}']
+                  for b in buffers for s in ('lo', 'hi')]
+        if ranks:
+            print(f"           edge |du/dz| percentile in global field: "
+                  f"median={np.median(ranks) * 100:4.1f}%  "
+                  f"p90={np.quantile(ranks, 0.9) * 100:4.1f}%  "
+                  f"max={np.max(ranks) * 100:4.1f}%   |   "
+                  f"edge/ref ratio: median={np.median(ratios):.2f}  "
+                  f"max={np.max(ratios):.2f}")
 
     ncol = 1 + max(len(quantiles), len(sigmas))
     for channel, suffix, label in background_variants(problem, gt_grid):
@@ -530,11 +876,12 @@ def process_problem(problem, tree, base_cfg, quantiles, sigmas, min_frac,
         for ax in axes[1, len(sigmas) + 1:]:
             ax.axis('off')
 
-        for col, (q, buffers, stats, n_capped) in enumerate(sweeps, start=1):
+        for col, (q, buffers, stats, n_capped, n_floor) in enumerate(
+                sweeps, start=1):
             draw_panel(
                 axes[0, col], leaves, buffers, domain, gt_grid, grid_x, grid_t,
                 f'q = {q:.2f}   |   {len(buffers)} buffers, '
-                f'{n_capped} capped\n'
+                f'{n_capped} sides capped, {n_floor} at floor\n'
                 f'domain covered {stats["covered_fraction"] * 100:.1f}%   '
                 f'mean depth {stats["mean_overlap_depth"]:.2f}',
                 channel=channel)
@@ -553,6 +900,51 @@ def process_problem(problem, tree, base_cfg, quantiles, sigmas, min_frac,
         plt.close(fig)
         print(f"    saved {path}")
 
+    if tiling_quantiles:
+        tilings = []
+        for tq in tiling_quantiles:
+            match = next((s for s in sweeps if abs(s[0] - tq) < 1e-9), None)
+            bufs = match[1] if match is not None else build_buffers(
+                leaves, domain, grads, (grid_x, grid_t), tq,
+                min_frac, max_frac)[0]
+            tilings.append((tq, bufs))
+        path = tiling_figure(problem, leaves, tilings, domain, gt_grid,
+                             grid_x, grid_t, out_dir)
+        print(f"    saved {path}")
+
+    # Standalone collar heatmaps + 1-D slice snapshots, one set per
+    # requested quantile, reusing the sweep's buffers when already
+    # computed.
+    for sq in slice_quantiles:
+        match = next((s for s in sweeps if abs(s[0] - sq) < 1e-9), None)
+        if match is not None:
+            slice_buffers = match[1]
+        else:
+            slice_buffers, _ = build_buffers(leaves, domain, grads,
+                                             (grid_x, grid_t), sq,
+                                             min_frac, max_frac)
+        print(f"    per-face edge stats at q={sq}:")
+        print("      dim  interface  side   width   |du/dz|@edge   /ref  "
+              "pctile  outcome")
+        for b in slice_buffers:
+            for s in ('lo', 'hi'):
+                outcome = ('floor' if b[f'floor_clamped_{s}']
+                           else 'thresh' if b[f'threshold_met_{s}']
+                           else 'argmin')
+                print(f"      {DIM_NAMES[b['dim']]:>3}  "
+                      f"{b['interface_coord']:+9.3f}  {s:>4}  "
+                      f"{b[f'width_{s}']:.4f}  {b[f'edge_grad_{s}']:12.4g}  "
+                      f"{b[f'edge_grad_ratio_{s}']:5.2f}  "
+                      f"{b[f'edge_grad_rank_{s}'] * 100:5.1f}%  {outcome}")
+
+        path = collar_heatmap_figure(problem, leaves, slice_buffers, domain,
+                                     gt_grid, grid_x, grid_t, sq, out_dir)
+        print(f"    saved {path}")
+        path = slice_view_figure(problem, leaves, slice_buffers, domain,
+                                 gt_grid, grid_x, grid_t, sq,
+                                 n_slices, out_dir)
+        print(f"    saved {path}")
+
     return record
 
 
@@ -569,13 +961,24 @@ def main():
                     default=[0.2, 0.1, 0.05, 0.03],
                     help='sigma_fraction values for the current-method '
                          'collar comparison row')
-    ap.add_argument('--min-frac', type=float, default=0.0,
+    ap.add_argument('--min-frac', type=float, default=0.03,
                     help='floor on each buffer half-width, as a fraction of '
-                         'that side region extent (0 allows zero-width)')
+                         'that side region extent -- mirrors the production '
+                         'adaptive_collar_sigma_min (0 allows zero-width)')
     ap.add_argument('--max-frac', type=float, default=0.5,
                     help='cap on each buffer half-width, as a fraction of '
                          'that side region extent (<=0.5 never reaches a '
                          'second interface)')
+    ap.add_argument('--slice-quantiles', nargs='*', type=float,
+                    default=[0.9],
+                    help='quantiles for the collar heatmap + 1-D slice '
+                         'snapshot figures (one set of images per value)')
+    ap.add_argument('--n-slices', type=int, default=5,
+                    help='snapshots per dimension in the slice figure')
+    ap.add_argument('--tiling-quantiles', nargs='*', type=float,
+                    default=[0.5, 0.7, 0.9],
+                    help='quantiles for the re-tiling figure (transition '
+                         'subdomains carved out of the leaves)')
     ap.add_argument('--out', type=Path,
                     default=REPO / 'outputs' / 'buffer_decomposition')
     args = ap.parse_args()
@@ -601,7 +1004,9 @@ def main():
         try:
             rec = process_problem(problem, trees[problem], base_cfg,
                                   args.quantiles, args.sigmas, args.min_frac,
-                                  args.max_frac, args.out)
+                                  args.max_frac, args.out,
+                                  args.slice_quantiles, args.n_slices,
+                                  args.tiling_quantiles)
             if rec is not None:
                 records[problem] = rec
         except Exception as exc:                       # noqa: BLE001
