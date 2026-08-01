@@ -46,6 +46,14 @@ perfect trees were fit on), so the picture is the "oracle" version of the
 idea; the deployed method would run the identical sensor on the root
 prediction u_0.
 
+In addition to the exploratory multi-panel figures above, every run also
+writes a ``paper_images/`` subfolder: the same geometry rendered as many
+small, single-panel images (one heatmap, one image per 1-D slice) with no
+titles, legends, or outcome shading (no red fill/hatching) -- just the plot
+and the tree/collar lines, with every stat (problem, channel, quantile,
+slice position) encoded in the filename instead. These are meant to be
+picked through and captioned by hand afterwards.
+
 Usage:
     python scripts/buffer_decomposition_demo.py
     python scripts/buffer_decomposition_demo.py --quantiles 0.8 0.9 \
@@ -573,6 +581,117 @@ def draw_collar_panel(ax, leaves, strips, domain, gt_grid, grid_x, grid_t,
         ])
 
 
+def draw_clean_panel(ax, leaves, buffers, domain, gt_grid, grid_x, grid_t,
+                     channel=None):
+    """Ground-truth heatmap with tree/collar geometry, minimally styled.
+
+    Collars are a single semi-transparent red fill -- no hatching, no
+    distinction between outcomes (met threshold / argmin / floor). No
+    legend, no title. For the paper_images set.
+    """
+    draw_heatmap(ax, gt_grid, grid_x, grid_t, channel=channel)
+    for b in buffers:
+        lo, hi = b['bounds_lower'], b['bounds_upper']
+        w, h = hi[0] - lo[0], hi[1] - lo[1]
+        if w <= 0 or h <= 0:
+            continue
+        ax.add_patch(patches.Rectangle(
+            (lo[0], lo[1]), w, h, linewidth=0.0, facecolor='#ffffff',
+            alpha=0.45, zorder=4))
+        ax.add_patch(patches.Rectangle(
+            (lo[0], lo[1]), w, h, linewidth=1.0, facecolor='#d62728',
+            alpha=0.28, edgecolor='#8c0d0d', zorder=5))
+    for leaf in leaves:
+        lo, hi = leaf['bounds_lower'], leaf['bounds_upper']
+        ax.add_patch(patches.Rectangle(
+            (lo[0], lo[1]), hi[0] - lo[0], hi[1] - lo[1],
+            linewidth=1.1, edgecolor='black', facecolor='none', zorder=10))
+
+    xr = domain['upper'][0] - domain['lower'][0]
+    tr = domain['upper'][1] - domain['lower'][1]
+    ax.set_xlim(domain['lower'][0] - 0.03 * xr, domain['upper'][0] + 0.03 * xr)
+    ax.set_ylim(domain['lower'][1] - 0.03 * tr, domain['upper'][1] + 0.03 * tr)
+    ax.set_xlabel('x')
+    ax.set_ylabel('t')
+
+
+def single_curve(gt_grid, fixed_dim, idx, channel):
+    """One 1-D curve on a grid line: the given channel, or the magnitude
+    over channels when ``channel`` is None. Always a single array, so
+    paper_images slice plots never need a legend to disambiguate curves.
+    """
+    sl = gt_grid[idx, :] if fixed_dim == 0 else gt_grid[:, idx]
+    if sl.ndim == 1:
+        return sl
+    return sl[:, channel] if channel is not None else np.linalg.norm(sl, axis=1)
+
+
+def paper_images(problem, leaves, buffers, domain, gt_grid, grid_x, grid_t,
+                 q, n_slices, out_dir, channel=None, channel_suffix=''):
+    """Clean, single-panel images for paper use.
+
+    One heatmap (tree outlines black, collar regions filled red) plus one
+    image per 1-D slice -- no titles, legends, or outcome shading. Every
+    stat that would otherwise be in a title goes into the filename instead.
+    Returns the list of saved paths.
+    """
+    (out_dir / 'paper_images').mkdir(parents=True, exist_ok=True)
+    interfaces = find_interfaces(leaves)
+    tag = f'{problem}{channel_suffix}_q{q:.2f}'
+    paths = []
+
+    t_vals = np.linspace(domain['lower'][1], domain['upper'][1],
+                         n_slices + 2)[1:-1]
+    x_vals = np.linspace(domain['lower'][0], domain['upper'][0],
+                         n_slices + 2)[1:-1]
+    jt = [int(np.argmin(np.abs(grid_t - t))) for t in t_vals]
+    ix = [int(np.argmin(np.abs(grid_x - x))) for x in x_vals]
+    t_vals = [float(grid_t[j]) for j in jt]
+    x_vals = [float(grid_x[i]) for i in ix]
+
+    fig, ax = plt.subplots(figsize=(7.0, 5.2))
+    draw_clean_panel(ax, leaves, buffers, domain, gt_grid, grid_x, grid_t,
+                     channel=channel)
+    plt.tight_layout()
+    paths.append(save_png(out_dir / 'paper_images' / f'{tag}_heatmap.png',
+                          fig=fig))
+    plt.close(fig)
+
+    for j, t in zip(jt, t_vals):
+        fig, ax = plt.subplots(figsize=(5.5, 3.2))
+        ax.plot(grid_x, single_curve(gt_grid, 1, j, channel),
+               lw=1.2, color='black')
+        leaf_cuts, buf_cuts = slice_cut_positions(interfaces, buffers, 0, t)
+        for c in leaf_cuts:
+            ax.axvline(c, color='black', ls='--', lw=1.0)
+        for c in buf_cuts:
+            ax.axvline(c, color='#d62728', ls=':', lw=1.2)
+        ax.set_xlim(float(grid_x[0]), float(grid_x[-1]))
+        ax.set_xlabel('x')
+        plt.tight_layout()
+        paths.append(save_png(
+            out_dir / 'paper_images' / f'{tag}_slice_t{t:.3f}.png', fig=fig))
+        plt.close(fig)
+
+    for i, x in zip(ix, x_vals):
+        fig, ax = plt.subplots(figsize=(5.5, 3.2))
+        ax.plot(grid_t, single_curve(gt_grid, 0, i, channel),
+               lw=1.2, color='black')
+        leaf_cuts, buf_cuts = slice_cut_positions(interfaces, buffers, 1, x)
+        for c in leaf_cuts:
+            ax.axvline(c, color='black', ls='--', lw=1.0)
+        for c in buf_cuts:
+            ax.axvline(c, color='#d62728', ls=':', lw=1.2)
+        ax.set_xlim(float(grid_t[0]), float(grid_t[-1]))
+        ax.set_xlabel('t')
+        plt.tight_layout()
+        paths.append(save_png(
+            out_dir / 'paper_images' / f'{tag}_slice_x{x:.3f}.png', fig=fig))
+        plt.close(fig)
+
+    return paths
+
+
 def side_outcome_counts(buffers):
     """(n_floor, n_capped) over buffer SIDES, mutually exclusive.
 
@@ -590,23 +709,25 @@ def side_outcome_counts(buffers):
 
 
 def collar_heatmap_figure(problem, leaves, buffers, domain, gt_grid, grid_x,
-                          grid_t, q, out_dir):
+                          grid_t, q, out_dir, channel=None,
+                          channel_suffix=''):
     """Single large heatmap of the adaptive collars at one quantile, with
     every side's outcome (threshold / cap-argmin / floor-clamped) visible.
+    ``channel`` restricts a multi-output problem to a single component.
     """
     n_floor, n_capped = side_outcome_counts(buffers)
     stats = coverage_stats(buffers, grid_x, grid_t)
     fig, ax = plt.subplots(figsize=(10.5, 7.0))
     draw_panel(
         ax, leaves, buffers, domain, gt_grid, grid_x, grid_t,
-        f'{problem} — adaptive collars   |   q = {q:.2f}\n'
+        f'{problem}{channel_suffix} — adaptive collars   |   q = {q:.2f}\n'
         f'{len(buffers)} buffers: {n_capped} sides capped (argmin), '
         f'{n_floor} clamped to the floor   |   '
         f'covered {stats["covered_fraction"] * 100:.1f}%',
-        legend=True)
+        legend=True, channel=channel)
     plt.tight_layout()
-    path = save_png(out_dir / f'collar_heatmap_{problem}_q{q:.2f}.png',
-                    fig=fig)
+    fname = f'collar_heatmap_{problem}{channel_suffix}_q{q:.2f}.png'
+    path = save_png(out_dir / fname, fig=fig)
     plt.close(fig)
     return path
 
@@ -693,18 +814,22 @@ def slice_cut_positions(interfaces, buffers, dim, other_val):
     return leaf_cuts, buffer_cuts
 
 
-def slice_curves(problem, gt_grid, fixed_dim, idx):
+def slice_curves(problem, gt_grid, fixed_dim, idx, channel=None):
     """Curves of the solution on one grid line, as ``(labels, arrays)``.
 
     ``fixed_dim`` is the dimension held constant at grid index ``idx``;
     the returned arrays run along the other dimension. Multi-output
-    problems get one curve per channel plus the magnitude.
+    problems get one curve per channel plus the magnitude, unless
+    ``channel`` selects a single component (then only that curve).
     """
     sl = gt_grid[idx, :] if fixed_dim == 0 else gt_grid[:, idx]
     if sl.ndim == 1:
         return ['u'], [sl]
     names = CHANNEL_NAMES.get(
         problem, tuple(f'c{c}' for c in range(sl.shape[1])))
+    if channel is not None:
+        label = names[channel] if channel < len(names) else f'c{channel}'
+        return [label], [sl[:, channel]]
     labels = [names[c] if c < len(names) else f'c{c}'
               for c in range(sl.shape[1])]
     curves = [sl[:, c] for c in range(sl.shape[1])]
@@ -714,12 +839,14 @@ def slice_curves(problem, gt_grid, fixed_dim, idx):
 
 
 def slice_view_figure(problem, leaves, buffers, domain, gt_grid, grid_x,
-                      grid_t, q, n_slices, out_dir):
+                      grid_t, q, n_slices, out_dir, channel=None,
+                      channel_suffix=''):
     """Snapshot figure: heatmaps with marked slice positions on top, then
     ``n_slices`` rows of 1-D slices — u(x) at fixed t on the left, u(t) at
     fixed x on the right. Black dashed lines mark the tree's subdomain
     boundaries crossed by the slice, red dotted lines the collar (buffer)
-    edges around them.
+    edges around them. ``channel`` restricts a multi-output problem to a
+    single component, both in the background heatmap and the curves.
     """
     interfaces = find_interfaces(leaves)
 
@@ -736,11 +863,13 @@ def slice_view_figure(problem, leaves, buffers, domain, gt_grid, grid_x,
                              figsize=(13.0, 2.9 * (n_slices + 1)))
 
     for col, (title, marks, horizontal) in enumerate((
-            (f'{problem} — t-snapshots   |   q = {q:.2f}', t_vals, True),
-            (f'{problem} — x-snapshots   |   q = {q:.2f}', x_vals, False))):
+            (f'{problem}{channel_suffix} — t-snapshots   |   q = {q:.2f}',
+             t_vals, True),
+            (f'{problem}{channel_suffix} — x-snapshots   |   q = {q:.2f}',
+             x_vals, False))):
         ax = axes[0, col]
         draw_panel(ax, leaves, buffers, domain, gt_grid, grid_x, grid_t,
-                   title, legend=(col == 0))
+                   title, legend=(col == 0), channel=channel)
         for i, v in enumerate(marks):
             color = SLICE_COLORS[i % len(SLICE_COLORS)]
             line = ax.axhline if horizontal else ax.axvline
@@ -766,7 +895,8 @@ def slice_view_figure(problem, leaves, buffers, domain, gt_grid, grid_x,
                 fixed_dim, idx, fixed_val = 0, ix[row], x_vals[row]
                 xlabel, fixed_name = 't', 'x'
 
-            labels, curves = slice_curves(problem, gt_grid, fixed_dim, idx)
+            labels, curves = slice_curves(problem, gt_grid, fixed_dim, idx,
+                                          channel=channel)
             for lab, y in zip(labels, curves):
                 ax.plot(coord, y, lw=1.1, label=lab)
 
@@ -794,8 +924,8 @@ def slice_view_figure(problem, leaves, buffers, domain, gt_grid, grid_x,
                           framealpha=0.9)
 
     plt.tight_layout()
-    path = save_png(out_dir / f'buffer_slices_{problem}_q{q:.2f}.png',
-                    fig=fig)
+    fname = f'buffer_slices_{problem}{channel_suffix}_q{q:.2f}.png'
+    path = save_png(out_dir / fname, fig=fig)
     plt.close(fig)
     return path
 
@@ -820,7 +950,7 @@ def background_variants(problem, gt_grid):
 
 def process_problem(problem, tree, base_cfg, quantiles, sigmas, min_frac,
                     max_frac, out_dir, slice_quantiles=(0.9,), n_slices=5,
-                    tiling_quantiles=()):
+                    tiling_quantiles=(), paper_n_slices=2):
     leaves = [n for n in tree['accepted_nodes_bfs']
               if n['is_leaf_in_pruned_tree']]
     domain = tree['domain_bounds']
@@ -973,6 +1103,14 @@ def process_problem(problem, tree, base_cfg, quantiles, sigmas, min_frac,
                                  n_slices, out_dir)
         print(f"    saved {path}")
 
+        for channel, suffix, _ in background_variants(problem, gt_grid):
+            paths = paper_images(problem, leaves, slice_buffers, domain,
+                                 gt_grid, grid_x, grid_t, sq, paper_n_slices,
+                                 out_dir, channel=channel,
+                                 channel_suffix=suffix)
+            print(f"    saved {len(paths)} paper_images "
+                  f"({problem}{suffix}, q={sq:.2f})")
+
     return record
 
 
@@ -1007,6 +1145,9 @@ def main():
                     default=[0.5, 0.7, 0.9],
                     help='quantiles for the re-tiling figure (transition '
                          'subdomains carved out of the leaves)')
+    ap.add_argument('--paper-n-slices', type=int, default=2,
+                    help='snapshots per dimension for the clean, '
+                         'single-panel paper_images/ output')
     ap.add_argument('--out', type=Path,
                     default=REPO / 'outputs' / 'buffer_decomposition')
     args = ap.parse_args()
@@ -1034,7 +1175,7 @@ def main():
                                   args.quantiles, args.sigmas, args.min_frac,
                                   args.max_frac, args.out,
                                   args.slice_quantiles, args.n_slices,
-                                  args.tiling_quantiles)
+                                  args.tiling_quantiles, args.paper_n_slices)
             if rec is not None:
                 records[problem] = rec
         except Exception as exc:                       # noqa: BLE001

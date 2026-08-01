@@ -25,7 +25,7 @@ its stages is described in detail in the subsections that follow.
 \ForAll{leaf regions $\Omega_j$ \textbf{in parallel}}
     \State Train an expert $u_j$ with $\mathcal{A}_{\mathrm{exp}}$ on $\Omega_j$, with interface data from $u_0$
 \EndFor
-\State Blend the experts via smoothstep POU (partition of unity) weights
+\State Blend the experts via an adaptive smoothstep POU (partition of unity)
 \State Fine tune the blended composition under the global loss
 \Ensure Global approximate solution $u_\theta$
 \end{algorithmic}
@@ -239,29 +239,31 @@ where $\mathcal{L}^{\mathrm{res}}_j$ enforces the PDE residual on collocation
 points inside $\Omega_j$, and $\mathcal{L}^{\mathrm{ic}}_j$,
 $\mathcal{L}^{\mathrm{bc}}_j$ enforce the true initial and boundary conditions
 on the parts of $\partial\Omega_j$ that coincide with the physical boundary of
-$\Omega$. The interface term $\mathcal{L}^{\Gamma}_j$ acts on the interior
-faces $\Gamma_j$ that $\Omega_j$ shares with its neighbors. Let
-$X^{\Gamma}_j$ denote the set of sample points on $\Gamma_j$ and $N$ the
-differential order of the PDE. Matching the boundary
-value alone is not sufficient once $N$ exceeds one. Closing a local problem of
-order $N$ requires $N$ independent pieces of interface data, mirroring the $N$
-conditions an $N$-th order boundary value problem would need. Since each
-$\Gamma_j$ lies at a fixed value of a single coordinate, let
-$\partial_{\Gamma_j}^k$ denote the $k$-th order derivative in that coordinate,
-i.e. across the interface. The loss ties $u_j$, together with these
-derivatives up to order $N-1$, to the frozen root prediction $u_0$:
+$\Omega$. The region $\Omega_j$ generally borders a different neighbor along
+each spatial dimension, so let $\mathcal{I}_j \subseteq \{1,\ldots,d\}$
+denote the dimensions along which $\Omega_j$ has an interior neighbor, as
+opposed to coinciding with the physical boundary of $\Omega$, and for
+$m \in \mathcal{I}_j$ let $X^{\Gamma_j}_m$ denote the sample points on the
+corresponding interior face of $\Omega_j$. Let
+$x=(x_1,\ldots,x_d)\in\mathbb{R}^d$ denote the spatial coordinates and $N$
+the differential order of the PDE. A well posed local problem of order $N$
+needs $N$ pieces of interface data, so on the face normal to $x_m$ we match
+the value together with derivatives $\partial_{x_m}^k$ up to order $N-1$.
+Writing $X^{\Gamma}_j = \bigcup_{m\in\mathcal{I}_j} X^{\Gamma_j}_m$ for the
+union over all such faces, the loss ties $u_j$ and its derivatives, on every
+interior face, to the frozen root prediction $u_0$:
 \begin{equation}
 \mathcal{L}^{\Gamma}_j
 = \frac{1}{|X^{\Gamma}_j|}
-\sum_{(x,t)\in X^{\Gamma}_j}
+\sum_{m\in\mathcal{I}_j}
+\sum_{(x,t)\in X^{\Gamma_j}_m}
 \sum_{k=0}^{N-1}
-\bigl\| \partial_{\Gamma_j}^k u_j(x,t) - \partial_{\Gamma_j}^k u_0(x,t) \bigr\|^2 .
+\bigl\| \partial_{x_m}^k u_j(x,t) - \partial_{x_m}^k u_0(x,t) \bigr\|^2 .
 \label{eq:interface_loss}
 \end{equation}
 In this way every expert learns a well-posed local PDE whose boundary data on
-the interior interfaces, values and derivatives alike, is supplied by the
-root, so the leaves can be trained independently, and in parallel, while
-remaining mutually consistent.
+the interior interfaces is supplied by the root, so the leaves can be trained
+independently, and in parallel, while remaining mutually consistent.
 
 \noindent When model size is not a concern, one may set
 $\mathcal{A}_{\mathrm{exp}} = \mathcal{A}_{\mathrm{base}}$ and initialize each
@@ -331,8 +333,10 @@ $\Omega \subset \mathbb{R}^d\times[0,T]$ denote the computational domain, and le
 $\{\Omega_i\}_{i=0}^{k}$ be the set of regions obtained from the hierarchical
 decision tree decomposition, where each region is an axis-aligned hypercube
 \[
-\Omega_i = [a_{i,1}, b_{i,1}] \times \cdots \times [a_{i,d+1}, b_{i,d+1}].
+\Omega_i = \Bigl(\textstyle\prod_{m=1}^{d} [a_{i,m}, b_{i,m}]\Bigr) \times [a_{i,t}, b_{i,t}],
 \]
+i.e. a spatial box in $x=(x_1,\ldots,x_d)\in\mathbb{R}^d$ together with a time
+interval.
 
 \noindent To smoothly blend the contributions of different experts while
 ensuring compatibility with the PDE's differential order, we define compactly
@@ -363,26 +367,26 @@ S_N(s) & \text{if } 0 < s < 1 \\
 \end{cases}
 \end{equation}
 
-\noindent For region $\Omega_i$ with bounds $[a_{i,j}, b_{i,j}]$ along
-dimension $j$, let $\delta_{i,j} = \alpha (b_{i,j} - a_{i,j})$ denote the
-collar (transition) half-width, where $\alpha > 0$ is a configurable fraction
-(typically $\alpha = 0.2$). The one dimensional window along dimension $j$ is:
+\noindent For region $\Omega_i$ with bounds $[a_{i,z}, b_{i,z}]$ along
+coordinate $z$ (a spatial coordinate $x_m$, $m=1,\ldots,d$, or the time
+coordinate $t$), let $\delta_{i,z} = \alpha (b_{i,z} - a_{i,z})$ denote the
+collar (transition) half-width, where $\alpha > 0$ is a configurable fraction. The one dimensional window along $z$ is:
 \begin{equation}
-\omega_{i,j}(x_j) = \rho_N\!\left(\frac{x_j - (a_{i,j} - \delta_{i,j})}{\delta_{i,j}}\right) \cdot \rho_N\!\left(\frac{(b_{i,j} + \delta_{i,j}) - x_j}{\delta_{i,j}}\right)
+\omega_{i,z}(z) = \rho_N\!\left(\frac{z - (a_{i,z} - \delta_{i,z})}{\delta_{i,z}}\right) \cdot \rho_N\!\left(\frac{(b_{i,z} + \delta_{i,z}) - z}{\delta_{i,z}}\right)
 \label{eq:window_1d}
 \end{equation}
 
-\noindent This produces a flat-top window: $\omega_{i,j}(x_j) = 1$ for
-$x_j \in [a_{i,j}, b_{i,j}]$, smooth $C^N$ ramps in the collars
-$[a_{i,j} - \delta_{i,j}, a_{i,j}]$ and $[b_{i,j}, b_{i,j} + \delta_{i,j}]$,
+\noindent This produces a flat-top window: $\omega_{i,z}(z) = 1$ for
+$z \in [a_{i,z}, b_{i,z}]$, smooth $C^N$ ramps in the collars
+$[a_{i,z} - \delta_{i,z}, a_{i,z}]$ and $[b_{i,z}, b_{i,z} + \delta_{i,z}]$,
 and exactly zero outside
-$[a_{i,j} - \delta_{i,j}, b_{i,j} + \delta_{i,j}]$.
+$[a_{i,z} - \delta_{i,z}, b_{i,z} + \delta_{i,z}]$.
 
 \noindent The region indicator function is therefore the tensor product of the
-one dimensional windows over all dimensions:
+one dimensional windows over all coordinates:
 \begin{equation}
-\Psi_{\Omega_i}(X) = \prod_{j=1}^{d+1} \omega_{i,j}(x_j),
-\qquad X = (x_1,\ldots,x_{d+1}),
+\Psi_{\Omega_i}(x,t) = \omega_{i,t}(t) \prod_{m=1}^{d} \omega_{i,m}(x_m),
+\qquad x = (x_1,\ldots,x_d),
 \label{eq:smoothstep_windows}
 \end{equation}
 
@@ -405,7 +409,7 @@ one dimensional windows over all dimensions:
 Compact smoothstep window functions ($C^2$, collar fraction $\alpha = 0.2$) for a
 representative domain decomposition. Left: one dimensional slices for several regions, showing the flat-top
 response and smooth collar transitions. Right: two dimensional indicator
-heatmaps $\Psi_{\Omega_i}(X)$, illustrating the compact support and smooth blending
+heatmaps $\Psi_{\Omega_i}(x,t)$, illustrating the compact support and smooth blending
 collars.
 }
 \label{fig:window_demo}
@@ -422,7 +426,7 @@ u_\theta(x,t) =
 \end{equation}
 with the leaf normalization
 \begin{equation}
-\tilde{\Psi}_{\Omega_i}(X) = \frac{\Psi_{\Omega_i}(X)}{\sum_{j \in \mathcal{L}} \Psi_{\Omega_j}(X)}.
+\tilde{\Psi}_{\Omega_i}(x,t) = \frac{\Psi_{\Omega_i}(x,t)}{\sum_{j \in \mathcal{L}} \Psi_{\Omega_j}(x,t)}.
 \label{eq:normalization_atoe}
 \end{equation}
 Once the leaf experts are spawned the root retires from the blend, it is used
@@ -442,9 +446,162 @@ domain, each covering its region with smooth transitions in the collar zones.
 \label{fig:normalization_weights}
 \end{figure}
 
+\subsubsection{Adaptive Collar Sizing}
+\label{sec:adaptive_collar}
+
+The fixed collar above assigns every region the same relative half-width
+$\delta_{i,z} = \alpha (b_{i,z} - a_{i,z})$ along every coordinate. However,
+a property of decision trees in general, is that a split is placed where it reduces approximation error
+the most, which is exactly where the function varies most sharply. The tree
+of Section~\ref{sec:tree_construction} is no exception, so its interfaces
+tend to coincide with the sharpest features of $u_0$, precisely where a
+smooth blend is hardest to construct. We replace the fixed fraction $\alpha$
+with a rule that sizes each collar directly from the solution, general
+across PDEs and requiring no per-benchmark tuning.
+
+\noindent A narrow collar keeps most of $\Omega_i$ under $u_i$'s own,
+independently trained, local solution, the central benefit of leaf-local
+training, where each expert solves an easier problem than the original PDE. This is
+desirable wherever the interface itself is smooth. At an interface that
+coincides with a region of high error in the root, for instance the shock in
+Burgers' equation, the boundary data supplied to $u_i$ and $u_j$ by $u_0$
+(Section~\ref{sec:expert_training}) inherits that error, and a narrow collar
+leaves little room for the neighbouring expert to correct it through
+blending. A wide collar gives the blend more room to reconcile the two
+solutions there, but does so uniformly, sacrificing the easier-local-problem
+benefit even where it was not needed. We therefore want $\delta$ set
+adaptively, per face, rather than by a single global $\alpha$.
+
+\noindent For a coordinate $z\in\{x_1,\ldots,x_d,t\}$, let $g_z(x,t) =
+\|\partial_z u_0(x,t)\|_2$ denote the magnitude of the gradient of the root
+prediction along $z$ (the $\ell_2$ norm accounts for multi-output problems),
+and let $\mathrm{ref}_z(q)$ denote the $q$-quantile of $g_z$ over the whole
+domain $\Omega$, for a fixed $q\in(0,1)$. For region $\Omega_i$, let
+$\bar g_z(s)$ denote the mean of $g_z$ over the face of $\Omega_i$ normal to
+$z$ with its $z$-coordinate held at $s$. The adaptive collar half-width on the
+$a_{i,z}$ side is
+\begin{equation}
+\delta_{i,z}^{-} = \min\bigl\{\,\delta \ge 0 : \bar g_z(a_{i,z}-\delta) < \mathrm{ref}_z(q)\,\bigr\},
+\label{eq:adaptive_collar}
+\end{equation}
+i.e. we push the collar outward from the interface until the mean gradient
+across the bound first drops below the threshold, and symmetrically for
+$\delta_{i,z}^{+}$ on the $b_{i,z}$ side. Both are clamped to
+$[\sigma_{\min},\sigma_{\max}]\cdot(b_{i,z}-a_{i,z})$, where the floor $\sigma_{\min}$
+keeps a minimal transition even where the threshold is met immediately, and
+the cap $\sigma_{\max}$ bounds the search; if $\bar g_z$ never drops below
+$\mathrm{ref}_z(q)$ within the capped window, $\delta$ is instead set to its
+argmin there, so the rule is always well defined. The two per-side
+half-widths $\delta_{i,z}^{-}$, $\delta_{i,z}^{+}$ replace the single
+$\delta_{i,z}$ of Eq.~\eqref{eq:window_1d}, sizing the two ramps of
+$\omega_{i,z}$ independently. The gradient is evaluated once, on the frozen
+root $u_0$, so the collar geometry is fixed before expert training begins and
+does not depend on the blending it defines.
+
+\noindent This resolves the tension above directly, as at a quiet interface the
+mean gradient already lies below $\mathrm{ref}_z(q)$ at, or just past, the
+boundary, so $\delta$ collapses to the floor and the corresponding experts
+keep nearly all of their independently trained territory. At an interface
+coinciding with a sharp feature, the mean gradient stays above threshold for
+longer, the collar widens, and a larger portion of the domain there is
+governed by the blended composition rather than a single expert, exactly the
+region the fine-tuning stage below targets with RAD resampling to reconcile.
+
+\begin{figure}[H]
+\centering
+
+\begin{subfigure}{0.4\textwidth}
+\centering
+\includegraphics[width=\textwidth]
+{images/section3_method/allen_cahn_q0.90_heatmap.png}
+\caption{Allen--Cahn}
+\end{subfigure}
+\hfill
+\begin{subfigure}{0.4\textwidth}
+\centering
+\includegraphics[width=\textwidth]
+{images/section3_method/burgers1d_q0.90_heatmap.png}
+\caption{Burgers}
+\end{subfigure}
+
+\vspace{0.5em}
+
+\begin{subfigure}{0.4\textwidth}
+\centering
+\includegraphics[width=\textwidth]
+{images/section3_method/schrodinger_u_q0.90_heatmap.png}
+\caption{Schrödinger (real part)}
+\end{subfigure}
+\hfill
+\begin{subfigure}{0.4\textwidth}
+\centering
+\includegraphics[width=\textwidth]
+{images/section3_method/schrodinger_v_q0.90_heatmap.png}
+\caption{Schrödinger (imaginary part)}
+\end{subfigure}
+
+\vspace{0.5em}
+
+\caption{
+Adaptive collar geometry obtained from Eq.~\eqref{eq:adaptive_collar} with
+$q = 0.9$, showing interior tree interfaces (black) and the resulting
+per-face collars (red), overlaid on the ground-truth solution.
+}
+\label{fig:adaptive_collar_geometry}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+
+\begin{subfigure}{0.4\textwidth}
+\centering
+\includegraphics[width=\textwidth]
+{images/section3_method/burgers1d_q0.70_slice_t0.335.png}
+\caption{Burgers, $t=0.335$}
+\end{subfigure}
+\hfill
+\begin{subfigure}{0.4\textwidth}
+\centering
+\includegraphics[width=\textwidth]
+{images/section3_method/burgers1d_q0.70_slice_t0.665.png}
+\caption{Burgers, $t=0.665$}
+\end{subfigure}
+
+\vspace{0.5em}
+
+\begin{subfigure}{0.4\textwidth}
+\centering
+\includegraphics[width=\textwidth]
+{images/section3_method/allen_cahn_q0.70_slice_t0.333.png}
+\caption{Allen--Cahn, $t=0.333$}
+\end{subfigure}
+\hfill
+\begin{subfigure}{0.4\textwidth}
+\centering
+\includegraphics[width=\textwidth]
+{images/section3_method/allen_cahn_q0.70_slice_t0.667.png}
+\caption{Allen--Cahn, $t=0.667$}
+\end{subfigure}
+
+\vspace{0.5em}
+
+\caption{
+One dimensional slices of the adaptive collar geometry at $q = 0.7$, showing
+the ground-truth solution profile at a fixed time $t$ for Burgers and
+Allen--Cahn, with black vertical lines marking the decision tree's
+subdomain boundaries crossed by the slice, and red vertical lines marking
+the resulting adaptive collar edges.
+}
+\label{fig:adaptive_collar_slices}
+\end{figure}
+
 \noindent Finally, the full composition \eqref{eq:global_atoe} is jointly fine
 tuned under the global PDE loss. This last stage reconciles the independently
 trained experts in the collar zones where neighboring windows overlap,
 producing a single, globally consistent solution. The fine tuning stage
-applies the same training scheme as in Section~\ref{sec:root_training}, with a
-single change: the Adam learning rate is decreased to $10^{-4}$.
+applies the same training scheme as the root (Section~\ref{sec:root_training}):
+40k SSBroyden iterations with no Adam warm-up, and RAD resampling refreshed
+every 500 iterations. Here RAD is not merely helpful but essential: after
+blending, the residual is largest precisely in the collar zones where the
+independently trained experts must reconcile, so RAD concentrates sampling
+there and relaxes elsewhere as the mismatch is resolved.
