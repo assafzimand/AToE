@@ -1,42 +1,44 @@
 # ══════════════════════════════════════════════════════════════════════════
-# BURGERS PHASE 3 ONLY, STATIC DRAW A/B: does disabling the 500-epoch
-# residual redraw fix the phase-3 expert stall?
+# BURGERS: ADAM-WARMUP PHASE 3 (static draw) + FULL FINE-TUNE
 # ══════════════════════════════════════════════════════════════════════════
 #
-# CONTEXT (full_flow_root64x5_rad, burgers cell, 20260731_130013): the root
-# hit 8.89e-9 but phase 3 stalled at 8.48e-6 composed (experts 2-5e-5 each),
-# ~50x worse than the 24-Jul static-draw regime where experts reached ≈ root.
-# metrics.json showed the mechanism: with the 500-epoch redraw under
-# SSBroyden, each 921-param expert ground its ~3k-point draw to ~2e-8 loss
-# while the SAME weights scored ~1e-6 on the next fresh draw — a 50-250x
-# memorization sawtooth with no descending envelope. The experts also left
-# phase 3 with violent out-of-box behaviour (norms up to 1819 vs ≤26 in the
-# verified pretrained set), which destroyed the soft-blend handoff
-# (rel-L2 3.99 before the first fine-tune step).
+# Third step of the phase-3 investigation. Prior evidence, same root
+# (8.89e-9, loaded from checkpoint), same 6-leaf tree:
+#   * full-flow run (redraws every 500 under SSBroyden): stalled 8.48e-6,
+#     memorization sawtooth, expert norms up to 1819 out-of-box, fine-tune
+#     handoff destroyed (rel-L2 3.99 -> stuck at 0.25).
+#   * static-draw A/B (SSBroyden cold start, no redraws): ~3.6e-6 at 18k —
+#     14x better than redraws at the same epoch, but ~6x behind the proven
+#     24-Jul regime (5.9e-7 @18k, best 2.29e-7 @30k).
 #
-# THE ONE CHANGE UNDER TEST: trainer/epoch_loop.py now forces phase 3 to a
-# STATIC residual draw under full-batch optimizers — one per-expert draw at
-# segment start, no redraws for the whole segment (Adam/SOAP, if ever used
-# for a warmup, would still refresh every epoch). Everything else is
-# identical to the full-flow run.
+# THIS RUN restores the full 24-Jul phase-3 recipe and adds the fine-tune:
+#   * ADAM WARMUP: top-level optimizer_1 adam -> ssbroyden at epoch 1000
+#     (per-epoch fresh draws under Adam via the built-in cadence rule, then
+#     a STATIC draw under SSBroyden — code-enforced in trainer/epoch_loop.py).
+#     This is the last regime difference vs the run where experts ≈ root;
+#     libraries (scimba 1.3.4, torch 2.13.0) verified identical.
+#   * FINE-TUNE 40k SSBroyden: adaptive collars from the root (q=0.9,
+#     clamp [0.03, 0.5]), RAD 0.5 (burgers adaptive_sampling), redraw +
+#     re-target every 500 — the exact recipe verified on 30 Jul (6.98e-8
+#     from healthy pretrained experts).
 #
-# THIS RUN: burgers only. Root is LOADED (the 8.89e-9 checkpoint from the
-# full-flow run — copy its checkpoints/best_model_root.pt to the path below
-# before launching). Fine-tune is SKIPPED (fine_tune: null), so the run is
-# root-load -> tree build -> 40k phase 3, directly comparable to the
-# full-flow burgers phase 3 (same root => same 6-leaf tree, same budget,
-# same patience).
+# Flow: root-load -> tree -> phase 3 (1k adam + up to 39k ssbroyden) ->
+# fine-tune 40k. eval_every back to 1000; patience 10 evals = 10k window.
 #
-# WHAT TO COMPARE against 20260731_130013 phase 3:
-#   * composed hard rel-L2: stall was best 8.48e-6 @62k, degraded to 3.2e-5.
-#     Success = clear descent below ~1e-6 territory (run-1 experts ≈ 2e-7).
-#   * per-expert rel-L2 curves (per_expert_rel_l2 / expert curves plot).
-#   * train-loss curve: the sawtooth should be GONE (no resample events).
-#   * expert out-of-box health at segment end (norm/psi dump if fine-tune
-#     were enabled — here check best_model_phase3.pt norms offline).
+# WHAT TO COMPARE:
+#   * phase 3 vs 24-Jul trajectory (4.3e-6 @8k, 5.9e-7 @18k, 2.3e-7 @30k)
+#     and vs the static-A/B run (3.6e-6 @18k).
+#   * the [DEBUG] expert norm/psi dump at fine-tune start: healthy experts
+#     read std ~O(1) (verified run: norms 8-26); monsters read 100+.
+#   * fine-tune: does it beat its phase-3 start (verified run: 0.107 at
+#     epoch 1 -> 5.3e-4 @1k -> 6.98e-8 final)?
 #
-# Memory: phase 3 builds one SSBroyden over 6 experts x 921 = 5,526 params
-# (dense Hessian ~0.24 GB, peak ~1.5 GB) — trivial next to the root runs.
+# KNOWN CAVEAT (accepted): phase 3 ends on a multiple of 500, so the
+# fine-tune's FIRST epoch is a resample epoch — RAD targets the fresh
+# composition before the first optimizer step. The verified 30-Jul run
+# instead had a 500-epoch uniform grace (its epochs started at 1). If this
+# run's fine-tune blows up at start despite healthy experts, that
+# first-epoch RAD is the prime suspect.
 #
 # This is the DEFAULT plan: `python run_experiments.py` reads it as-is;
 # AWS_scripts/run_and_terminate.sh launches it and stops the box after.
@@ -57,12 +59,11 @@ base_config:
     enable_timing: false
     enabled: true
     expert_type: mlp
-    # Fine-tune SKIPPED for this A/B via epochs: 0 (the orchestrator skips
-    # the segment before collar sizing). The BLOCK must stay: AToELeaves
-    # reads its collar geometry (sigma_fraction, adaptive_collar_*) from
-    # here at construction time — fine_tune: null fails in _build_model.
-    # Values match experiment_plans/full_flow_root64x5_rad.yaml; only
-    # epochs differs (40000 there).
+    # FINE-TUNE ON: 40k SSBroyden, adaptive collars sized from the root at
+    # q=0.9 clamped [0.03, 0.5], RAD 0.5 via burgers1d.adaptive_sampling,
+    # redraw + re-target every sampling.resample_every_epochs (500).
+    # Identical to the recipe verified on 30 Jul (6.98e-8 from healthy
+    # experts). sigma_fraction is the fallback if collar sizing fails.
     fine_tune:
       adaptive_collar_grid: 257
       adaptive_collar_quantile: 0.9
@@ -71,7 +72,7 @@ base_config:
       adaptive_collar_size: true
       corrector_architecture: null
       corrector_init: zero
-      epochs: 0
+      epochs: 40000
       lr: 0.0001
       lr_schedule: none
       min_epochs: 1
@@ -234,7 +235,7 @@ base_config:
   cuda: true
   # PHASE 3 budget (the top-level `epochs` key is the phase-3 segment).
   epochs: 40000
-  eval_every: 500
+  eval_every: 1000
   eval_only: false
   kdv:
     adaptive_sampling:
@@ -376,11 +377,13 @@ base_config:
   min_epochs: 1
   model: AToELeaves
   # These top-level keys are the PHASE 3 segment's optimizer (orchestrator
-  # passes cfg itself as phase 3's segment config). SSBroyden throughout, no
-  # Adam warmup, so no switch.
-  optimizer_1: ssbroyden
-  optimizer_2: null
-  optimizer_switch_epoch: 99999
+  # passes cfg itself as phase 3's segment config). ADAM WARMUP restored:
+  # 1000 epochs of Adam (lr 0.001, per-epoch fresh draws via the Adam
+  # cadence rule) -> SSBroyden on a static draw — the 24-Jul recipe.
+  # Patience resets at the switch, so SSBroyden gets a fresh grace window.
+  optimizer_1: adam
+  optimizer_2: ssbroyden
+  optimizer_switch_epoch: 1000
   # 10 evals x eval_every 1000 = 10k epochs without a 1% improvement.
   # Applies PER SEGMENT, including the root.
   patience_evals: 10
@@ -490,12 +493,12 @@ base_config:
   ssbroyden:
     lr: 1.0
     tolerance_grad: 1.0e-10
-experiment_name: burgers_phase3_static_draw
+experiment_name: burgers_phase3_warmup_finetune
 experiments:
 # Single cell: burgers, root loaded from checkpoint (architecture must match
-# the checkpoint: [2, 64x5, 1]), 40k phase 3 on a STATIC per-expert draw
-# (code-enforced in trainer/epoch_loop.py), no fine-tune.
-- name: burgers1d_phase3_static
+# the checkpoint: [2, 64x5, 1]). Phase 3 = 1k adam warmup + ssbroyden on a
+# static draw (code-enforced); then the full 40k fine-tune.
+- name: burgers1d_phase3_warmup_ft
   problem: burgers1d
   model: AToELeaves
   base_architecture: [2, 64, 64, 64, 64, 64, 1]

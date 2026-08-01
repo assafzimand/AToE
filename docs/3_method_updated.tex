@@ -38,15 +38,23 @@ its stages is described in detail in the subsections that follow.
 
 The architecture and training process of the initial model $u_0$ follows the classic PINN formulation described in
 Section~\ref{sec:background}. However, since its only purpose is to serve as a starting point for the AToE algorithm, we use a relatively small network. For the second order benchmarks we use an MLP
-with 4 hidden layers of 60 neurons. For the third and fourth order benchmarks
+with 5 hidden layers of 64 neurons. For the third and fourth order benchmarks
 we use the same architecture combined with a time marching mechanism: the time
 axis is split into windows (4 for KdV, 10 for KS), each window is trained in
 turn, and the prediction of the converged window at its final time serves as
-the initial condition for the next. Training consists of 5k Adam iterations
-with learning rate $10^{-3}$, followed by 40k SSBroyden iterations. Both
-stages use full batch training with 10k residual points and 256 points each
-for the initial and boundary conditions, and all computations are performed in
-double precision, as suggested in~\cite{kiyani2025optimizer}.
+the initial condition for the next. Training consists of 40k SSBroyden
+iterations, with no Adam warm-up. Training uses full batch, with 20k residual
+points and 256 points each for the initial and boundary conditions, and all
+computations are performed in double precision, as suggested
+in~\cite{kiyani2025optimizer}.
+
+\noindent We additionally employ RAD resampling during root training, drawing
+half of the residual points from the RAD-weighted distribution and the
+remainder uniformly, with the point set refreshed every 500 iterations. RAD is
+either helpful or harmless for the root, for instance for problems with a
+sharp, localized feature such as the Burgers shock, and keeps the root's
+training mechanism consistent with the fine-tuning stage, where RAD
+resampling is essential (Section~\ref{sec:smoothstep_windows}).
 
 \vspace{0.5em}
 
@@ -214,8 +222,8 @@ experiments employ time-marching with $4$ and $10$ windows, respectively.
 Rather than training the experts through the global loss terms, we exploit a
 core MoE idea and let each expert solve a localized, and therefore easier,
 problem on its own subdomain. Following the interface treatment
-of~\cite{luo2025pdd}, each local problem is closed by taking the values on the
-shared interfaces from the converged root. The predictions of $u_0$ are
+of~\cite{luo2025pdd}, each local problem is closed by taking the values and
+derivatives on the shared interfaces from the converged root. The predictions of $u_0$ are
 recorded on the interior faces of the leaf regions and serve as boundary data
 for the local problems. Concretely, for each leaf $j$ we minimize a local
 objective
@@ -233,25 +241,39 @@ $\mathcal{L}^{\mathrm{bc}}_j$ enforce the true initial and boundary conditions
 on the parts of $\partial\Omega_j$ that coincide with the physical boundary of
 $\Omega$. The interface term $\mathcal{L}^{\Gamma}_j$ acts on the interior
 faces $\Gamma_j$ that $\Omega_j$ shares with its neighbors. Let
-$X^{\Gamma}_j$ denote the set of sample points on $\Gamma_j$. The loss ties
-the local solution to the frozen root prediction $u_0$:
+$X^{\Gamma}_j$ denote the set of sample points on $\Gamma_j$ and $N$ the
+differential order of the PDE. Matching the boundary
+value alone is not sufficient once $N$ exceeds one. Closing a local problem of
+order $N$ requires $N$ independent pieces of interface data, mirroring the $N$
+conditions an $N$-th order boundary value problem would need. Since each
+$\Gamma_j$ lies at a fixed value of a single coordinate, let
+$\partial_{\Gamma_j}^k$ denote the $k$-th order derivative in that coordinate,
+i.e. across the interface. The loss ties $u_j$, together with these
+derivatives up to order $N-1$, to the frozen root prediction $u_0$:
 \begin{equation}
 \mathcal{L}^{\Gamma}_j
 = \frac{1}{|X^{\Gamma}_j|}
 \sum_{(x,t)\in X^{\Gamma}_j}
-\bigl\| u_j(x,t) - u_0(x,t) \bigr\|^2 .
+\sum_{k=0}^{N-1}
+\bigl\| \partial_{\Gamma_j}^k u_j(x,t) - \partial_{\Gamma_j}^k u_0(x,t) \bigr\|^2 .
 \label{eq:interface_loss}
 \end{equation}
 In this way every expert learns a well-posed local PDE whose boundary data on
-the interior interfaces is supplied by the root, so the leaves can be trained
-independently, and in parallel, while remaining mutually consistent.
+the interior interfaces, values and derivatives alike, is supplied by the
+root, so the leaves can be trained independently, and in parallel, while
+remaining mutually consistent.
 
 \noindent When model size is not a concern, one may set
 $\mathcal{A}_{\mathrm{exp}} = \mathcal{A}_{\mathrm{base}}$ and initialize each
 expert by copying the weights of the root, so that at initialization every
 expert reproduces the root prediction on its region. This warm start reduces
-expert training time. The experts are trained with the same scheme as the root
-(Section~\ref{sec:root_training}). The loss
+expert training time. The experts are trained with the same optimizer
+schedule as the root (Section~\ref{sec:root_training}): 40k SSBroyden
+iterations, with no Adam warm-up. Unlike the root, however, the experts use no
+RAD resampling, each leaf draws a fixed, uniformly sampled point set
+proportional to its volume, held fixed for the whole segment, so that every
+leaf, including thin ones around a fine feature, trains on a stable,
+comparable number of points regardless of its size. The loss
 weights $\lambda_r$, $\lambda_{ic}$, and $\lambda_{bc}$ are kept from the root
 training, and the interface weight is set to $\lambda_{\Gamma} = 1$. Examples of interface training samples for inner domain experts are shown in
 Figure~\ref{fig:local_expert_training}.
