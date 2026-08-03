@@ -1,40 +1,49 @@
 # ══════════════════════════════════════════════════════════════════════════
-# FINE-TUNE-ONLY SWEEP: 40k pure SSBroyden (NO Adam warmup) from the
-# warmup-trained roots + experts, 3 PDEs x 5 configurations = 15 cells.
+# RESULTS RUN — FULL FLOW WITH THE 4x60 ROOT: the 24-Jul showcase setting,
+# upgraded with everything the investigation proved. 3 PDEs from scratch.
 # ══════════════════════════════════════════════════════════════════════════
 #
-# WHY: the full_flow_warmup5k campaign proved the fine-tune's 5k Adam warmup
-# destroys the converged composition in ALL 3 PDEs: the soft handoff was
-# healthy (= phase 3: 2.1e-5 / 1.3e-7 / 2.7e-4 for ac / burgers / schrod),
-# ONE Adam epoch at lr 1e-4 wrecked it by 2-5 orders (Adam's per-coordinate
-# normalization takes lr-scale steps regardless of gradient size — wrong at
-# a converged sharp minimum), and SSBroyden spent its 40k budget recovering,
-# ending WORSE than its start everywhere. The no-warmup fine-tune is the
-# twice-verified recipe (6.98e-8 and 7.22e-8 on burgers).
+# RATIONALE: the 24-Jul run (commit 0894149, checkpoints verified in
+# roots_checkpoints/double_precision) is the best phase-3-vs-root result on
+# record: 6 experts totaling ~1/2 the root's parameters matched the root
+# (2.29e-7 vs 1.72e-7, burgers). Its root was [2, 60x4, out] = 11,221
+# params, trained WITHOUT RAD. Since the fine-tune needs RAD, the fair
+# baseline root must have it too — so THIS campaign reruns the 60x4 setting
+# with RAD at the root (the one change vs 24-Jul), plus the proven recipe
+# from the A/B chain:
 #
-# WHAT: root + phase-3 training are SKIPPED — every cell loads the
-# warmup-campaign checkpoints (pretrained_base_checkpoint +
-# pretrained_local_expert_checkpoint below) and runs the fine-tune only.
-# eval_every is 500 here, so patience 10 evals = a 5k-epoch window.
+#   root       [2, 60x4, out]: 1k Adam (lr 1e-3) -> 40k SSBroyden,
+#              RAD 0.5 re-targeted every 500.               (budget 41,000)
+#   phase 3    experts [2, 20x3, out]: 1k Adam (lr 1e-3, fresh per-expert
+#              draws every epoch) -> 40k SSBroyden on a STATIC uniform
+#              per-expert draw (code-enforced; RAD force-disabled in code
+#              — the decomposition already did the spatial adaptation, and
+#              redraws under the quasi-Newton cause the memorization
+#              sawtooth).                                   (budget 41,000)
+#   fine-tune  SKIPPED (epochs 0) — run later from the saved checkpoints.
+#              (The proven recipe when it runs: 40k pure SSBroyden, NO
+#              warmup, adaptive collars q=0.9, RAD 0.5 every 500.)
+#   The 1k warmup length matches the 24-Jul run exactly (both its root and
+#   phase 3 switched adam -> ssbroyden at epoch 1000).
 #
-# Phase-3 starting points (composed hard rel-L2, from full_flow_warmup5k):
-#   allen_cahn 1.30e-5 (root 1.55e-4) | burgers 1.30e-7 (root 5.18e-9)
-#   schrodinger 2.72e-4 (root 2.45e-4)
-# A successful fine-tune IMPROVES on its phase-3 start.
+# Evidence for each element: warmup-vs-cold and static-vs-redraw A/Bs
+# (burgers, same root/tree), the warmup5k full flow (phase 3 1.3e-7,
+# fine-tune destroyed only by its Adam warmup), and the twice-verified
+# no-warmup fine-tune (6.98e-8 / 7.22e-8).
 #
-# THE 5 CONFIGURATIONS (x 3 PDEs; the config-1 baseline cells run LAST):
-#   1) ft_adacollar   adaptive collars q=0.9 clamp [0.03,0.5], N=2 — the
-#                     verified recipe; the campaign's core fix.
-#   2) ft_s003_N4     FIXED sigma 0.03, smoothstep order N=4 (narrow collar,
-#                     smoother window).
-#   3) ft_s005_N2     FIXED sigma 0.05, N=2.
-#   4) ft_corr_unfr   single corrector u = u_soft + chi*c, adaptive collars,
-#                     freeze_experts: false (experts train WITH c).
-#   5) ft_corr_frozen same, freeze_experts: true (only c trains; interiors
-#                     untouched by construction).
+# BENCHMARKS (this root class, from 24-Jul + verification runs):
+#   burgers: root ~1.7e-7 (RAD may improve it), phase 3 ~2.3e-7,
+#            fine-tune 6.98e-8 — the target: fine-tune ~ root or better.
+#   allen_cahn / schrodinger: phase 3 beat or matched their roots in the
+#   warmup5k run; with the smaller root the composition should lead more.
 #
-# All cells: RAD 0.5 via the per-PDE adaptive_sampling blocks, redraw +
-# re-target every 500, pool 100k / chunk 5k, float64, full batch.
+# Memory: root Hessian 11,221^2 -> ~1.0 GB, SSBroyden peak ~6 GB — well
+# inside the A10G. Phase-3/fine-tune optimizers are smaller still.
+# Recommended on the box:
+#     export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+#
+# ORDER: schrodinger first (most leaves, biggest graph — the canary),
+# then burgers, then allen_cahn.
 #
 # This is the DEFAULT plan: `python run_experiments.py` reads it as-is;
 # AWS_scripts/run_and_terminate.sh launches it and stops the box after.
@@ -55,11 +64,10 @@ base_config:
     enable_timing: false
     enabled: true
     expert_type: mlp
-    # FINE-TUNE (the only segment that runs): 40k PURE SSBroyden — NO Adam
-    # warmup (proven destructive on a converged composition). Adaptive
-    # collars q=0.9 clamped [0.03, 0.5] are the BASELINE; cells 2-3 override
-    # to fixed sigma. Cells 4-5 switch on the single corrector.
-    # sigma_fraction is the fallback if collar sizing fails.
+    # FINE-TUNE SKIPPED in this campaign (epochs: 0 — the orchestrator
+    # skips the segment; fine-tunes will run later from the saved
+    # checkpoints). The block must stay: AToELeaves reads its collar
+    # geometry from here at construction time.
     fine_tune:
       adaptive_collar_grid: 257
       adaptive_collar_quantile: 0.9
@@ -68,7 +76,7 @@ base_config:
       adaptive_collar_size: true
       corrector_architecture: null
       corrector_init: zero
-      epochs: 40000
+      epochs: 0
       lr: 0.0001
       lr_schedule: none
       min_epochs: 1
@@ -78,9 +86,9 @@ base_config:
       sigma_fraction: 0.05
       single_corrector: false
     initial_train:
-      # ROOT — SKIPPED in every cell (pretrained_local_expert_checkpoint is
-      # set, which skips root AND phase 3; this block is ignored).
-      epochs: 45000
+      # ROOT: 1k Adam (lr 1e-3) -> 40k SSBroyden (the 24-Jul warmup length),
+      # RAD 0.5 every 500.
+      epochs: 41000
       lr: 0.001
       lr_decay_rate: 0.98
       lr_decay_steps: 1000
@@ -88,7 +96,7 @@ base_config:
       lr_warmup_steps: 0
       optimizer_1: adam
       optimizer_2: ssbroyden
-      optimizer_switch_epoch: 5000
+      optimizer_switch_epoch: 1000
     max_experts: 150
     split_icbc:
       enabled: true
@@ -136,8 +144,8 @@ base_config:
       update_every: 100
     new_norm_threshold: 0.04
     output_dim: 1
-    pretrained_base_checkpoint: roots_checkpoints/double_precision/adaptive_sampling_adam_warmup/allen_cahn_root.pt
-    pretrained_local_expert_checkpoint: roots_checkpoints/double_precision/adaptive_sampling_adam_warmup/allen_cahn_experts.pt
+    pretrained_base_checkpoint: null
+    pretrained_local_expert_checkpoint: null
     rwf:
       enabled: false
       mean: 1.0
@@ -155,6 +163,7 @@ base_config:
       m_distribution: quadratic
       num_windows: 5
     tree_smoothness_threshold: 0.5
+    # 7 leaves off the 60x4 root in the 24-Jul run.
     wavelet_threshold: 0.002
     window_smoothness_order: 2
     window_type: smoothstep
@@ -199,8 +208,8 @@ base_config:
     new_norm_threshold: 0.015
     nu: 0.01
     output_dim: 1
-    pretrained_base_checkpoint: roots_checkpoints/double_precision/adaptive_sampling_adam_warmup/burgers_root.pt
-    pretrained_local_expert_checkpoint: roots_checkpoints/double_precision/adaptive_sampling_adam_warmup/burgers_experts.pt
+    pretrained_base_checkpoint: null
+    pretrained_local_expert_checkpoint: null
     rwf:
       enabled: false
       mean: 1.0
@@ -218,14 +227,15 @@ base_config:
       m_distribution: quadratic
       num_windows: 5
     tree_smoothness_threshold: 0.5
+    # 6 leaves off the 60x4 root in the 24-Jul run.
     wavelet_threshold: 0.001
     window_smoothness_order: 2
     window_type: smoothstep
   cuda: true
-  # PHASE 3 — SKIPPED in every cell (pretrained experts loaded).
-  epochs: 0
-  # 500 here => patience 10 evals = 5k epochs (vs 10k in the training runs).
-  eval_every: 500
+  # PHASE 3 budget (top-level `epochs` = the phase-3 segment):
+  # 1k Adam warmup + 40k SSBroyden (the 24-Jul warmup length).
+  epochs: 41000
+  eval_every: 1000
   eval_only: false
   kdv:
     adaptive_sampling:
@@ -366,16 +376,19 @@ base_config:
   lr_warmup_steps: 0
   min_epochs: 1
   model: AToELeaves
-  # Top-level optimizer keys govern phase 3 — SKIPPED here (unused).
-  optimizer_1: ssbroyden
-  optimizer_2: null
-  optimizer_switch_epoch: 99999
-  # 5 evals x eval_every 500 = 2.5k epochs without a 1% improvement.
-  patience_evals: 5
+  # Top-level keys govern PHASE 3: 1k Adam (lr 0.001, fresh per-expert
+  # draws every epoch via the Adam cadence rule) -> SSBroyden on a STATIC
+  # draw (code-enforced). Patience resets at the switch.
+  optimizer_1: adam
+  optimizer_2: ssbroyden
+  optimizer_switch_epoch: 1000
+  # 10 evals x eval_every 1000 = 10k epochs without a 1% improvement.
+  # Applies PER SEGMENT, including the root.
+  patience_evals: 10
   patience_rel_delta: 0.01
   precision: float64
   print_every: 1000
-  problem: burgers1d
+  problem: schrodinger
   profiling:
     enabled: false
   resume_from: null
@@ -383,6 +396,8 @@ base_config:
     collar_data_ratio: 0.0
     collar_margin: 1.0
     eval_train_ratio: 0.25
+    # Floor on residual points per leaf in phase 3 (per-expert draw sizes
+    # each leaf by volume; a thin leaf would otherwise be starved).
     min_points_per_expert: 1024
     n_boundary_train: 256
     n_initial_train: 256
@@ -390,7 +405,8 @@ base_config:
     plot_samples_every: 1000
     rad_pool_size: 100000
     rad_pool_chunk: 5000
-    # Fine-tune collocation redraw + RAD re-target cadence.
+    # Collocation redraw + RAD re-target cadence. Applies to the ROOT and
+    # FINE-TUNE; phase 3 is static under SSBroyden (code-enforced).
     resample_every_epochs: 500
     sample_volume_ratio: 35
   save_every: 999999
@@ -433,8 +449,8 @@ base_config:
       update_every: 100
     new_norm_threshold: 2.0
     output_dim: 2
-    pretrained_base_checkpoint: roots_checkpoints/double_precision/adaptive_sampling_adam_warmup/schrodinger_root.pt
-    pretrained_local_expert_checkpoint: roots_checkpoints/double_precision/adaptive_sampling_adam_warmup/schrodinger_experts.pt
+    pretrained_base_checkpoint: null
+    pretrained_local_expert_checkpoint: null
     rwf:
       enabled: false
       mean: 1.0
@@ -452,6 +468,7 @@ base_config:
       m_distribution: quadratic
       num_windows: 5
     tree_smoothness_threshold: 0.7
+    # 10 leaves off the 60x4 root in the 24-Jul run — the one to watch.
     wavelet_threshold: 0.1
     window_smoothness_order: 2
     window_type: smoothstep
@@ -465,142 +482,23 @@ base_config:
   ssbroyden:
     lr: 1.0
     tolerance_grad: 1.0e-10
-experiment_name: ft_only_collar_corrector_sweep
+experiment_name: full_flow_root60x4_rad_warmup
 experiments:
-# ── Config 2: FIXED sigma 0.03, smoothstep order N=4. ──────────────────────
-- name: burgers_ft_s003_N4
-  problem: burgers1d
-  model: AToELeaves
-  base_architecture: [2, 64, 64, 64, 64, 64, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    fine_tune:
-      adaptive_collar_size: false
-      sigma_fraction: 0.03
-  burgers1d:
-    window_smoothness_order: 4
-- name: allen_cahn_ft_s003_N4
-  problem: allen_cahn
-  model: AToELeaves
-  base_architecture: [2, 64, 64, 64, 64, 64, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    fine_tune:
-      adaptive_collar_size: false
-      sigma_fraction: 0.03
-  allen_cahn:
-    window_smoothness_order: 4
-- name: schrodinger_ft_s003_N4
+# Root [2, 60x4, out] = 11,221 params (11,282 for schrodinger) — the 24-Jul
+# showcase root size. Experts [2, 20x3, out] = 921/942 each.
+# SCHRODINGER FIRST: most leaves, biggest graph.
+- name: schrodinger_full_flow
   problem: schrodinger
   model: AToELeaves
-  base_architecture: [2, 64, 64, 64, 64, 64, 2]
+  base_architecture: [2, 60, 60, 60, 60, 2]
   experts_architecture: [2, 20, 20, 20, 2]
-  adaptive_pinn:
-    fine_tune:
-      adaptive_collar_size: false
-      sigma_fraction: 0.03
-  schrodinger:
-    window_smoothness_order: 4
-# ── Config 3: FIXED sigma 0.05, N=2. ───────────────────────────────────────
-- name: burgers_ft_s005_N2
+- name: burgers1d_full_flow
   problem: burgers1d
   model: AToELeaves
-  base_architecture: [2, 64, 64, 64, 64, 64, 1]
+  base_architecture: [2, 60, 60, 60, 60, 1]
   experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    fine_tune:
-      adaptive_collar_size: false
-      sigma_fraction: 0.05
-- name: allen_cahn_ft_s005_N2
+- name: allen_cahn_full_flow
   problem: allen_cahn
   model: AToELeaves
-  base_architecture: [2, 64, 64, 64, 64, 64, 1]
+  base_architecture: [2, 60, 60, 60, 60, 1]
   experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    fine_tune:
-      adaptive_collar_size: false
-      sigma_fraction: 0.05
-- name: schrodinger_ft_s005_N2
-  problem: schrodinger
-  model: AToELeaves
-  base_architecture: [2, 64, 64, 64, 64, 64, 2]
-  experts_architecture: [2, 20, 20, 20, 2]
-  adaptive_pinn:
-    fine_tune:
-      adaptive_collar_size: false
-      sigma_fraction: 0.05
-# ── Config 4: single corrector u = u_soft + chi*c, adaptive collars,
-# experts UNFROZEN (train jointly with c; base stays frozen). ───────────────
-- name: burgers_ft_corr_unfr
-  problem: burgers1d
-  model: AToELeaves
-  base_architecture: [2, 64, 64, 64, 64, 64, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    fine_tune:
-      single_corrector: true
-      freeze_experts: false
-- name: allen_cahn_ft_corr_unfr
-  problem: allen_cahn
-  model: AToELeaves
-  base_architecture: [2, 64, 64, 64, 64, 64, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    fine_tune:
-      single_corrector: true
-      freeze_experts: false
-- name: schrodinger_ft_corr_unfr
-  problem: schrodinger
-  model: AToELeaves
-  base_architecture: [2, 64, 64, 64, 64, 64, 2]
-  experts_architecture: [2, 20, 20, 20, 2]
-  adaptive_pinn:
-    fine_tune:
-      single_corrector: true
-      freeze_experts: false
-# ── Config 5: single corrector, adaptive collars, experts FROZEN
-# (only c trains; expert interiors untouched by construction). ──────────────
-- name: burgers_ft_corr_frozen
-  problem: burgers1d
-  model: AToELeaves
-  base_architecture: [2, 64, 64, 64, 64, 64, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    fine_tune:
-      single_corrector: true
-      freeze_experts: true
-- name: allen_cahn_ft_corr_frozen
-  problem: allen_cahn
-  model: AToELeaves
-  base_architecture: [2, 64, 64, 64, 64, 64, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    fine_tune:
-      single_corrector: true
-      freeze_experts: true
-- name: schrodinger_ft_corr_frozen
-  problem: schrodinger
-  model: AToELeaves
-  base_architecture: [2, 64, 64, 64, 64, 64, 2]
-  experts_architecture: [2, 20, 20, 20, 2]
-  adaptive_pinn:
-    fine_tune:
-      single_corrector: true
-      freeze_experts: true
-# ── Config 1 (LAST): adaptive collars q=0.9, N=2, plain fine-tune —
-# the twice-verified recipe. ────────────────────────────────────────────────
-- name: burgers_ft_adacollar
-  problem: burgers1d
-  model: AToELeaves
-  base_architecture: [2, 64, 64, 64, 64, 64, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-- name: allen_cahn_ft_adacollar
-  problem: allen_cahn
-  model: AToELeaves
-  base_architecture: [2, 64, 64, 64, 64, 64, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-- name: schrodinger_ft_adacollar
-  problem: schrodinger
-  model: AToELeaves
-  base_architecture: [2, 64, 64, 64, 64, 64, 2]
-  experts_architecture: [2, 20, 20, 20, 2]
