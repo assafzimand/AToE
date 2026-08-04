@@ -1,7 +1,10 @@
 # ══════════════════════════════════════════════════════════════════════════
-# FINE-TUNE-ONLY SWEEP (64x5-ROOT EDITION): 40k pure SSBroyden (NO Adam
-# warmup) from the full_flow_warmup5k phase-3 checkpoints,
-# 3 PDEs x 5 configurations = 15 cells.
+# FINE-TUNE, VERIFIED RECIPE ONLY: adaptive collars q=0.9, 40k pure
+# SSBroyden (NO warmup) from the full_flow_warmup5k phase-3 checkpoints,
+# 1 cell per PDE, with the verified stopping rule (eval 1000 x patience 10).
+# The 15-cell triage sweep showed the adacollar cells tracking the 30-Jul
+# verified trajectory (burgers AHEAD of it: 3.3e-7 @12k vs 5.6e-7) but the
+# 2.5k patience executed them during the recipe's known 10-15k plateau.
 # ══════════════════════════════════════════════════════════════════════════
 #
 # Every cell loads a FULL AToE state (base 64x5 root + leaf experts +
@@ -22,21 +25,10 @@
 # The no-warmup fine-tune is the twice-verified recipe (6.98e-8 / 7.22e-8
 # on burgers from healthy experts).
 #
-# THE 5 CONFIGURATIONS (x 3 PDEs; the config-1 baseline cells run LAST):
-#   1) ft_adacollar   adaptive collars q=0.9 clamp [0.03,0.5], N=2 — the
-#                     verified recipe.
-#   2) ft_s003_N4     FIXED sigma 0.03, smoothstep order N=4 (narrow
-#                     collar, smoother window).
-#   3) ft_s005_N2     FIXED sigma 0.05, N=2.
-#   4) ft_corr_unfr   single corrector u = u_soft + chi*c, adaptive
-#                     collars, freeze_experts: false (experts train WITH c).
-#   5) ft_corr_frozen same, freeze_experts: true (only c trains; expert
-#                     interiors untouched by construction).
-#
-# All cells: RAD 0.5 via the per-PDE adaptive_sampling blocks, redraw +
-# re-target every 500, pool 100k / chunk 5k, float64, full batch.
-# eval_every 500, patience 5 evals = a 2.5k-epoch window (fast triage;
-# the winning config deserves a patience-relaxed confirmation run).
+# All cells: adaptive collars q=0.9 clamp [0.03,0.5], N=2; RAD 0.5 via the
+# per-PDE adaptive_sampling blocks, redraw + re-target every 500, pool
+# 100k / chunk 5k, float64, full batch, ssbroyden lr 1.0 (no damping).
+# eval_every 1000, patience 10 = the 10k window the verified run needed.
 #
 # This is the DEFAULT plan: `python run_experiments.py` reads it as-is;
 # AWS_scripts/run_and_terminate.sh launches it and stops the box after.
@@ -226,8 +218,11 @@ base_config:
   cuda: true
   # PHASE 3 — SKIPPED in every cell (pretrained experts loaded).
   epochs: 0
-  # 500 here => patience 5 evals = 2.5k epochs.
-  eval_every: 500
+  # The VERIFIED stopping rule: eval 1000 x patience 10 = a 10k window. The
+  # adacollar recipe has a known plateau around epochs 10-15k before its
+  # second descent — the 30-Jul verified run crossed it with 2 evals to
+  # spare; the 2.5k triage window executed it mid-plateau.
+  eval_every: 1000
   eval_only: false
   kdv:
     adaptive_sampling:
@@ -372,8 +367,8 @@ base_config:
   optimizer_1: ssbroyden
   optimizer_2: null
   optimizer_switch_epoch: 99999
-  # 5 evals x eval_every 500 = 2.5k epochs without a 1% improvement.
-  patience_evals: 5
+  # 10 evals x eval_every 1000 = 10k epochs without a 1% improvement.
+  patience_evals: 10
   patience_rel_delta: 0.01
   precision: float64
   print_every: 1000
@@ -467,131 +462,9 @@ base_config:
   ssbroyden:
     lr: 1.0
     tolerance_grad: 1.0e-10
-experiment_name: ft_only_sweep_root64x5
+experiment_name: ft_adacollar_verified_recipe
 experiments:
-# Base [2, 60x4, out] must match the loaded root checkpoints; experts
-# [2, 20x3, out] must match the loaded expert checkpoints.
-# ── Config 2: FIXED sigma 0.03, smoothstep order N=4. ──────────────────────
-- name: burgers_ft_s003_N4
-  problem: burgers1d
-  model: AToELeaves
-  base_architecture: [2, 64, 64, 64, 64, 64, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    fine_tune:
-      adaptive_collar_size: false
-      sigma_fraction: 0.03
-  burgers1d:
-    window_smoothness_order: 4
-- name: allen_cahn_ft_s003_N4
-  problem: allen_cahn
-  model: AToELeaves
-  base_architecture: [2, 64, 64, 64, 64, 64, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    fine_tune:
-      adaptive_collar_size: false
-      sigma_fraction: 0.03
-  allen_cahn:
-    window_smoothness_order: 4
-- name: schrodinger_ft_s003_N4
-  problem: schrodinger
-  model: AToELeaves
-  base_architecture: [2, 64, 64, 64, 64, 64, 2]
-  experts_architecture: [2, 20, 20, 20, 2]
-  adaptive_pinn:
-    fine_tune:
-      adaptive_collar_size: false
-      sigma_fraction: 0.03
-  schrodinger:
-    window_smoothness_order: 4
-# ── Config 3: FIXED sigma 0.05, N=2. ───────────────────────────────────────
-- name: burgers_ft_s005_N2
-  problem: burgers1d
-  model: AToELeaves
-  base_architecture: [2, 64, 64, 64, 64, 64, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    fine_tune:
-      adaptive_collar_size: false
-      sigma_fraction: 0.05
-- name: allen_cahn_ft_s005_N2
-  problem: allen_cahn
-  model: AToELeaves
-  base_architecture: [2, 64, 64, 64, 64, 64, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    fine_tune:
-      adaptive_collar_size: false
-      sigma_fraction: 0.05
-- name: schrodinger_ft_s005_N2
-  problem: schrodinger
-  model: AToELeaves
-  base_architecture: [2, 64, 64, 64, 64, 64, 2]
-  experts_architecture: [2, 20, 20, 20, 2]
-  adaptive_pinn:
-    fine_tune:
-      adaptive_collar_size: false
-      sigma_fraction: 0.05
-# ── Config 4: single corrector u = u_soft + chi*c, adaptive collars,
-# experts UNFROZEN (train jointly with c; base stays frozen). ───────────────
-- name: burgers_ft_corr_unfr
-  problem: burgers1d
-  model: AToELeaves
-  base_architecture: [2, 64, 64, 64, 64, 64, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    fine_tune:
-      single_corrector: true
-      freeze_experts: false
-- name: allen_cahn_ft_corr_unfr
-  problem: allen_cahn
-  model: AToELeaves
-  base_architecture: [2, 64, 64, 64, 64, 64, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    fine_tune:
-      single_corrector: true
-      freeze_experts: false
-- name: schrodinger_ft_corr_unfr
-  problem: schrodinger
-  model: AToELeaves
-  base_architecture: [2, 64, 64, 64, 64, 64, 2]
-  experts_architecture: [2, 20, 20, 20, 2]
-  adaptive_pinn:
-    fine_tune:
-      single_corrector: true
-      freeze_experts: false
-# ── Config 5: single corrector, adaptive collars, experts FROZEN
-# (only c trains; expert interiors untouched by construction). ──────────────
-- name: burgers_ft_corr_frozen
-  problem: burgers1d
-  model: AToELeaves
-  base_architecture: [2, 64, 64, 64, 64, 64, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    fine_tune:
-      single_corrector: true
-      freeze_experts: true
-- name: allen_cahn_ft_corr_frozen
-  problem: allen_cahn
-  model: AToELeaves
-  base_architecture: [2, 64, 64, 64, 64, 64, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    fine_tune:
-      single_corrector: true
-      freeze_experts: true
-- name: schrodinger_ft_corr_frozen
-  problem: schrodinger
-  model: AToELeaves
-  base_architecture: [2, 64, 64, 64, 64, 64, 2]
-  experts_architecture: [2, 20, 20, 20, 2]
-  adaptive_pinn:
-    fine_tune:
-      single_corrector: true
-      freeze_experts: true
-# ── Config 1 (LAST): adaptive collars q=0.9, N=2, plain fine-tune —
+# Adaptive collars q=0.9 clamp [0.03,0.5], N=2, 40k pure SSBroyden —
 # the twice-verified recipe. ────────────────────────────────────────────────
 - name: burgers_ft_adacollar
   problem: burgers1d
