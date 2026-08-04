@@ -1,34 +1,39 @@
 # ══════════════════════════════════════════════════════════════════════════
-# FINE-TUNE, VERIFIED RECIPE ONLY: adaptive collars q=0.9, 40k pure
-# SSBroyden (NO warmup) from the full_flow_warmup5k phase-3 checkpoints,
-# 1 cell per PDE, with the verified stopping rule (eval 1000 x patience 10).
-# The 15-cell triage sweep showed the adacollar cells tracking the 30-Jul
-# verified trajectory (burgers AHEAD of it: 3.3e-7 @12k vs 5.6e-7) but the
-# 2.5k patience executed them during the recipe's known 10-15k plateau.
+# FINE-TUNE SWEEP: RAD/64x5-experts vs NO-RESAMPLE/60x4-experts, damped
+# SSBroyden trial steps (lr 1e-3 AND 1e-2), fixed vs adaptive collars.
+# 3 PDEs x 10 cells = 30 cells, fine-tune only, 10k PROBES, NO warmup.
 # ══════════════════════════════════════════════════════════════════════════
 #
-# Every cell loads a FULL AToE state (base 64x5 root + leaf experts +
-# regions) from pretrained_local_expert_checkpoint alone — the experts
-# checkpoints carry the root, so pretrained_base_checkpoint is null
-# everywhere (the loader restores base + experts from one file).
-# Checkpoints verified in
-# roots_checkpoints/double_precision/adaptive_sampling_adam_warmup_5-64-roots/
-# (all three from the full_flow_warmup5k campaign, git 3383326):
-#   burgers    phase 3 1.3032e-7 @90000 (root 5.18e-9 embedded)
-#   allen_cahn phase 3 1.3024e-5 @46000 (root 1.55e-4 embedded)
-#   schrod     phase 3 2.7159e-4 @90000 (root 2.45e-4 embedded)
-# A successful fine-tune IMPROVES on those starting points.
+# FACTORS
+#   source/sampling (coupled pair):
+#     rad64    experts from adaptive_sampling_adam_warmup_5-64-roots
+#              (base 64x5; the plan defaults) + RAD 0.5, redraw/re-target
+#              every 500 — the verified sampling regime.
+#     nores60  experts from no_resample-4-60-roots (base 60x4; per-cell
+#              overrides) + NO resampling at all: adaptive_sampling
+#              disabled AND resample_every_epochs 99999 -> one static draw
+#              for the whole segment.
+#   ssbroyden trial step (fine_tune.ssbroyden.lr — the strong-Wolfe
+#     initial trial step; damped to soften the first steps on the
+#     collar-dominated handoff loss):  lr1e3 = 0.001,  lr1e2 = 0.01.
+#     NOTE: no lr=1.0 cell here — the ft_adacollar_verified_recipe run is
+#     the undamped reference.
+#   collar:  s003 = fixed sigma 0.03 (adaptive_collar_size false), N=2;
+#            ada  = adaptive collars q=0.9 clamp [0.03, 0.5], N=2.
+#   cd03 add-on (nores60 only, ada collars, per lr): sampling
+#     collar_data_ratio 0.3 — with resampling off there is no RAD to feed
+#     the collars, so the collar-focused share of the STATIC segment-start
+#     draw is the mechanism that samples them.
 #
-# WHY no warmup: the warmup5k campaign proved a fine-tune Adam warmup
-# destroys the converged composition in all 3 PDEs (one Adam epoch at
-# lr 1e-4 cost 2-5 orders; SSBroyden spent its whole budget recovering).
-# The no-warmup fine-tune is the twice-verified recipe (6.98e-8 / 7.22e-8
-# on burgers from healthy experts).
+# Every cell loads the FULL AToE state (base root + leaf experts + regions)
+# from pretrained_local_expert_checkpoint alone; pretrained_base_checkpoint
+# stays null. Starting compositions to beat (phase-3 bests):
+#   rad64  : burgers 1.3032e-7 | allen_cahn 1.3024e-5 | schrod 2.7159e-4
+#   nores60: whatever the no_resample checkpoints record (logged at load).
 #
-# All cells: adaptive collars q=0.9 clamp [0.03,0.5], N=2; RAD 0.5 via the
-# per-PDE adaptive_sampling blocks, redraw + re-target every 500, pool
-# 100k / chunk 5k, float64, full batch, ssbroyden lr 1.0 (no damping).
-# eval_every 1000, patience 10 = the 10k window the verified run needed.
+# All cells: 10k pure SSBroyden PROBE (no Adam warmup — proven
+# destructive), float64, full batch, eval_every 1000 x patience 10 (the
+# verified 10k window; the 2.5k triage window killed recovering cells).
 #
 # This is the DEFAULT plan: `python run_experiments.py` reads it as-is;
 # AWS_scripts/run_and_terminate.sh launches it and stops the box after.
@@ -62,7 +67,7 @@ base_config:
       adaptive_collar_size: true
       corrector_architecture: null
       corrector_init: zero
-      epochs: 40000
+      epochs: 10000
       lr: 0.0001
       lr_schedule: none
       min_epochs: 1
@@ -462,22 +467,416 @@ base_config:
   ssbroyden:
     lr: 1.0
     tolerance_grad: 1.0e-10
-experiment_name: ft_adacollar_verified_recipe
+experiment_name: ft_probe10k_rad64_vs_nores60
 experiments:
-# Adaptive collars q=0.9 clamp [0.03,0.5], N=2, 40k pure SSBroyden —
-# the twice-verified recipe. ────────────────────────────────────────────────
-- name: burgers_ft_adacollar
+# ── GROUP 1: rad64 — 5-64 experts, RAD 0.5 every 500 (plan defaults) ──────
+- name: burgers_rad64_lr1e3_s003
   problem: burgers1d
   model: AToELeaves
   base_architecture: [2, 64, 64, 64, 64, 64, 1]
   experts_architecture: [2, 20, 20, 20, 1]
-- name: allen_cahn_ft_adacollar
+  adaptive_pinn:
+    fine_tune:
+      ssbroyden:
+        lr: 0.001
+      adaptive_collar_size: false
+      sigma_fraction: 0.03
+- name: allen_cahn_rad64_lr1e3_s003
   problem: allen_cahn
   model: AToELeaves
   base_architecture: [2, 64, 64, 64, 64, 64, 1]
   experts_architecture: [2, 20, 20, 20, 1]
-- name: schrodinger_ft_adacollar
+  adaptive_pinn:
+    fine_tune:
+      ssbroyden:
+        lr: 0.001
+      adaptive_collar_size: false
+      sigma_fraction: 0.03
+- name: schrodinger_rad64_lr1e3_s003
   problem: schrodinger
   model: AToELeaves
   base_architecture: [2, 64, 64, 64, 64, 64, 2]
   experts_architecture: [2, 20, 20, 20, 2]
+  adaptive_pinn:
+    fine_tune:
+      ssbroyden:
+        lr: 0.001
+      adaptive_collar_size: false
+      sigma_fraction: 0.03
+- name: burgers_rad64_lr1e3_ada
+  problem: burgers1d
+  model: AToELeaves
+  base_architecture: [2, 64, 64, 64, 64, 64, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    fine_tune:
+      ssbroyden:
+        lr: 0.001
+- name: allen_cahn_rad64_lr1e3_ada
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture: [2, 64, 64, 64, 64, 64, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    fine_tune:
+      ssbroyden:
+        lr: 0.001
+- name: schrodinger_rad64_lr1e3_ada
+  problem: schrodinger
+  model: AToELeaves
+  base_architecture: [2, 64, 64, 64, 64, 64, 2]
+  experts_architecture: [2, 20, 20, 20, 2]
+  adaptive_pinn:
+    fine_tune:
+      ssbroyden:
+        lr: 0.001
+- name: burgers_rad64_lr1e2_s003
+  problem: burgers1d
+  model: AToELeaves
+  base_architecture: [2, 64, 64, 64, 64, 64, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    fine_tune:
+      ssbroyden:
+        lr: 0.01
+      adaptive_collar_size: false
+      sigma_fraction: 0.03
+- name: allen_cahn_rad64_lr1e2_s003
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture: [2, 64, 64, 64, 64, 64, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    fine_tune:
+      ssbroyden:
+        lr: 0.01
+      adaptive_collar_size: false
+      sigma_fraction: 0.03
+- name: schrodinger_rad64_lr1e2_s003
+  problem: schrodinger
+  model: AToELeaves
+  base_architecture: [2, 64, 64, 64, 64, 64, 2]
+  experts_architecture: [2, 20, 20, 20, 2]
+  adaptive_pinn:
+    fine_tune:
+      ssbroyden:
+        lr: 0.01
+      adaptive_collar_size: false
+      sigma_fraction: 0.03
+- name: burgers_rad64_lr1e2_ada
+  problem: burgers1d
+  model: AToELeaves
+  base_architecture: [2, 64, 64, 64, 64, 64, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    fine_tune:
+      ssbroyden:
+        lr: 0.01
+- name: allen_cahn_rad64_lr1e2_ada
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture: [2, 64, 64, 64, 64, 64, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    fine_tune:
+      ssbroyden:
+        lr: 0.01
+- name: schrodinger_rad64_lr1e2_ada
+  problem: schrodinger
+  model: AToELeaves
+  base_architecture: [2, 64, 64, 64, 64, 64, 2]
+  experts_architecture: [2, 20, 20, 20, 2]
+  adaptive_pinn:
+    fine_tune:
+      ssbroyden:
+        lr: 0.01
+# ── GROUP 2: nores60 — 4-60 experts, NO resampling (static draw) ──────────
+- name: burgers_nores60_lr1e3_s003
+  problem: burgers1d
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    fine_tune:
+      ssbroyden:
+        lr: 0.001
+      adaptive_collar_size: false
+      sigma_fraction: 0.03
+  burgers1d:
+    adaptive_sampling:
+      enabled: false
+    pretrained_local_expert_checkpoint: roots_checkpoints/double_precision/no_resample-4-60-roots/burgers_experts.pt
+  sampling:
+    resample_every_epochs: 99999
+- name: allen_cahn_nores60_lr1e3_s003
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    fine_tune:
+      ssbroyden:
+        lr: 0.001
+      adaptive_collar_size: false
+      sigma_fraction: 0.03
+  allen_cahn:
+    adaptive_sampling:
+      enabled: false
+    pretrained_local_expert_checkpoint: roots_checkpoints/double_precision/no_resample-4-60-roots/allen_cahn_experts.pt
+  sampling:
+    resample_every_epochs: 99999
+- name: schrodinger_nores60_lr1e3_s003
+  problem: schrodinger
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 2]
+  experts_architecture: [2, 20, 20, 20, 2]
+  adaptive_pinn:
+    fine_tune:
+      ssbroyden:
+        lr: 0.001
+      adaptive_collar_size: false
+      sigma_fraction: 0.03
+  schrodinger:
+    adaptive_sampling:
+      enabled: false
+    pretrained_local_expert_checkpoint: roots_checkpoints/double_precision/no_resample-4-60-roots/schrodinger_experts.pt
+  sampling:
+    resample_every_epochs: 99999
+- name: burgers_nores60_lr1e3_ada
+  problem: burgers1d
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    fine_tune:
+      ssbroyden:
+        lr: 0.001
+  burgers1d:
+    adaptive_sampling:
+      enabled: false
+    pretrained_local_expert_checkpoint: roots_checkpoints/double_precision/no_resample-4-60-roots/burgers_experts.pt
+  sampling:
+    resample_every_epochs: 99999
+- name: allen_cahn_nores60_lr1e3_ada
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    fine_tune:
+      ssbroyden:
+        lr: 0.001
+  allen_cahn:
+    adaptive_sampling:
+      enabled: false
+    pretrained_local_expert_checkpoint: roots_checkpoints/double_precision/no_resample-4-60-roots/allen_cahn_experts.pt
+  sampling:
+    resample_every_epochs: 99999
+- name: schrodinger_nores60_lr1e3_ada
+  problem: schrodinger
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 2]
+  experts_architecture: [2, 20, 20, 20, 2]
+  adaptive_pinn:
+    fine_tune:
+      ssbroyden:
+        lr: 0.001
+  schrodinger:
+    adaptive_sampling:
+      enabled: false
+    pretrained_local_expert_checkpoint: roots_checkpoints/double_precision/no_resample-4-60-roots/schrodinger_experts.pt
+  sampling:
+    resample_every_epochs: 99999
+- name: burgers_nores60_lr1e2_s003
+  problem: burgers1d
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    fine_tune:
+      ssbroyden:
+        lr: 0.01
+      adaptive_collar_size: false
+      sigma_fraction: 0.03
+  burgers1d:
+    adaptive_sampling:
+      enabled: false
+    pretrained_local_expert_checkpoint: roots_checkpoints/double_precision/no_resample-4-60-roots/burgers_experts.pt
+  sampling:
+    resample_every_epochs: 99999
+- name: allen_cahn_nores60_lr1e2_s003
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    fine_tune:
+      ssbroyden:
+        lr: 0.01
+      adaptive_collar_size: false
+      sigma_fraction: 0.03
+  allen_cahn:
+    adaptive_sampling:
+      enabled: false
+    pretrained_local_expert_checkpoint: roots_checkpoints/double_precision/no_resample-4-60-roots/allen_cahn_experts.pt
+  sampling:
+    resample_every_epochs: 99999
+- name: schrodinger_nores60_lr1e2_s003
+  problem: schrodinger
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 2]
+  experts_architecture: [2, 20, 20, 20, 2]
+  adaptive_pinn:
+    fine_tune:
+      ssbroyden:
+        lr: 0.01
+      adaptive_collar_size: false
+      sigma_fraction: 0.03
+  schrodinger:
+    adaptive_sampling:
+      enabled: false
+    pretrained_local_expert_checkpoint: roots_checkpoints/double_precision/no_resample-4-60-roots/schrodinger_experts.pt
+  sampling:
+    resample_every_epochs: 99999
+- name: burgers_nores60_lr1e2_ada
+  problem: burgers1d
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    fine_tune:
+      ssbroyden:
+        lr: 0.01
+  burgers1d:
+    adaptive_sampling:
+      enabled: false
+    pretrained_local_expert_checkpoint: roots_checkpoints/double_precision/no_resample-4-60-roots/burgers_experts.pt
+  sampling:
+    resample_every_epochs: 99999
+- name: allen_cahn_nores60_lr1e2_ada
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    fine_tune:
+      ssbroyden:
+        lr: 0.01
+  allen_cahn:
+    adaptive_sampling:
+      enabled: false
+    pretrained_local_expert_checkpoint: roots_checkpoints/double_precision/no_resample-4-60-roots/allen_cahn_experts.pt
+  sampling:
+    resample_every_epochs: 99999
+- name: schrodinger_nores60_lr1e2_ada
+  problem: schrodinger
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 2]
+  experts_architecture: [2, 20, 20, 20, 2]
+  adaptive_pinn:
+    fine_tune:
+      ssbroyden:
+        lr: 0.01
+  schrodinger:
+    adaptive_sampling:
+      enabled: false
+    pretrained_local_expert_checkpoint: roots_checkpoints/double_precision/no_resample-4-60-roots/schrodinger_experts.pt
+  sampling:
+    resample_every_epochs: 99999
+# ── GROUP 3: nores60 + collar_data_ratio 0.3 (ada collars, per lr) ────────
+- name: burgers_nores60_lr1e3_ada_cd03
+  problem: burgers1d
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    fine_tune:
+      ssbroyden:
+        lr: 0.001
+  burgers1d:
+    adaptive_sampling:
+      enabled: false
+    pretrained_local_expert_checkpoint: roots_checkpoints/double_precision/no_resample-4-60-roots/burgers_experts.pt
+  sampling:
+    resample_every_epochs: 99999
+    collar_data_ratio: 0.3
+- name: allen_cahn_nores60_lr1e3_ada_cd03
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    fine_tune:
+      ssbroyden:
+        lr: 0.001
+  allen_cahn:
+    adaptive_sampling:
+      enabled: false
+    pretrained_local_expert_checkpoint: roots_checkpoints/double_precision/no_resample-4-60-roots/allen_cahn_experts.pt
+  sampling:
+    resample_every_epochs: 99999
+    collar_data_ratio: 0.3
+- name: schrodinger_nores60_lr1e3_ada_cd03
+  problem: schrodinger
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 2]
+  experts_architecture: [2, 20, 20, 20, 2]
+  adaptive_pinn:
+    fine_tune:
+      ssbroyden:
+        lr: 0.001
+  schrodinger:
+    adaptive_sampling:
+      enabled: false
+    pretrained_local_expert_checkpoint: roots_checkpoints/double_precision/no_resample-4-60-roots/schrodinger_experts.pt
+  sampling:
+    resample_every_epochs: 99999
+    collar_data_ratio: 0.3
+- name: burgers_nores60_lr1e2_ada_cd03
+  problem: burgers1d
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    fine_tune:
+      ssbroyden:
+        lr: 0.01
+  burgers1d:
+    adaptive_sampling:
+      enabled: false
+    pretrained_local_expert_checkpoint: roots_checkpoints/double_precision/no_resample-4-60-roots/burgers_experts.pt
+  sampling:
+    resample_every_epochs: 99999
+    collar_data_ratio: 0.3
+- name: allen_cahn_nores60_lr1e2_ada_cd03
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    fine_tune:
+      ssbroyden:
+        lr: 0.01
+  allen_cahn:
+    adaptive_sampling:
+      enabled: false
+    pretrained_local_expert_checkpoint: roots_checkpoints/double_precision/no_resample-4-60-roots/allen_cahn_experts.pt
+  sampling:
+    resample_every_epochs: 99999
+    collar_data_ratio: 0.3
+- name: schrodinger_nores60_lr1e2_ada_cd03
+  problem: schrodinger
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 2]
+  experts_architecture: [2, 20, 20, 20, 2]
+  adaptive_pinn:
+    fine_tune:
+      ssbroyden:
+        lr: 0.01
+  schrodinger:
+    adaptive_sampling:
+      enabled: false
+    pretrained_local_expert_checkpoint: roots_checkpoints/double_precision/no_resample-4-60-roots/schrodinger_experts.pt
+  sampling:
+    resample_every_epochs: 99999
+    collar_data_ratio: 0.3
