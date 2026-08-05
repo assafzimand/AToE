@@ -168,6 +168,16 @@ def _train_segment(
     rel_l2 = ctx.rel_l2
     inf_norm = ctx.inf_norm
     resample_every = ctx.resample_every
+    # Per-segment cadence override: a flat `resample_every_epochs` inside a
+    # segment block (fine_tune / initial_train) lands in segment_cfg via the
+    # segment-config flatten (e.g. ft_cfg.update(fine_tune_cfg)); it takes
+    # precedence over the global sampling.resample_every_epochs. Phase 3's
+    # segment cfg is the full config, which has no flat key -> global value.
+    _seg_resample = segment_cfg.get('resample_every_epochs')
+    if _seg_resample is not None:
+        resample_every = int(_seg_resample)
+        logger.info(f"  [Sampling] {segment_name}: segment-local resample "
+                    f"cadence = {resample_every} (overrides global)")
     base_seed = ctx.base_seed
     grad_clip_norm = ctx.grad_clip_norm
     expert_grad_clip_norm = ctx.expert_grad_clip_norm
@@ -243,6 +253,42 @@ def _train_segment(
 
     segment_start_epoch = ctx.epoch
     total_epochs = segment_start_epoch + epoch_budget
+
+    # ── Collar-data annealing (fine-tune only) ─────────────────────────────
+    # fine_tune.collar_data_annealing: null = off; a number in [0, 1] = the
+    # TARGET collar_data_ratio, reached linearly at the END of the segment's
+    # epoch budget. The ramp starts from the configured
+    # sampling.collar_data_ratio (which the segment's initial draw uses
+    # as-is) and the current value is applied at each resample by writing it
+    # into cfg['sampling'] just before the redraw (the samplers read it from
+    # there); the original value is restored after the segment. Inert when
+    # no redraw can fire inside the budget (resampling off / cadence too
+    # large), per design.
+    _cda_target = (segment_cfg.get('collar_data_annealing')
+                   if segment_name == 'fine_tune' else None)
+    _cda_start = None
+    _cda_saved = None
+    if _cda_target is not None:
+        _cda_target = float(_cda_target)
+        if not 0.0 <= _cda_target <= 1.0:
+            raise ValueError(
+                f"fine_tune.collar_data_annealing must be null or a number "
+                f"in [0, 1], got {_cda_target}")
+        _samp = cfg.get('sampling', {})
+        _cda_saved = _samp.get('collar_data_ratio', 0.0)
+        _cda_start = float(_cda_saved or 0.0)
+        if resample_every <= 0 or resample_every >= epoch_budget:
+            logger.info(
+                f"  [CollarAnneal] disabled: no resample fires within the "
+                f"{epoch_budget}-epoch budget (cadence {resample_every}); "
+                f"collar_data_ratio stays {_cda_start}.")
+            _cda_target = None
+            _cda_saved = None
+        else:
+            logger.info(
+                f"  [CollarAnneal] collar_data_ratio {_cda_start} -> "
+                f"{_cda_target} linearly over {epoch_budget} epochs, applied "
+                f"at each resample (every {resample_every}).")
 
     if optimizer_2_name is not None:
         switch_epoch = segment_start_epoch + seg_cfg['optimizer_switch_epoch']
@@ -406,6 +452,14 @@ def _train_segment(
             # experts exist): draw sampling.collar_data_ratio of the residual
             # budget uniformly from the >= 2-overlapping-supports region.
             _collar_info = None
+            # Collar-data annealing: write the current ramp value into the
+            # sampling cfg so this block AND the samplers downstream
+            # (sample_residual_points reads cfg) see the same ratio.
+            if _cda_target is not None:
+                _t = min(1.0, max(0.0, (epoch - segment_start_epoch)
+                                  / float(epoch_budget)))
+                cfg['sampling']['collar_data_ratio'] = (
+                    _cda_start + (_cda_target - _cda_start) * _t)
             _collar_ratio = (cfg.get('sampling', {}) or {}).get(
                 'collar_data_ratio', 0.0) or 0.0
             if (_collar_ratio > 0 and hasattr(model, 'regions')
@@ -1427,6 +1481,11 @@ def _train_segment(
                 _stopped_early = True
                 _stop_reason = 'early_stop'
                 break
+
+    # Collar-data annealing: restore the configured ratio (the sampling cfg
+    # dict is shared with the global config, so leave it as we found it).
+    if _cda_saved is not None:
+        cfg['sampling']['collar_data_ratio'] = _cda_saved
 
     # ── Reconcile the segment's best with the end-of-segment weights ──
     # After this, the in-memory model == best_model_<segment>.pt == the
