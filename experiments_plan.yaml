@@ -1,32 +1,36 @@
-# ══════════════════════════════════════════════════════════════════════════
-# FULL FLOW, NO RESAMPLING, 64x5 ROOT: the 24-Jul recipe (commit 0894149 —
-# the best phase-3-vs-root run on record) with the bigger root.
-# 3 PDEs from scratch, root -> phase 3; fine-tune SKIPPED (epochs 0).
-# ══════════════════════════════════════════════════════════════════════════
+# ==========================================================================
+# FINE-TUNE FACTORIAL, NO-RESAMPLE PIPELINE (60x4 experts): 2x2x2 =
+# {sigma 0.03 | adaptive collar} x {ssbroyden lr 1 | 0.01} x
+# {collar_data 0.3 no-anneal | 0.5 annealed to 0}.
+# 3 PDEs x 8 cells = 24 cells, fine-tune only, 40k SSBroyden, NO warmup.
+# ==========================================================================
 #
-# THE RECIPE (mimics the 24-Jul run; one change: root is [2, 64x5, out]):
-#   root     1k Adam (lr 1e-3, fresh draws every epoch via the Adam cadence
-#            rule) -> 40k SSBroyden on a STATIC draw. NO RAD (adaptive
-#            sampling disabled), resample_every 99999.    (budget 41,000)
-#   phase 3  experts [2, 20x3, out], same scheme: 1k Adam (fresh per-expert
-#            draws every epoch) -> 40k SSBroyden static (both the 99999
-#            cadence and the code-enforced phase-3 static apply). No RAD.
-#                                                          (budget 41,000)
-#   fine-tune SKIPPED (epochs 0) — run later from the saved checkpoints.
+# Experts (full AToE state incl. the 60x4 root) load from
+# roots_checkpoints/double_precision/no_resample-4-60-roots/. RAD is OFF
+# everywhere (per-PDE adaptive_sampling disabled). cd03 cells are fully
+# STATIC (global cadence 99999): the 0.3 collar share is drawn once in the
+# segment-start draw. Only cd05an0 cells resample (fine_tune-local cadence
+# 500; uniform + collar-focused redraws, no RAD) -- the annealing rides on
+# those redraws.
 #
-# vs the 24-Jul original: root 60x4 -> 64x5 (11,221 -> 16,897 params;
-# SSBroyden Hessian peak ~13.7 GB of the A10G's 24 GB — schrodinger first
-# as the OOM canary), patience 10x1000 instead of 5x1000, and
-# min_points_per_expert 1024 (inert on these trees). 24-Jul burgers
-# reference: root 1.717e-7, phase 3 2.288e-7 (experts ~ root).
+# DIMENSIONS (2 options each):
+#   collar   s003 = fixed sigma 0.03 | ada = adaptive q=0.9 clamp [0.03,0.5]
+#   lr       ssbroyden trial step 1.0 (global default) | 0.01 (override)
+#   cd       cd03    = collar_data_ratio 0.3, no annealing, STATIC draw
+#            cd05an0 = collar_data_ratio 0.5 annealed linearly to 0 by 40k
+#                      (collar_data_annealing: 0.0), resample every 500
 #
-# Recommended on the box:
-#     export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# NOTE: first live use of fine_tune.resample_every_epochs and
+# collar_data_annealing -- confirm the [Sampling]/[CollarAnneal] lines at
+# segment start.
+#
+# All cells: 40k pure SSBroyden fine-tune (no Adam warmup), float64, full
+# batch, eval_every 1000 x patience 5 (5k window). Starting compositions
+# are logged at load ([PretrainedExperts] recorded rel-L2).
 #
 # This is the DEFAULT plan: `python run_experiments.py` reads it as-is;
 # AWS_scripts/run_and_terminate.sh launches it and stops the box after.
-# Previous plans archived under experiment_plans/.
-# ══════════════════════════════════════════════════════════════════════════
+# ==========================================================================
 base_config:
   activation: tanh
   adam:
@@ -55,7 +59,7 @@ base_config:
       adaptive_collar_size: true
       corrector_architecture: null
       corrector_init: zero
-      epochs: 0
+      epochs: 40000
       lr: 0.0001
       lr_schedule: none
       min_epochs: 1
@@ -124,7 +128,7 @@ base_config:
     new_norm_threshold: 0.04
     output_dim: 1
     pretrained_base_checkpoint: null
-    pretrained_local_expert_checkpoint: null
+    pretrained_local_expert_checkpoint: roots_checkpoints/double_precision/no_resample-4-60-roots/allen_cahn_experts.pt
     rwf:
       enabled: false
       mean: 1.0
@@ -187,7 +191,7 @@ base_config:
     nu: 0.01
     output_dim: 1
     pretrained_base_checkpoint: null
-    pretrained_local_expert_checkpoint: null
+    pretrained_local_expert_checkpoint: roots_checkpoints/double_precision/no_resample-4-60-roots/burgers_experts.pt
     rwf:
       enabled: false
       mean: 1.0
@@ -209,8 +213,8 @@ base_config:
     window_smoothness_order: 2
     window_type: smoothstep
   cuda: true
-  # PHASE 3 budget: 1k Adam warmup + 40k SSBroyden (the 24-Jul scheme).
-  epochs: 41000
+  # PHASE 3 -- SKIPPED in every cell (pretrained experts loaded).
+  epochs: 0
   # The VERIFIED stopping rule: eval 1000 x patience 10 = a 10k window. The
   # adacollar recipe has a known plateau around epochs 10-15k before its
   # second descent — the 30-Jul verified run crossed it with 2 evals to
@@ -361,12 +365,12 @@ base_config:
   optimizer_1: adam
   optimizer_2: ssbroyden
   optimizer_switch_epoch: 1000
-  # 10 evals x eval_every 1000 = 10k epochs without a 1% improvement.
-  patience_evals: 10
+  # 5 evals x eval_every 1000 = 5k epochs without a 1% improvement.
+  patience_evals: 5
   patience_rel_delta: 0.01
   precision: float64
   print_every: 1000
-  problem: schrodinger
+  problem: burgers1d
   profiling:
     enabled: false
   resume_from: null
@@ -426,7 +430,7 @@ base_config:
     new_norm_threshold: 2.0
     output_dim: 2
     pretrained_base_checkpoint: null
-    pretrained_local_expert_checkpoint: null
+    pretrained_local_expert_checkpoint: roots_checkpoints/double_precision/no_resample-4-60-roots/schrodinger_experts.pt
     rwf:
       enabled: false
       mean: 1.0
@@ -457,22 +461,295 @@ base_config:
   ssbroyden:
     lr: 1.0
     tolerance_grad: 1.0e-10
-experiment_name: full_flow_root64x5_no_resample
+experiment_name: ft_noresample_factorial_2x2x2
 experiments:
-# Root [2, 64x5, out] = 16,897 params (16,962 schrod) -> Hessian peak
-# ~13.7 GB. Experts [2, 20x3, out]. SCHRODINGER FIRST: OOM canary.
-- name: schrodinger_full_flow
-  problem: schrodinger
-  model: AToELeaves
-  base_architecture: [2, 64, 64, 64, 64, 64, 2]
-  experts_architecture: [2, 20, 20, 20, 2]
-- name: burgers1d_full_flow
+# -- cd03 / s003 / lr1 ----------------------------------------
+- name: burgers_s003_lr1_cd03
   problem: burgers1d
   model: AToELeaves
-  base_architecture: [2, 64, 64, 64, 64, 64, 1]
+  base_architecture: [2, 60, 60, 60, 60, 1]
   experts_architecture: [2, 20, 20, 20, 1]
-- name: allen_cahn_full_flow
+  adaptive_pinn:
+    fine_tune:
+      adaptive_collar_size: false
+      sigma_fraction: 0.03
+  sampling:
+    collar_data_ratio: 0.3
+- name: allen_cahn_s003_lr1_cd03
   problem: allen_cahn
   model: AToELeaves
-  base_architecture: [2, 64, 64, 64, 64, 64, 1]
+  base_architecture: [2, 60, 60, 60, 60, 1]
   experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    fine_tune:
+      adaptive_collar_size: false
+      sigma_fraction: 0.03
+  sampling:
+    collar_data_ratio: 0.3
+- name: schrodinger_s003_lr1_cd03
+  problem: schrodinger
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 2]
+  experts_architecture: [2, 20, 20, 20, 2]
+  adaptive_pinn:
+    fine_tune:
+      adaptive_collar_size: false
+      sigma_fraction: 0.03
+  sampling:
+    collar_data_ratio: 0.3
+# -- cd03 / s003 / lr1e2 ----------------------------------------
+- name: burgers_s003_lr1e2_cd03
+  problem: burgers1d
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    fine_tune:
+      ssbroyden:
+        lr: 0.01
+      adaptive_collar_size: false
+      sigma_fraction: 0.03
+  sampling:
+    collar_data_ratio: 0.3
+- name: allen_cahn_s003_lr1e2_cd03
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    fine_tune:
+      ssbroyden:
+        lr: 0.01
+      adaptive_collar_size: false
+      sigma_fraction: 0.03
+  sampling:
+    collar_data_ratio: 0.3
+- name: schrodinger_s003_lr1e2_cd03
+  problem: schrodinger
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 2]
+  experts_architecture: [2, 20, 20, 20, 2]
+  adaptive_pinn:
+    fine_tune:
+      ssbroyden:
+        lr: 0.01
+      adaptive_collar_size: false
+      sigma_fraction: 0.03
+  sampling:
+    collar_data_ratio: 0.3
+# -- cd03 / ada / lr1 ----------------------------------------
+- name: burgers_ada_lr1_cd03
+  problem: burgers1d
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  sampling:
+    collar_data_ratio: 0.3
+- name: allen_cahn_ada_lr1_cd03
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  sampling:
+    collar_data_ratio: 0.3
+- name: schrodinger_ada_lr1_cd03
+  problem: schrodinger
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 2]
+  experts_architecture: [2, 20, 20, 20, 2]
+  sampling:
+    collar_data_ratio: 0.3
+# -- cd03 / ada / lr1e2 ----------------------------------------
+- name: burgers_ada_lr1e2_cd03
+  problem: burgers1d
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    fine_tune:
+      ssbroyden:
+        lr: 0.01
+  sampling:
+    collar_data_ratio: 0.3
+- name: allen_cahn_ada_lr1e2_cd03
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    fine_tune:
+      ssbroyden:
+        lr: 0.01
+  sampling:
+    collar_data_ratio: 0.3
+- name: schrodinger_ada_lr1e2_cd03
+  problem: schrodinger
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 2]
+  experts_architecture: [2, 20, 20, 20, 2]
+  adaptive_pinn:
+    fine_tune:
+      ssbroyden:
+        lr: 0.01
+  sampling:
+    collar_data_ratio: 0.3
+# -- cd05an0 / s003 / lr1 ----------------------------------------
+- name: burgers_s003_lr1_cd05an0
+  problem: burgers1d
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    fine_tune:
+      adaptive_collar_size: false
+      sigma_fraction: 0.03
+      resample_every_epochs: 500
+      collar_data_annealing: 0.0
+  sampling:
+    collar_data_ratio: 0.5
+- name: allen_cahn_s003_lr1_cd05an0
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    fine_tune:
+      adaptive_collar_size: false
+      sigma_fraction: 0.03
+      resample_every_epochs: 500
+      collar_data_annealing: 0.0
+  sampling:
+    collar_data_ratio: 0.5
+- name: schrodinger_s003_lr1_cd05an0
+  problem: schrodinger
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 2]
+  experts_architecture: [2, 20, 20, 20, 2]
+  adaptive_pinn:
+    fine_tune:
+      adaptive_collar_size: false
+      sigma_fraction: 0.03
+      resample_every_epochs: 500
+      collar_data_annealing: 0.0
+  sampling:
+    collar_data_ratio: 0.5
+# -- cd05an0 / s003 / lr1e2 ----------------------------------------
+- name: burgers_s003_lr1e2_cd05an0
+  problem: burgers1d
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    fine_tune:
+      ssbroyden:
+        lr: 0.01
+      adaptive_collar_size: false
+      sigma_fraction: 0.03
+      resample_every_epochs: 500
+      collar_data_annealing: 0.0
+  sampling:
+    collar_data_ratio: 0.5
+- name: allen_cahn_s003_lr1e2_cd05an0
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    fine_tune:
+      ssbroyden:
+        lr: 0.01
+      adaptive_collar_size: false
+      sigma_fraction: 0.03
+      resample_every_epochs: 500
+      collar_data_annealing: 0.0
+  sampling:
+    collar_data_ratio: 0.5
+- name: schrodinger_s003_lr1e2_cd05an0
+  problem: schrodinger
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 2]
+  experts_architecture: [2, 20, 20, 20, 2]
+  adaptive_pinn:
+    fine_tune:
+      ssbroyden:
+        lr: 0.01
+      adaptive_collar_size: false
+      sigma_fraction: 0.03
+      resample_every_epochs: 500
+      collar_data_annealing: 0.0
+  sampling:
+    collar_data_ratio: 0.5
+# -- cd05an0 / ada / lr1 ----------------------------------------
+- name: burgers_ada_lr1_cd05an0
+  problem: burgers1d
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    fine_tune:
+      resample_every_epochs: 500
+      collar_data_annealing: 0.0
+  sampling:
+    collar_data_ratio: 0.5
+- name: allen_cahn_ada_lr1_cd05an0
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    fine_tune:
+      resample_every_epochs: 500
+      collar_data_annealing: 0.0
+  sampling:
+    collar_data_ratio: 0.5
+- name: schrodinger_ada_lr1_cd05an0
+  problem: schrodinger
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 2]
+  experts_architecture: [2, 20, 20, 20, 2]
+  adaptive_pinn:
+    fine_tune:
+      resample_every_epochs: 500
+      collar_data_annealing: 0.0
+  sampling:
+    collar_data_ratio: 0.5
+# -- cd05an0 / ada / lr1e2 ----------------------------------------
+- name: burgers_ada_lr1e2_cd05an0
+  problem: burgers1d
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    fine_tune:
+      ssbroyden:
+        lr: 0.01
+      resample_every_epochs: 500
+      collar_data_annealing: 0.0
+  sampling:
+    collar_data_ratio: 0.5
+- name: allen_cahn_ada_lr1e2_cd05an0
+  problem: allen_cahn
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  adaptive_pinn:
+    fine_tune:
+      ssbroyden:
+        lr: 0.01
+      resample_every_epochs: 500
+      collar_data_annealing: 0.0
+  sampling:
+    collar_data_ratio: 0.5
+- name: schrodinger_ada_lr1e2_cd05an0
+  problem: schrodinger
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 2]
+  experts_architecture: [2, 20, 20, 20, 2]
+  adaptive_pinn:
+    fine_tune:
+      ssbroyden:
+        lr: 0.01
+      resample_every_epochs: 500
+      collar_data_annealing: 0.0
+  sampling:
+    collar_data_ratio: 0.5
