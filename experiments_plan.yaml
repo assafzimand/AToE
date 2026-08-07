@@ -380,7 +380,7 @@ base_config:
   optimizer_2: ssbroyden
   optimizer_switch_epoch: 1000
   # 5 evals x eval_every 1000 = 5k epochs without a 1% improvement.
-  patience_evals: 5
+  patience_evals: 10
   patience_rel_delta: 0.01
   precision: float64
   print_every: 1000
