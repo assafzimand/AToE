@@ -254,6 +254,24 @@ def _train_segment(
     segment_start_epoch = ctx.epoch
     total_epochs = segment_start_epoch + epoch_budget
 
+    # ── Segment-scoped collar_data_ratio (fine-tune only) ──────────────────
+    # The samplers read collar_data_ratio from the GLOBAL sampling cfg, so a
+    # plan-level value would also reroute PHASE 3 onto collar-focused draws
+    # (and off the proven direct per-expert path). A flat `collar_data_ratio`
+    # inside the fine_tune block applies to THIS segment only: written into
+    # cfg['sampling'] here, restored at segment end. The annealing block
+    # below reads its start value AFTER this override, so the two compose
+    # (start = the fine-tune-local ratio).
+    _cdr_override = (segment_cfg.get('collar_data_ratio')
+                     if segment_name == 'fine_tune' else None)
+    _cdr_saved = None
+    if _cdr_override is not None:
+        _samp0 = cfg.setdefault('sampling', {})
+        _cdr_saved = _samp0.get('collar_data_ratio', 0.0)
+        _samp0['collar_data_ratio'] = float(_cdr_override)
+        logger.info(f"  [Sampling] fine_tune: segment-local collar_data_ratio"
+                    f" = {float(_cdr_override)} (global stays {_cdr_saved})")
+
     # ── Collar-data annealing (fine-tune only) ─────────────────────────────
     # fine_tune.collar_data_annealing: null = off; a number in [0, 1] = the
     # TARGET collar_data_ratio, reached linearly at the END of the segment's
@@ -1482,10 +1500,14 @@ def _train_segment(
                 _stop_reason = 'early_stop'
                 break
 
-    # Collar-data annealing: restore the configured ratio (the sampling cfg
-    # dict is shared with the global config, so leave it as we found it).
+    # Collar-data annealing / segment-local ratio: restore what we found (the
+    # sampling cfg dict is shared with the global config). Order matters:
+    # the annealing's saved value is the segment-local one, so the _cdr
+    # restore must come LAST to reinstate the true global.
     if _cda_saved is not None:
         cfg['sampling']['collar_data_ratio'] = _cda_saved
+    if _cdr_saved is not None:
+        cfg['sampling']['collar_data_ratio'] = _cdr_saved
 
     # ── Reconcile the segment's best with the end-of-segment weights ──
     # After this, the in-memory model == best_model_<segment>.pt == the
