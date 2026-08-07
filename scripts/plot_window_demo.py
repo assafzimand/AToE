@@ -156,7 +156,6 @@ def plot_window_demo(output_dir=None):
         psi = psi_region(XY, bounds_lower, bounds_upper, alpha, N)
         ax = axes[idx]
         im = ax.imshow(psi, origin='lower', extent=[0, 1, 0, 1], cmap='viridis', vmin=0, vmax=1)
-        ax.set_title(f'$\\Psi_i(X)$, N={N} (C$^{N}$)')
         ax.set_xlabel('x')
         ax.set_ylabel('y')
         # Mark region boundaries
@@ -170,8 +169,7 @@ def plot_window_demo(output_dir=None):
         ax.axhline(outer_start, color='red', linestyle=':', linewidth=0.8, alpha=0.7)
         ax.axhline(outer_end, color='red', linestyle=':', linewidth=0.8, alpha=0.7)
         plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    
-    plt.suptitle(f'Compact Smoothstep Windows (region [{a},{b}]², alpha={alpha})', y=1.02)
+
     plt.tight_layout()
     heatmap_path = output_dir / "window_2d_heatmaps.png"
     plt.savefig(heatmap_path, dpi=150, bbox_inches='tight')
@@ -186,26 +184,24 @@ def plot_window_demo(output_dir=None):
     fig, ax = plt.subplots(figsize=(10, 5))
     for N in orders:
         psi_1d = psi_region(XY_1d, bounds_lower, bounds_upper, alpha, N)
-        ax.plot(x_1d, psi_1d, label=f'N={N} (C$^{N}$)', linewidth=2)
-    
-    ax.axvline(a, color='gray', linestyle='--', linewidth=1, label=f'Region boundary (a={a})')
-    ax.axvline(b, color='gray', linestyle='--', linewidth=1, label=f'Region boundary (b={b})')
-    ax.axvline(outer_start, color='red', linestyle=':', linewidth=1, label=f'Collar edge ({outer_start:.2f})')
-    ax.axvline(outer_end, color='red', linestyle=':', linewidth=1, label=f'Collar edge ({outer_end:.2f})')
-    
+        ax.plot(x_1d, psi_1d, linewidth=2)
+
+    ax.axvline(a, color='gray', linestyle='--', linewidth=1)
+    ax.axvline(b, color='gray', linestyle='--', linewidth=1)
+    ax.axvline(outer_start, color='red', linestyle=':', linewidth=1)
+    ax.axvline(outer_end, color='red', linestyle=':', linewidth=1)
+
     # Shade the regions
-    ax.axvspan(0, outer_start, alpha=0.1, color='blue', label='Exact 0 zone')
+    ax.axvspan(0, outer_start, alpha=0.1, color='blue')
     ax.axvspan(outer_end, 1, alpha=0.1, color='blue')
-    ax.axvspan(outer_start, a, alpha=0.1, color='orange', label='Collar (ramp)')
+    ax.axvspan(outer_start, a, alpha=0.1, color='orange')
     ax.axvspan(b, outer_end, alpha=0.1, color='orange')
-    ax.axvspan(a, b, alpha=0.1, color='green', label='Flat-top (=1)')
-    
+    ax.axvspan(a, b, alpha=0.1, color='green')
+
     ax.set_xlabel('x')
     ax.set_ylabel(f'$\\Psi_i(x, y={y_slice})$')
-    ax.set_title(f'1D Slice of Compact Smoothstep Window at y={y_slice}')
     ax.set_xlim(0, 1)
     ax.set_ylim(-0.05, 1.1)
-    ax.legend(loc='upper right', fontsize=8)
     ax.grid(True, alpha=0.3)
     
     slice_path = output_dir / "window_1d_slice.png"

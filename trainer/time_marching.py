@@ -639,7 +639,12 @@ def train_with_time_marching(
         
         # 2. Generate datasets with narrowed domain
         logger.info(f"\n  Generating datasets for window {window.idx}...")
-        generate_and_save_datasets(window_cfg)
+        # force=True: each window needs its OWN draw over its narrowed
+        # t-range. The skip-if-exists default silently reused window 0's
+        # file for every window (each window then saw only the ~1/N of the
+        # points its domain filter kept — and with window-restricted
+        # generation, later windows would keep none at all).
+        generate_and_save_datasets(window_cfg, force=True)
         
         # NOTE: IC override for windows 1+ is now handled in-memory by trainer.py
         # (_override_ic_for_time_marching) which runs before filtering and after each resample.

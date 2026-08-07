@@ -134,14 +134,28 @@ def _get_solution_cached(config: Dict) -> Tuple[np.ndarray, np.ndarray, np.ndarr
     global _cached_solution, _cached_config_hash
     problem = config.get('problem', 'kdv')
     pc = config[problem]
+    # In time-marching mode the config's temporal_domain is narrowed per
+    # window, but the numerical reference must always start from t=0 with
+    # the TRUE initial condition — solving the narrowed range directly would
+    # restart the analytic IC at the window start and produce window-0's
+    # solution time-shifted (wrong GT for every later window: eval, patience
+    # and best-checkpoint selection all corrupted). Detect the narrowing via
+    # _time_marching_window.original_temporal_domain (same pattern as
+    # ks_solver) and solve the FULL domain once; the grid then serves every
+    # window's time slice.
+    tm_window = config.get('_time_marching_window', {})
+    original_td = tm_window.get('original_temporal_domain')
+    if original_td is not None:
+        t_min, t_max = original_td
+    else:
+        t_min, t_max = pc['temporal_domain']
     config_tuple = (
         tuple(pc['spatial_domain'][0]),
-        tuple(pc['temporal_domain']),
+        (t_min, t_max),
         pc['mu'],
     )
     if _cached_solution is None or _cached_config_hash != config_tuple:
         x_min, x_max = pc['spatial_domain'][0]
-        t_min, t_max = pc['temporal_domain']
         mu = pc['mu']
         nx, nt = 512, 500
 
@@ -217,10 +231,19 @@ def generate_dataset(
     x_min, x_max = pc['spatial_domain'][0]
     t_min, t_max = pc['temporal_domain']
 
-    # Get solver grid
+    # Get solver grid. In time-marching mode this spans the FULL temporal
+    # domain (see _get_solution_cached); restrict index draws to THIS
+    # window's rows so the window keeps its full point budget rather than
+    # the ~1/num_windows that would survive the trainer's domain filter.
     x_grid, t_grid, h_solution = _get_solution_cached(config)
     nx, nt = len(x_grid), len(t_grid)
-    
+    _row_lo = int(np.searchsorted(t_grid, t_min, side='left'))
+    _row_hi = int(np.searchsorted(t_grid, t_max, side='right'))
+    window_rows = np.arange(_row_lo, max(_row_hi, _row_lo + 1))
+    if len(window_rows) < nt:
+        print(f"  [Time Marching] Restricting draws to grid rows "
+              f"[{_row_lo}, {_row_hi}) — t in [{t_min:.4f}, {t_max:.4f}]")
+
     torch.manual_seed(seed)
     np.random.seed(seed)
 
@@ -230,9 +253,9 @@ def generate_dataset(
     h_gt = torch.zeros(N, 1, device=device, dtype=torch.float32)
     idx = 0
 
-    # Residual: sample random grid indices
+    # Residual: sample random grid indices (window rows only)
     print(f"  Sampling {n_residual} residual points from grid...")
-    i_t = np.random.choice(nt, size=n_residual, replace=True)
+    i_t = np.random.choice(window_rows, size=n_residual, replace=True)
     i_x = np.random.choice(nx, size=n_residual, replace=True)
     x[idx:idx + n_residual, 0] = torch.from_numpy(x_grid[i_x].astype(np.float32)).to(device)
     t[idx:idx + n_residual, 0] = torch.from_numpy(t_grid[i_t].astype(np.float32)).to(device)
@@ -250,7 +273,8 @@ def generate_dataset(
     print(f"  Sampling {n_bc} boundary condition points from grid...")
     n_bc_left = n_bc // 2
     n_bc_right = n_bc - n_bc_left
-    i_t_bc = np.random.choice(nt, size=max(n_bc_left, n_bc_right), replace=True)
+    i_t_bc = np.random.choice(window_rows, size=max(n_bc_left, n_bc_right),
+                              replace=True)
     
     x[idx:idx + n_bc_left, 0] = x_min
     t[idx:idx + n_bc_left, 0] = torch.from_numpy(t_grid[i_t_bc[:n_bc_left]].astype(np.float32)).to(device)

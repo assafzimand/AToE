@@ -92,7 +92,7 @@ def calculate_dataset_sizes(config: Dict) -> Dict[str, int]:
     return sizes
 
 
-def generate_and_save_datasets(config: Dict) -> None:
+def generate_and_save_datasets(config: Dict, force: bool = False) -> None:
     """
     Generate the training dataset if it doesn't exist.
 
@@ -102,6 +102,10 @@ def generate_and_save_datasets(config: Dict) -> None:
     Args:
         config: Configuration dictionary containing problem name,
                 sampling ratios, etc.
+        force: Regenerate even if the dataset file exists. Time marching MUST
+            pass True: each window needs its own draw (window-restricted
+            t-range), and the skip-if-exists default silently reused window
+            0's file for every window otherwise.
     """
     problem = config['problem']
     cuda_available = config['cuda'] and torch.cuda.is_available()
@@ -119,8 +123,10 @@ def generate_and_save_datasets(config: Dict) -> None:
     # Dynamically import the solver for the problem
     solver_module = importlib.import_module(f"solvers.{problem}_solver")
 
-    # Generate training data if missing
-    if not train_path.exists():
+    # Generate training data if missing (or forced, e.g. per time-marching window)
+    if force and train_path.exists():
+        logger.info(f"Regenerating training data for {problem} (force=True)...")
+    if force or not train_path.exists():
         logger.info(f"Generating training data for {problem}...")
         train_data = solver_module.generate_dataset(
             n_residual=sizes['n_residual_train'],
