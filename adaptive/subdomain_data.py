@@ -411,6 +411,37 @@ def build_subdomain_static(
     _src = 'base(root)' if interface_model is not None else 'composed'
     logger.info(f"[SplitData] interface targets minted from {_src} model")
 
+    # ── Time-marching windows >= 1: re-mint the "true IC" face ──────────────
+    # _add_ic_face marks leaf faces at the window's t_min as KIND_IC_TRUE and
+    # mints them from the ANALYTIC t=0 IC — correct only for window 0. For
+    # later windows the true IC is the previous window's terminal state, so
+    # re-mint those targets from the frozen previous model (the split-path
+    # analog of trainer.setup._override_ic_for_time_marching; without this,
+    # bottom-row experts are pulled toward the t=0 state while interfaces and
+    # residual pull toward the true window state — irreconcilable).
+    tm_window = cfg.get('_time_marching_window', {})
+    prev_model = tm_window.get('prev_model')
+    if (tm_window.get('enabled') and tm_window.get('idx', 0) >= 1
+            and prev_model is not None):
+        ic_true_mask = (kind_cat == KIND_IC_TRUE)
+        n_ic_true = int(ic_true_mask.sum())
+        if n_ic_true > 0:
+            _was_training = prev_model.training
+            prev_model.eval()
+            with torch.no_grad():
+                xt_ic = torch.cat([x_cat[ic_true_mask],
+                                   t_cat[ic_true_mask]], dim=1)
+                _p = next(prev_model.parameters())
+                h_gt_cat[ic_true_mask] = prev_model(
+                    xt_ic.to(device=_p.device, dtype=_p.dtype)
+                ).to(device=h_gt_cat.device, dtype=h_gt_cat.dtype)
+            if _was_training:
+                prev_model.train()
+            logger.info(
+                f"[SplitData] time-marching window {tm_window.get('idx')}: "
+                f"re-minted {n_ic_true} IC-face targets from the previous "
+                f"window's model (analytic IC applies to window 0 only)")
+
     # Log BC statistics for periodic pairing
     bc_true_mask = (kind_cat == KIND_BC_TRUE)
     n_bc_true = bc_true_mask.sum().item()

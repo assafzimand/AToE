@@ -251,10 +251,15 @@ def resolve_window_pretrained_checkpoint(
                 f"for window {window.idx}: {[m.name for m in matches]}. "
                 f"Keep one file per window (or add a manifest.json).")
         else:
-            raise FileNotFoundError(
-                f"Pretrained checkpoint folder {p} has no checkpoint for "
-                f"window {window.idx} (expected {fname} or a unique "
-                f"window_{window.idx}_*.pt).")
+            # SOFT miss: a partially-populated folder means "resume from
+            # this stage only for the windows that have a file". The window
+            # without one simply trains this stage from scratch — this is
+            # what makes arbitrary window/segment resume combinations work
+            # (e.g. phase3/window_0 + root/window_1 + nothing for window 2).
+            logger.info(
+                f"    [Time Marching] {p.name}: no checkpoint for window "
+                f"{window.idx} — this window trains the stage from scratch.")
+            return None
     return str(ckpt_path)
 
 
