@@ -1,6 +1,6 @@
 param(
     # Default EC2 public IP - you can override on each run
-    [string]$Ec2Ip = "13.60.229.209",
+    [string]$Ec2Ip = "16.171.19.234",
     # Path to your SSH key (relative to repo root by default)
     # Repo structure: Master\NCC-PINN-ASSAF.pem and Master\AToE\AWS_scripts\this_file
     # So from $PSScriptRoot (AToE\AWS_scripts) we need to go up two levels.

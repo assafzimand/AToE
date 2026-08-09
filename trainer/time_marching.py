@@ -719,7 +719,34 @@ def train_with_time_marching(
             logger.info(f"  Warning: no best_model_*.pt found for window "
                         f"{window.idx} in {window_run_dir / 'checkpoints'}")
         window_segment_paths.append(collected)
-        
+
+        # 6b. Live mirror for mid-run downloads: copy the COMPLETED window's
+        # folder (and a snapshot of the run-level log + collected
+        # checkpoints) into <_experiment_live_dir>/<run>_partial/ so the
+        # standard download flow, which tars the latest outputs/experiments
+        # folder, sees finished windows while later windows still train.
+        # Removed at run end (the real run dir is moved in then). Never
+        # allowed to break training.
+        _live_root = config.get('_experiment_live_dir')
+        if _live_root:
+            try:
+                _mirror = Path(_live_root) / f"{run_dir.name}_partial"
+                _mirror.mkdir(parents=True, exist_ok=True)
+                _wdst = _mirror / f"window_{window.idx}"
+                if _wdst.exists():
+                    shutil.rmtree(_wdst)
+                shutil.copytree(window_run_dir, _wdst)
+                shutil.copytree(run_ckpt_root, _mirror / 'checkpoints',
+                                dirs_exist_ok=True)
+                _log_src = run_dir / 'training_logs.log'
+                if _log_src.exists():
+                    shutil.copy2(_log_src, _mirror / 'training_logs.log')
+                logger.info(f"  [LiveMirror] window {window.idx} copied to "
+                            f"{_mirror}")
+            except Exception as _lm_err:                       # noqa: BLE001
+                logger.warning(f"  [LiveMirror] copy failed (non-fatal): "
+                               f"{_lm_err}")
+
         # 7. Optionally freeze for memory savings
         if tm_cfg['freeze_previous_windows']:
             logger.info(f"  Freezing window {window.idx} model parameters")
@@ -799,8 +826,22 @@ def train_with_time_marching(
     # Plot combined prediction heatmap vs ground truth
     _plot_combined_heatmap(combined_model, config, run_dir, device)
     
+    # Remove the live mirror: the run completed, so run_experiments moves the
+    # REAL run dir into the experiments folder right after this returns — the
+    # _partial copy would only duplicate it.
+    _live_root = config.get('_experiment_live_dir')
+    if _live_root:
+        try:
+            _mirror = Path(_live_root) / f"{run_dir.name}_partial"
+            if _mirror.exists():
+                shutil.rmtree(_mirror)
+                logger.info(f"  [LiveMirror] removed {_mirror} (run complete)")
+        except Exception as _lm_err:                            # noqa: BLE001
+            logger.warning(f"  [LiveMirror] cleanup failed (non-fatal): "
+                           f"{_lm_err}")
+
     logger.info(f"\n{'='*60}")
     logger.info(f"  Time marching training complete!")
     logger.info(f"{'='*60}")
-    
+
     return combined_model, last_checkpoint_path

@@ -76,6 +76,15 @@ def run_single_experiment(exp_config, base_config, exp_name, parent_dir):
     arch_folder_name = f"{config['problem']}-{layers_str}-{config['activation']}"
     exp_output_dir = parent_dir / arch_folder_name
 
+    # Live-mirror handshake: long multi-window runs sit in outputs/<arch>/
+    # until they finish, invisible to the mid-run download flow (which tars
+    # the latest outputs/experiments folder). Publishing the eventual
+    # destination lets trainer.time_marching copy each COMPLETED window into
+    # <exp_output_dir>/<run>_partial/ as it finishes, so
+    # download_AWS_results.ps1 works as-is mid-run. The _partial mirror is
+    # removed when the run completes (the real folder is moved in then).
+    config['_experiment_live_dir'] = str(exp_output_dir)
+
     # Temporarily replace config/config.yaml with this experiment's config
     config_backup_path = Path('config/config.yaml.backup')
     shutil.copy('config/config.yaml', config_backup_path)

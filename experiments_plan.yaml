@@ -67,13 +67,15 @@ base_config:
       adaptive_collar_sigma_max: 0.5
       adaptive_collar_sigma_min: 0.05
       adaptive_collar_size: false
-      # Segment-scoped: applies to the fine-tune ONLY (new flat key, read in
+      # Segment-scoped: applies to the fine-tune ONLY (flat key, read in
       # epoch_loop); the global sampling.collar_data_ratio stays 0.0 so
-      # phase 3 keeps its proven uniform per-expert draw. Reduced 0.3 -> 0.1
-      # after the first kdv run: window-0's collars were already reconciled
-      # at handoff and the 0.3 collar share over-weighted them, degrading
-      # all three expert interiors (1.4e-7 -> 1.26e-6 etc.).
-      collar_data_ratio: 0.1
+      # phase 3 keeps its proven uniform per-expert draw. THIS RUN: wide
+      # collars (sigma 0.2) + heavy collar share (0.5) — testing the
+      # wide-blend regime, aimed at windows 1-2 whose fresh experts may
+      # carry real collar mismatch. Window 0 (reconciled handoff) is
+      # expected to start WORSE under sigma 0.2 (measured: sigma 0.1
+      # already 5x worse there); best-restore bounds its downside.
+      collar_data_ratio: 0.5
       corrector_architecture: null
       corrector_init: zero
       epochs: 40000
@@ -83,7 +85,7 @@ base_config:
       optimizer_1: ssbroyden
       optimizer_2: null
       optimizer_switch_epoch: 99999
-      sigma_fraction: 0.05
+      sigma_fraction: 0.2
       single_corrector: false
       # Damped strong-Wolfe trial step for the fine-tune only: the kdv
       # window-0 damage profile (8.3e-7 -> 5.5e-6 inside the first 1k
@@ -237,8 +239,8 @@ base_config:
     window_smoothness_order: 2
     window_type: smoothstep
   cuda: true
-  # PHASE 3 budget: 1k Adam warmup + 40k SSBroyden (per window).
-  epochs: 41000
+  # PHASE 3 budget: 10k Adam warmup + 40k SSBroyden (per window).
+  epochs: 50000
   # The VERIFIED stopping rule: eval 1000 x patience 10 = a 10k window. The
   # adacollar recipe has a known plateau around epochs 10-15k before its
   # second descent — the 30-Jul verified run crossed it with 2 evals to
@@ -390,13 +392,18 @@ base_config:
   lr_warmup_steps: 0
   min_epochs: 1
   model: AToELeaves
-  # Top-level keys govern PHASE 3: 1k Adam (fresh per-expert draws every
+  # Top-level keys govern PHASE 3: 10k Adam (fresh per-expert draws every
   # epoch via the Adam cadence rule) -> SSBroyden on a static draw.
+  # Warmup extended 1k -> 10k for kdv: the interface derivative terms start
+  # ~9 orders above the residual (u_xx ~ 1e3 at packet-crossing faces);
+  # Adam's per-coordinate scaling is the one optimizer indifferent to that
+  # spread, and it was still descending steeply at the old 1k switch
+  # (6.4e6 -> 3.5e5); SSBroyden latched immediately after.
   optimizer_1: adam
   optimizer_2: ssbroyden
-  optimizer_switch_epoch: 1000
+  optimizer_switch_epoch: 10000
   # 5 evals x eval_every 1000 = 5k epochs without a 1% improvement.
-  patience_evals: 10
+  patience_evals: 5
   patience_rel_delta: 0.01
   precision: float64
   print_every: 1000

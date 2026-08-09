@@ -5,13 +5,13 @@
 \label{sec:overview}
 
 The tree based structure described in
-Section~\ref{sec:background} form a natural starting point for a wide range of domain decomposition
+Section~\ref{sec:background} forms a natural starting point for a wide range of domain decomposition
 designs that combine local models into a Mixture of Experts (MoE). In this
 section we present such a method which we refer to as
 AToE (Adaptive Tree of Experts). Section~\ref{sec:additional_methods}
-describes additional variants of the main AToE algorithm that  can further improve its performance, as illustrated by several examples in Section~\ref{sec:experiments}.
+describes additional variants of the main AToE algorithm that can further improve its performance, as illustrated by several examples in Section~\ref{sec:experiments}.
 
-\noindent The full procedure is summarized in Algorithm~\ref{alg:atoe}, Where each of
+\noindent The full procedure is summarized in Algorithm~\ref{alg:atoe}, where each of
 its stages is described in detail in the subsections that follow.
 
 \begin{algorithm}[H]
@@ -25,7 +25,7 @@ its stages is described in detail in the subsections that follow.
 \ForAll{leaf regions $\Omega_j$ \textbf{in parallel}}
     \State Train an expert $u_j$ with $\mathcal{A}_{\mathrm{exp}}$ on $\Omega_j$, with interface data from $u_0$
 \EndFor
-\State Blend the experts via an adaptive smoothstep POU (partition of unity)
+\State Blend the experts via smoothstep POU (partition of unity)
 \State Fine tune the blended composition under the global loss
 \Ensure Global approximate solution $u_\theta$
 \end{algorithmic}
@@ -38,23 +38,15 @@ its stages is described in detail in the subsections that follow.
 
 The architecture and training process of the initial model $u_0$ follows the classic PINN formulation described in
 Section~\ref{sec:background}. However, since its only purpose is to serve as a starting point for the AToE algorithm, we use a relatively small network. For the second order benchmarks we use an MLP
-with 5 hidden layers of 64 neurons. For the third and fourth order benchmarks
+with 4 hidden layers of 60 neurons. For the third and fourth order benchmarks
 we use the same architecture combined with a time marching mechanism: the time
-axis is split into windows (4 for KdV, 10 for KS), each window is trained in
+axis is split into windows (3 for KdV, 5 for KS), each window is trained in
 turn, and the prediction of the converged window at its final time serves as
-the initial condition for the next. Training consists of 40k SSBroyden
-iterations, with no Adam warm-up. Training uses full batch, with 20k residual
-points and 256 points each for the initial and boundary conditions, and all
-computations are performed in double precision, as suggested
-in~\cite{kiyani2025optimizer}.
-
-\noindent We additionally employ RAD resampling during root training, drawing
-half of the residual points from the RAD-weighted distribution and the
-remainder uniformly, with the point set refreshed every 500 iterations. RAD is
-either helpful or harmless for the root, for instance for problems with a
-sharp, localized feature such as the Burgers shock, and keeps the root's
-training mechanism consistent with the fine-tuning stage, where RAD
-resampling is essential (Section~\ref{sec:smoothstep_windows}).
+the initial condition for the next. Training consists of 1k Adam iterations
+with learning rate $10^{-3}$, followed by 40k SSBroyden iterations. Both
+stages use full batch training with 20k residual points and 256 points each
+for the initial and boundary conditions, and all computations are performed in
+double precision, as suggested in~\cite{kiyani2025optimizer}.
 
 \vspace{0.5em}
 
@@ -75,10 +67,12 @@ constructed within each window, with $\sum_i M_i = M$.
 
 \noindent Each leaf region $\Omega_j \in \mathcal{L}$ of the resulting tree is
 assigned a neural network expert $u_j$ with the expert architecture
-$\mathcal{A}_{\mathrm{exp}}$, which is smaller than the root architecture. Ee
-use an MLP with 3 hidden layers of 20 neurons. Examples of the resulting
+$\mathcal{A}_{\mathrm{exp}}$, which is smaller than the root architecture. Each
+expert is an MLP with 3 hidden layers of 20 neurons. Examples of the resulting
 decompositions for several benchmark PDEs are shown in
-Figure~\ref{fig:mterm_trees}.
+Figure~\ref{fig:mterm_trees}, where we set $M = 8$ for the second order PDEs and
+$M = 20$ for the higher order ones, with a quadratic strategy for allocating $M$
+among the time windows.
 \vspace{0.5em}
 
 \begin{figure}[H]
@@ -113,8 +107,6 @@ Figure~\ref{fig:mterm_trees}.
 {images/section3_method/mterm_kdv.png}
 \caption{KdV}
 \end{subfigure}
-
-\textbf{[TODO: Update KS, KdV to be by window, update All to actually used M]}
 
 \vspace{0.5em}
 
@@ -171,7 +163,6 @@ complexity of the solution.
 {images/section3_method/schrodinger_capacity_map.png}
 \caption{Schrödinger}
 \end{subfigure}
-\hfill
 \begin{subfigure}{0.45\textwidth}
 \centering
 \includegraphics[width=\textwidth]
@@ -181,13 +172,6 @@ complexity of the solution.
 
 \vspace{0.5em}
 
-\begin{subfigure}{0.45\textwidth}
-\centering
-\includegraphics[width=\textwidth]
-{images/section3_method/burgers_capacity_map.png}
-\caption{Burgers}
-\end{subfigure}
-\hfill
 \begin{subfigure}{0.45\textwidth}
 \centering
 \includegraphics[width=\textwidth]
@@ -202,17 +186,9 @@ complexity of the solution.
 \end{subfigure}
 
 \caption{
-Effective approximation capacity induced by the adaptive decomposition for the
-benchmark PDEs. Trees are constructed using the $M$-term procedure with a
-budget of $M=20$ experts, where each expert is an MLP with 3 hidden layers of
-20 neurons. The heatmaps show the ratio between the number of active
-parameters and the volume of the corresponding leaf region. The KdV and KS
-experiments employ time-marching with $4$ and $10$ windows, respectively.
-}
+Effective approximation capacity induced by the adaptive decomposition relative to the subdomain volume for benchmark PDEs. Trees are constructed using the $M$-term procedure with a budget $M$, and the window allocation as described in Section~\ref{sec:tree_construction}}
 \label{fig:capacity_maps}
 \end{figure}
-
-\textbf{[TODO: Update with actual capcity maps.]}
 
 \vspace{0.5em}
 
@@ -221,9 +197,9 @@ experiments employ time-marching with $4$ and $10$ windows, respectively.
 
 Rather than training the experts through the global loss terms, we exploit a
 core MoE idea and let each expert solve a localized, and therefore easier,
-problem on its own subdomain. Following the interface treatment
-of~\cite{luo2025pdd}, each local problem is closed by taking the values and
-derivatives on the shared interfaces from the converged root. The predictions of $u_0$ are
+problem on its own subdomain. Inspired by the interface treatment of~\cite{luo2025pdd}, where the frozen converged model supplies interface data to the retrained subdomain, each local
+problem is closed by taking the values and derivatives up to order $N-1$ on the
+shared interfaces from the converged root. The predictions of $u_0$ are
 recorded on the interior faces of the leaf regions and serve as boundary data
 for the local problems. Concretely, for each leaf $j$ we minimize a local
 objective
@@ -239,17 +215,24 @@ where $\mathcal{L}^{\mathrm{res}}_j$ enforces the PDE residual on collocation
 points inside $\Omega_j$, and $\mathcal{L}^{\mathrm{ic}}_j$,
 $\mathcal{L}^{\mathrm{bc}}_j$ enforce the true initial and boundary conditions
 on the parts of $\partial\Omega_j$ that coincide with the physical boundary of
-$\Omega$. The region $\Omega_j$ generally borders a different neighbor along
+$\Omega_0$. The region $\Omega_j$ generally borders a different neighbor along
 each spatial dimension, so let $\mathcal{I}_j \subseteq \{1,\ldots,d\}$
 denote the dimensions along which $\Omega_j$ has an interior neighbor, as
-opposed to coinciding with the physical boundary of $\Omega$, and for
+opposed to coinciding with the physical boundary of $\Omega_0$, and for
 $m \in \mathcal{I}_j$ let $X^{\Gamma_j}_m$ denote the sample points on the
 corresponding interior face of $\Omega_j$. Let
 $x=(x_1,\ldots,x_d)\in\mathbb{R}^d$ denote the spatial coordinates and $N$
-the differential order of the PDE. A well posed local problem of order $N$
-needs $N$ pieces of interface data, so on the face normal to $x_m$ we match
-the value together with derivatives $\partial_{x_m}^k$ up to order $N-1$.
-Writing $X^{\Gamma}_j = \bigcup_{m\in\mathcal{I}_j} X^{\Gamma_j}_m$ for the
+the differential order of the PDE. On the face normal to $x_m$ we match the
+value together with derivatives $\partial_{x_m}^k$ up to order $N-1$. Matching
+the value alone would pin down each expert only up to a mismatch in its
+derivatives at the interface, which the PDE operator and the blending of
+Section~\ref{sec:smoothstep_windows} both differentiate further. Requiring
+agreement up to order $N-1$ keeps the composed solution consistent to the order
+the equation acts on, which becomes increasingly important for the higher order
+benchmarks. Since all interface data are generated by the single converged root
+$u_0$, these conditions are mutually consistent by construction.
+
+\noindent Writing $X^{\Gamma}_j = \bigcup_{m\in\mathcal{I}_j} X^{\Gamma_j}_m$ for the
 union over all such faces, the loss ties $u_j$ and its derivatives, on every
 interior face, to the frozen root prediction $u_0$:
 \begin{equation}
@@ -261,7 +244,7 @@ interior face, to the frozen root prediction $u_0$:
 \bigl\| \partial_{x_m}^k u_j(x,t) - \partial_{x_m}^k u_0(x,t) \bigr\|^2 .
 \label{eq:interface_loss}
 \end{equation}
-In this way every expert learns a well-posed local PDE whose boundary data on
+In this way every expert solves a localized problem whose interface data on
 the interior interfaces is supplied by the root, so the leaves can be trained
 independently, and in parallel, while remaining mutually consistent.
 
@@ -270,13 +253,11 @@ $\mathcal{A}_{\mathrm{exp}} = \mathcal{A}_{\mathrm{base}}$ and initialize each
 expert by copying the weights of the root, so that at initialization every
 expert reproduces the root prediction on its region. This warm start reduces
 expert training time. The experts are trained with the same optimizer
-schedule as the root (Section~\ref{sec:root_training}): 40k SSBroyden
-iterations, with no Adam warm-up. Unlike the root, however, the experts use no
-RAD resampling, each leaf draws a fixed, uniformly sampled point set
-proportional to its volume, held fixed for the whole segment, so that every
-leaf, including thin ones around a fine feature, trains on a stable,
-comparable number of points regardless of its size. The loss
-weights $\lambda_r$, $\lambda_{ic}$, and $\lambda_{bc}$ are kept from the root
+schedule as the root (Section~\ref{sec:root_training}): 1k Adam iterations
+with learning rate $10^{-3}$, followed by 40k SSBroyden iterations. Each leaf draws a fixed, uniformly sampled point set whose size is proportional to its volume, subject to a
+minimum count, so that even thin leaves around a fine feature train on
+enough points to close their local problem.
+The loss weights $\lambda_r$, $\lambda_{ic}$, and $\lambda_{bc}$ are kept from the root
 training, and the interface weight is set to $\lambda_{\Gamma} = 1$. Examples of interface training samples for inner domain experts are shown in
 Figure~\ref{fig:local_expert_training}.
 
@@ -285,14 +266,14 @@ Figure~\ref{fig:local_expert_training}.
 \begin{figure}[H]
 \centering
 
-\begin{subfigure}{0.4\textwidth}
+\begin{subfigure}{\textwidth}
 \centering
 \includegraphics[width=\textwidth]
 {images/section3_method/local_expert_training_schrodinger.png}
 \caption{Schrödinger}
 \end{subfigure}
 \hfill
-\begin{subfigure}{0.4\textwidth}
+\begin{subfigure}{\textwidth}
 \centering
 \includegraphics[width=\textwidth]
 {images/section3_method/local_expert_training_allen_cahn.png}
@@ -301,26 +282,18 @@ Figure~\ref{fig:local_expert_training}.
 
 \vspace{0.5em}
 
-\begin{subfigure}{0.4\textwidth}
+\begin{subfigure}{\textwidth}
 \centering
 \includegraphics[width=\textwidth]
 {images/section3_method/local_expert_training_burgers.png}
 \caption{Burgers}
 \end{subfigure}
-\hfill
-\begin{subfigure}{0.4\textwidth}
-\centering
-\includegraphics[width=\textwidth]
-{images/section3_method/local_expert_training_kdv.png}
-\caption{KdV}
-\end{subfigure}
 
 \vspace{0.5em}
 
 \caption{
-Examples of interface training samples for inner-domain experts, carrying
-boundary data from the root prediction $u_0$.
-}
+Examples of the localized training problem for individual experts, showing interface samples carrying data from the root prediction 
+$u_0$. Panels show an interior expert, an expert adjacent to the initial time, and an expert adjacent to the physical boundary.}
 \label{fig:local_expert_training}
 \end{figure}
 
@@ -328,8 +301,16 @@ boundary data from the root prediction $u_0$.
 \label{sec:smoothstep_windows}
 
 The trained leaf experts are combined into a single global approximation
-through smooth, compactly supported window functions. Let
-$\Omega \subset \mathbb{R}^d\times[0,T]$ denote the computational domain, and let
+through smooth, compactly supported window functions.
+The use of smooth compactly supported windows to combine subdomain networks into
+a global partition of unity follows FBPINNs~\cite{moseley2021fbpinn}. Two
+differences are essential here: the decomposition is not a fixed uniform grid but
+the adaptive tree of Section~\ref{sec:tree_construction}, and the experts are
+trained independently on closed local problems rather than jointly through the
+global loss.
+
+\noindent Let
+$\Omega_0 \subset \mathbb{R}^d\times[0,T]$ denote the computational domain, and let
 $\{\Omega_i\}_{i=0}^{k}$ be the set of regions obtained from the hierarchical
 decision tree decomposition, where each region is an axis-aligned hypercube
 \[
@@ -340,17 +321,16 @@ interval.
 
 \noindent To smoothly blend the contributions of different experts while
 ensuring compatibility with the PDE's differential order, we define compactly
-supported window functions with configurable smoothness. Let $N$ denote the
-smoothness order, chosen such that $N$ is at least the highest order of any
-partial derivative appearing in the PDE (e.g., $N \geq 2$ for Burgers or
-Allen--Cahn, $N \geq 3$ for KdV, $N \geq 4$ for KS). Since the domain
-decomposition operates over all dimensions including time, no dimension
+supported window functions with configurable smoothness. Let $N_w$ denote the
+window smoothness order, chosen such that $N_w \geq N$, the differential order
+of the PDE (e.g., $N_w \geq 2$ for Burgers or Allen--Cahn, $N_w \geq 3$ for
+KdV, $N_w \geq 4$ for KS). Since the domain decomposition operates over all dimensions including time, no dimension
 receives special treatment and the window must be sufficiently smooth for all
 derivatives.
 
-\noindent We first define the smoothstep polynomial $S_N : [0,1] \to [0,1]$,
-which satisfies $S_N(0) = 0$, $S_N(1) = 1$, and
-$S_N^{(k)}(0) = S_N^{(k)}(1) = 0$ for $k = 1, \ldots, N$:
+\noindent We first define the smoothstep polynomial $S_{N_w} : [0,1] \to [0,1]$,
+which satisfies $S_{N_w}(0) = 0$, $S_{N_w}(1) = 1$, and
+$S_{N_w}^{(k)}(0) = S_{N_w}^{(k)}(1) = 0$ for $k = 1, \ldots, N_w$:
 \begin{align}
 S_1(t) &= 3t^2 - 2t^3 \quad \text{($C^1$)} \\
 S_2(t) &= 6t^5 - 15t^4 + 10t^3 \quad \text{($C^2$)} \\
@@ -360,9 +340,9 @@ S_4(t) &= 126t^5 - 420t^6 + 540t^7 - 315t^8 + 70t^9 \quad \text{($C^4$)}
 
 \noindent The one-sided compact ramp function is defined as:
 \begin{equation}
-\rho_N(s) = \begin{cases}
+\rho_{N_w}(s) = \begin{cases}
 0 & \text{if } s \leq 0 \\
-S_N(s) & \text{if } 0 < s < 1 \\
+S_{N_w}(s) & \text{if } 0 < s < 1 \\
 1 & \text{if } s \geq 1
 \end{cases}
 \end{equation}
@@ -370,14 +350,14 @@ S_N(s) & \text{if } 0 < s < 1 \\
 \noindent For region $\Omega_i$ with bounds $[a_{i,z}, b_{i,z}]$ along
 coordinate $z$ (a spatial coordinate $x_m$, $m=1,\ldots,d$, or the time
 coordinate $t$), let $\delta_{i,z} = \alpha (b_{i,z} - a_{i,z})$ denote the
-collar (transition) half-width, where $\alpha > 0$ is a configurable fraction. The one dimensional window along $z$ is:
+overlap (transition) half-width, where $\alpha > 0$ is a configurable fraction. The one dimensional window along $z$ is:
 \begin{equation}
-\omega_{i,z}(z) = \rho_N\!\left(\frac{z - (a_{i,z} - \delta_{i,z})}{\delta_{i,z}}\right) \cdot \rho_N\!\left(\frac{(b_{i,z} + \delta_{i,z}) - z}{\delta_{i,z}}\right)
+\omega_{i,z}(z) = \rho_{N_w}\!\left(\frac{z - (a_{i,z} - \delta_{i,z})}{\delta_{i,z}}\right) \cdot \rho_{N_w}\!\left(\frac{(b_{i,z} + \delta_{i,z}) - z}{\delta_{i,z}}\right)
 \label{eq:window_1d}
 \end{equation}
 
 \noindent This produces a flat-top window: $\omega_{i,z}(z) = 1$ for
-$z \in [a_{i,z}, b_{i,z}]$, smooth $C^N$ ramps in the collars
+$z \in [a_{i,z}, b_{i,z}]$, smooth $C^{N_w}$ ramps in the overlaps
 $[a_{i,z} - \delta_{i,z}, a_{i,z}]$ and $[b_{i,z}, b_{i,z} + \delta_{i,z}]$,
 and exactly zero outside
 $[a_{i,z} - \delta_{i,z}, b_{i,z} + \delta_{i,z}]$.
@@ -396,21 +376,21 @@ one dimensional windows over all coordinates:
 \begin{subfigure}{0.48\textwidth}
     \centering
     \includegraphics[width=\textwidth]
-    {images/section3_method/1d-indicator.png}
+    {images/section3_method/window_1d_slice.png}
 \end{subfigure}
 \hfill
 \begin{subfigure}{0.48\textwidth}
     \centering
     \includegraphics[width=\textwidth]
-    {images/section3_method/2d-indicator.png}
+    {images/section3_method/window_2d_heatmaps.png}
 \end{subfigure}
 
 \caption{
-Compact smoothstep window functions ($C^2$, collar fraction $\alpha = 0.2$) for a
+Compact smoothstep window functions ($C^1$, $C^2$, $C^4$ and overlap fraction $\alpha = 0.2$) for a
 representative domain decomposition. Left: one dimensional slices for several regions, showing the flat-top
-response and smooth collar transitions. Right: two dimensional indicator
+response and smooth overlap transitions. Right: two dimensional indicator
 heatmaps $\Psi_{\Omega_i}(x,t)$, illustrating the compact support and smooth blending
-collars.
+overlaps.
 }
 \label{fig:window_demo}
 \end{figure}
@@ -441,33 +421,31 @@ Figure~\ref{fig:normalization_weights}.
 \caption{
 Example normalized blending weights for the AToE leaf composition. Dashed
 rectangles indicate expert region bounds. The leaf experts form a POU over the
-domain, each covering its region with smooth transitions in the collar zones.
+domain, each covering its region with smooth transitions in the overlap zones.
 }
 \label{fig:normalization_weights}
 \end{figure}
 
-\subsubsection{Adaptive Collar Sizing}
-\label{sec:adaptive_collar}
+\subsubsection{Adaptive Overlap Sizing}
+\label{sec:adaptive_overlap}
 
-The fixed collar above assigns every region the same relative half-width
+The fixed overlap above assigns every region the same relative half-width
 $\delta_{i,z} = \alpha (b_{i,z} - a_{i,z})$ along every coordinate. However,
 a property of decision trees in general, is that a split is placed where it reduces approximation error
 the most, which is exactly where the function varies most sharply. The tree
 of Section~\ref{sec:tree_construction} is no exception, so its interfaces
 tend to coincide with the sharpest features of $u_0$, precisely where a
-smooth blend is hardest to construct. We replace the fixed fraction $\alpha$
-with a rule that sizes each collar directly from the solution, general
-across PDEs and requiring no per-benchmark tuning.
+smooth blend is hardest to construct. An alternative is to replace the fixed fraction $\alpha$ with a rule that sizes each overlap directly from the solution, general across PDEs and requiring no per-benchmark tuning.
 
-\noindent A narrow collar keeps most of $\Omega_i$ under $u_i$'s own,
+\noindent A narrow overlap keeps most of $\Omega_i$ under $u_i$'s own,
 independently trained, local solution, the central benefit of leaf-local
 training, where each expert solves an easier problem than the original PDE. This is
 desirable wherever the interface itself is smooth. At an interface that
 coincides with a region of high error in the root, for instance the shock in
 Burgers' equation, the boundary data supplied to $u_i$ and $u_j$ by $u_0$
-(Section~\ref{sec:expert_training}) inherits that error, and a narrow collar
+(Section~\ref{sec:expert_training}) inherits that error, and a narrow overlap
 leaves little room for the neighbouring expert to correct it through
-blending. A wide collar gives the blend more room to reconcile the two
+blending. A wide overlap gives the blend more room to reconcile the two
 solutions there, but does so uniformly, sacrificing the easier-local-problem
 benefit even where it was not needed. We therefore want $\delta$ set
 adaptively, per face, rather than by a single global $\alpha$.
@@ -476,15 +454,15 @@ adaptively, per face, rather than by a single global $\alpha$.
 \|\partial_z u_0(x,t)\|_2$ denote the magnitude of the gradient of the root
 prediction along $z$ (the $\ell_2$ norm accounts for multi-output problems),
 and let $\mathrm{ref}_z(q)$ denote the $q$-quantile of $g_z$ over the whole
-domain $\Omega$, for a fixed $q\in(0,1)$. For region $\Omega_i$, let
+domain $\Omega_0$, for a fixed $q\in(0,1)$. For region $\Omega_i$, let
 $\bar g_z(s)$ denote the mean of $g_z$ over the face of $\Omega_i$ normal to
-$z$ with its $z$-coordinate held at $s$. The adaptive collar half-width on the
+$z$ with its $z$-coordinate held at $s$. The adaptive overlap half-width on the
 $a_{i,z}$ side is
 \begin{equation}
 \delta_{i,z}^{-} = \min\bigl\{\,\delta \ge 0 : \bar g_z(a_{i,z}-\delta) < \mathrm{ref}_z(q)\,\bigr\},
-\label{eq:adaptive_collar}
+\label{eq:adaptive_overlap}
 \end{equation}
-i.e. we push the collar outward from the interface until the mean gradient
+i.e. we push the overlap outward from the interface until the mean gradient
 across the bound first drops below the threshold, and symmetrically for
 $\delta_{i,z}^{+}$ on the $b_{i,z}$ side. Both are clamped to
 $[\sigma_{\min},\sigma_{\max}]\cdot(b_{i,z}-a_{i,z})$, where the floor $\sigma_{\min}$
@@ -495,7 +473,7 @@ argmin there, so the rule is always well defined. The two per-side
 half-widths $\delta_{i,z}^{-}$, $\delta_{i,z}^{+}$ replace the single
 $\delta_{i,z}$ of Eq.~\eqref{eq:window_1d}, sizing the two ramps of
 $\omega_{i,z}$ independently. The gradient is evaluated once, on the frozen
-root $u_0$, so the collar geometry is fixed before expert training begins and
+root $u_0$, so the overlap geometry is fixed before expert training begins and
 does not depend on the blending it defines.
 
 \noindent This resolves the tension above directly, as at a quiet interface the
@@ -503,9 +481,8 @@ mean gradient already lies below $\mathrm{ref}_z(q)$ at, or just past, the
 boundary, so $\delta$ collapses to the floor and the corresponding experts
 keep nearly all of their independently trained territory. At an interface
 coinciding with a sharp feature, the mean gradient stays above threshold for
-longer, the collar widens, and a larger portion of the domain there is
-governed by the blended composition rather than a single expert, exactly the
-region the fine-tuning stage below targets with RAD resampling to reconcile.
+longer, the overlap widens, and a larger portion of the domain there is
+governed by the blended composition rather than a single expert, exactly the region that the overlap-weighted sampling of the fine tuning stage targets.
 
 \begin{figure}[H]
 \centering
@@ -530,24 +507,24 @@ region the fine-tuning stage below targets with RAD resampling to reconcile.
 \centering
 \includegraphics[width=\textwidth]
 {images/section3_method/schrodinger_u_q0.90_heatmap.png}
-\caption{Schrödinger (real part)}
+\caption{Schrödinger (real)}
 \end{subfigure}
 \hfill
 \begin{subfigure}{0.4\textwidth}
 \centering
 \includegraphics[width=\textwidth]
 {images/section3_method/schrodinger_v_q0.90_heatmap.png}
-\caption{Schrödinger (imaginary part)}
+\caption{Schrödinger (imaginary)}
 \end{subfigure}
 
 \vspace{0.5em}
 
 \caption{
-Adaptive collar geometry obtained from Eq.~\eqref{eq:adaptive_collar} with
+Adaptive overlap geometry obtained from Eq.~\eqref{eq:adaptive_overlap} with
 $q = 0.9$, showing interior tree interfaces (black) and the resulting
-per-face collars (red), overlaid on the ground-truth solution.
+per-face overlaps (red), overlaid on the ground-truth solution.
 }
-\label{fig:adaptive_collar_geometry}
+\label{fig:adaptive_overlap_geometry}
 \end{figure}
 
 \begin{figure}[H]
@@ -586,22 +563,63 @@ per-face collars (red), overlaid on the ground-truth solution.
 \vspace{0.5em}
 
 \caption{
-One dimensional slices of the adaptive collar geometry at $q = 0.7$, showing
+One dimensional slices of the adaptive overlap geometry at $q = 0.7$, showing
 the ground-truth solution profile at a fixed time $t$ for Burgers and
 Allen--Cahn, with black vertical lines marking the decision tree's
 subdomain boundaries crossed by the slice, and red vertical lines marking
-the resulting adaptive collar edges.
+the resulting adaptive overlap edges.
 }
-\label{fig:adaptive_collar_slices}
+\label{fig:adaptive_overlap_slices}
+\end{figure}
+
+\noindent It is also revealing to compare the capacity maps of
+Figure~\ref{fig:capacity_maps} with those of
+Figure~\ref{fig:capacity_maps_overlaps}, which account for the additional capacity
+acting in the overlap regions. The comparison shows that the extra capacity
+concentrates where the solution varies most sharply.
+
+\vspace{0.5em}
+
+\begin{figure}[H]
+\centering
+
+\begin{subfigure}{0.45\textwidth}
+\centering
+\includegraphics[width=\textwidth]
+{images/section3_method/schrodinger_capacity_map_overlaps.png}
+\caption{Schrödinger}
+\end{subfigure}
+\hfill
+\begin{subfigure}{0.45\textwidth}
+\centering
+\includegraphics[width=\textwidth]
+{images/section3_method/ks_capacity_map_overlaps.png}
+\caption{KS}
+\end{subfigure}
+
+\vspace{0.5em}
+
+\begin{subfigure}{0.45\textwidth}
+\centering
+\includegraphics[width=\textwidth]
+{images/section3_method/burgers_capacity_map_overlaps.png}
+\caption{Burgers}
+\end{subfigure}
+\hfill
+\begin{subfigure}{0.45\textwidth}
+\centering
+\includegraphics[width=\textwidth]
+{images/section3_method/kdv_capacity_map_overlaps.png}
+\caption{KdV}
+\end{subfigure}
+
+\caption{
+Final effective approximation capacity induced by the adaptive decomposition relative to the subdomain volume after applying the POU blend and introducing the overlapping regions for benchmark PDEs. Trees are constructed using the $M$-term procedure with a budget $M$, and the window allocation as described in Section~\ref{sec:tree_construction}}
+\label{fig:capacity_maps_overlaps}
 \end{figure}
 
 \noindent Finally, the full composition \eqref{eq:global_atoe} is jointly fine
 tuned under the global PDE loss. This last stage reconciles the independently
-trained experts in the collar zones where neighboring windows overlap,
-producing a single, globally consistent solution. The fine tuning stage
-applies the same training scheme as the root (Section~\ref{sec:root_training}):
-40k SSBroyden iterations with no Adam warm-up, and RAD resampling refreshed
-every 500 iterations. Here RAD is not merely helpful but essential: after
-blending, the residual is largest precisely in the collar zones where the
-independently trained experts must reconcile, so RAD concentrates sampling
-there and relaxes elsewhere as the mismatch is resolved.
+trained experts in the overlap zones,
+producing a single, globally consistent solution. The fine tuning stage consists of 40k SSBroyden iterations with no Adam warm-up, together with a sampling scheme that draws a fixed fraction of the collocation points from within the overlap regions; we use a ratio of $0.3$ and an
+overlap fraction $\alpha = 0.05$.

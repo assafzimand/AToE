@@ -593,7 +593,30 @@ def _build_tree_once(ctx: TrainingContext, retain_siblings: bool) -> Dict:
     # independent of any point draw.
     problem_cfg = ctx.problem_cfg or {}
     tmpl = train_data['x']
+    fit_inputs = None
     if problem_cfg.get('spatial_dim') == 1:
+        # Preferred lattice: the SOLVER'S NATIVE grid, sliced to the config's
+        # temporal domain (time-marching windows see their own rows) — the
+        # same lattice the rel-L2 eval and the perfect-tree references use.
+        # sklearn's split candidates are sample midpoints, so the lattice
+        # determines the possible cut positions; one canonical lattice makes
+        # run trees reproducible against the reference sweep (the previous
+        # synthetic 200x200 grid produced near-tie M-term selections that
+        # flipped cuts relative to the references).
+        from trainer.utils import native_ground_truth_grid
+        _native = native_ground_truth_grid(ctx.cfg)
+        if _native is not None:
+            _, _gx_np, _gt_np = _native
+            gx = torch.as_tensor(np.asarray(_gx_np),
+                                 device=tmpl.device, dtype=tmpl.dtype)
+            gt = torch.as_tensor(np.asarray(_gt_np),
+                                 device=tmpl.device, dtype=tmpl.dtype)
+            XX, TT = torch.meshgrid(gx, gt, indexing='ij')
+            fit_inputs = torch.stack([XX.reshape(-1), TT.reshape(-1)], dim=1)
+            logger.info(f"  [Tree] Fitting on the solver's native grid "
+                        f"({len(gx)}x{len(gt)} = {fit_inputs.shape[0]} points)")
+    if fit_inputs is None and problem_cfg.get('spatial_dim') == 1:
+        # Fallback: symmetric regular grid (no native solver grid available).
         grid_res = 200  # 200x200 = 40k points, one cheap forward pass
         x_min, x_max = problem_cfg['spatial_domain'][0]
         t_min, t_max = problem_cfg['temporal_domain']
@@ -604,7 +627,7 @@ def _build_tree_once(ctx: TrainingContext, retain_siblings: bool) -> Dict:
         XX, TT = torch.meshgrid(gx, gt, indexing='ij')
         fit_inputs = torch.stack([XX.reshape(-1), TT.reshape(-1)], dim=1)
         logger.info(f"  [Tree] Fitting on symmetric {grid_res}x{grid_res} grid")
-    else:
+    elif fit_inputs is None:
         fit_inputs = torch.cat([train_data['x'], train_data['t']], dim=1)
 
     model.eval()
