@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import importlib
 
-from utils.logging_config import get_logger
+from utils.logging_config import get_logger, add_window_log_handler, remove_window_log_handler
 from utils.io import resolve_experts_architecture
 
 logger = get_logger(__name__)
@@ -678,14 +678,21 @@ def train_with_time_marching(
         logger.info(f"\n  Training window {window.idx}...")
         train_data_path = f"datasets/{problem}/training_data.pt"
 
-        checkpoint_path = train(
-            model=window_model,
-            loss_fn=loss_fn,
-            train_data_path=train_data_path,
-            cfg=window_cfg,
-            run_dir=window_run_dir,
-        )
-        
+        # Mirrors this window's slice of the run-wide log into its own
+        # window_<idx>/training_logs.log, live, the same way window_<idx>/
+        # metrics.json is already per-window and incrementally written.
+        _window_log_handler = add_window_log_handler(window_run_dir)
+        try:
+            checkpoint_path = train(
+                model=window_model,
+                loss_fn=loss_fn,
+                train_data_path=train_data_path,
+                cfg=window_cfg,
+                run_dir=window_run_dir,
+            )
+        finally:
+            remove_window_log_handler(_window_log_handler)
+
         # 6. Collect this window's per-segment bests into the run-level
         # checkpoints/<segment>/ folders. The files come straight from
         # _save_checkpoint, so they carry adaptive_state and are consumable

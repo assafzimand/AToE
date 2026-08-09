@@ -149,6 +149,52 @@ def update_log_file(run_dir: Path, log_filename: str = "training_logs.log") -> N
     _logger.info(f"Log file updated: {log_path}")
 
 
+def add_window_log_handler(
+    window_dir: Path,
+    log_filename: str = "training_logs.log"
+) -> logging.FileHandler:
+    """Attach an additional file handler scoped to one time-marching window.
+
+    Writes window_dir/training_logs.log alongside the run-wide log, so a
+    single window's progress is readable (and downloadable mid-run) the same
+    way window_dir/metrics.json already is, without needing to grep the
+    combined multi-window log. Remove with remove_window_log_handler() once
+    that window's training call returns.
+
+    Args:
+        window_dir: The window's own run directory (e.g. run_dir/window_1).
+        log_filename: Name of the log file (default: training_logs.log)
+
+    Returns:
+        The attached FileHandler, to be passed to remove_window_log_handler().
+    """
+    window_dir = Path(window_dir)
+    window_dir.mkdir(parents=True, exist_ok=True)
+    log_path = window_dir / log_filename
+
+    formatter = logging.Formatter(
+        '%(asctime)s [%(levelname)s] %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    handler = logging.FileHandler(log_path, mode='w', encoding='utf-8')
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(formatter)
+
+    logger = get_logger()
+    logger.addHandler(handler)
+    logger.info(f"  [WindowLog] Per-window log file: {log_path}")
+    return handler
+
+
+def remove_window_log_handler(handler: logging.FileHandler) -> None:
+    """Detach and close a handler previously returned by add_window_log_handler()."""
+    global _logger
+
+    if _logger is not None:
+        _logger.removeHandler(handler)
+    handler.close()
+
+
 def close_logging() -> None:
     """Close the file handler and clean up.
     

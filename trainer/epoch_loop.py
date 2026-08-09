@@ -1586,6 +1586,22 @@ def _train_segment(
 
                 _pel = metrics.get('per_expert_loss_terms', {}).get(
                     segment_name, {})
+
+                # Frozen-series guard: a per-expert term that never changes
+                # across >=4 evals despite the model training is a probe/
+                # metrics bug (e.g. the eval-batch fallback in split_loss_fn
+                # not reflecting live weights), not a real plateau — flag it
+                # so a stale panel doesn't get read as a training signal.
+                for _fi, _fterms in _pel.get('experts', {}).items():
+                    for _fterm, _fvals in _fterms.items():
+                        if len(_fvals) >= 4 and len(set(_fvals)) == 1 and _fvals[0] not in (0.0, float('nan')):
+                            logger.warning(
+                                f"  [PerExpertTerms] expert={_fi} term='{_fterm}' "
+                                f"identical ({_fvals[0]:.6e}) across all "
+                                f"{len(_fvals)} evals of segment '{segment_name}' "
+                                f"— likely a stale/non-live probe, not a real "
+                                f"plateau; do not read this term off the plot.")
+
                 plot_per_expert_region_report(
                     epochs=_pe['epochs'],
                     series=_pe['experts'],

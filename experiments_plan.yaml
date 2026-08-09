@@ -36,7 +36,7 @@
 #
 # All segments: float64, full batch, 20k residual + 256 IC/BC per window,
 # resample_every_epochs 99999 (static; Adam warmups redraw every epoch via
-# the cadence rule), eval_every 1000 x patience 5, seed 42.
+# the cadence rule), eval_every 1000 x patience 10, seed 42.
 #
 # This is the DEFAULT plan: `python run_experiments.py` reads it as-is;
 # AWS_scripts/run_and_terminate.sh launches it and stops the box after.
@@ -402,8 +402,13 @@ base_config:
   optimizer_1: adam
   optimizer_2: ssbroyden
   optimizer_switch_epoch: 10000
-  # 5 evals x eval_every 1000 = 5k epochs without a 1% improvement.
-  patience_evals: 5
+  # 10 evals x eval_every 1000 = 10k epochs without a 1% improvement.
+  # Bumped from 5 (2026-08-09): window_0 fine-tune best-stopped at epoch 4000
+  # then early-stopped at 9000 mid-recovery from a dip; window_1 phase3
+  # early-stopped at epoch 15000/50000 (only 30% of budget) while several
+  # experts were still improving. Applies to root/phase3 directly (no
+  # dedicated segment block) and to fine_tune's inherited default.
+  patience_evals: 10
   patience_rel_delta: 0.01
   precision: float64
   print_every: 1000
