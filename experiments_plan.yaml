@@ -1,42 +1,40 @@
 # ==========================================================================
-# KDV FULL FLOW, TIME MARCHING (3 windows): the proven no-resample recipe,
-# every window root -> phase 3 -> fine-tune. 1 run.
+# KDV WINDOW-0 CAPACITY PAIR (debug_windows): 2 runs, window 0 only.
 # ==========================================================================
 #
-# Mimics the 24-Jul no-resample pipeline (+ the winning fine-tune config
-# from ft_noresample_factorial: s005 / lr 1.0 / collar_data 0.3 static),
-# applied to KdV with time marching.
+# Purpose: apportion window 0's phase-3 gap (middle expert 1.15e-6 vs root
+# 3.4e-8 LOCAL in the same region; its residual RMS 7.5e-6 = 77x the
+# root's) between raw expert capacity and decomposition granularity. The
+# interface N-1 terms were exonerated as the accuracy cap (satisfied to
+# ~1e-12 at convergence; face data good to 2e-8) — see 09-Aug analysis.
 #
-# TIME MARCHING: t in [0,1] split into 3 equal windows (m_distribution
-# quadratic, freeze_previous_windows). Global M_experts_num 20 ->
-# per-window M = [2, 6, 12]. Window i+1's IC = window i's terminal
-# prediction (in-memory override). Each window runs the FULL flow via
-# train(); per-segment bests are collected into
-# run_dir/checkpoints/<segment>/window_{idx}_*.pt (+ manifest).
+# BOTH runs: debug_windows [0] (windows 1-2 skipped; combined stages
+# skipped), pretrained ROOT loaded per window from
+# roots_checkpoints/double_precision/kdv_no_resample-4-60-roots/root
+# (pretrained_local_expert_checkpoint NULLED so phase 3 actually runs —
+# the base value would jump straight to fine-tune).
 #
-# PER WINDOW:
-#   root      [2, 60x4, 1]: 1k Adam (lr 1e-3, fresh draws every epoch) ->
-#             40k SSBroyden STATIC. No RAD.            (budget 41,000)
-#   phase 3   experts [2, 20x3, 1]: 1k Adam -> 40k SSBroyden static,
-#             uniform per-expert draw. KdV is order 3 -> interfaces
-#             transmit u, u_x, u_xx (C^2); periodic BC pairing;
-#             window_smoothness_order 3.               (budget 41,000)
-#   fine-tune 40k pure SSBroyden, lr 1.0, NO warmup; FIXED sigma 0.05
-#             (adaptive_collar_size false); collar_data_ratio 0.3 via the
-#             NEW segment-scoped fine_tune.collar_data_ratio key (global
-#             stays 0.0 so phase 3 keeps its proven uniform draw); fully
-#             static; no annealing.                    (budget 40,000)
+#   phase 3   1k Adam -> 40k SSBroyden static (epochs 41000, switch 1000),
+#             patience 5 (global patience_evals; also inherited by the
+#             fine-tune segment). Order-3 split loss unchanged.
+#   fine-tune 40k pure SSBroyden, FIXED sigma_fraction 0.1,
+#             collar_data_ratio 0.5, damped trial step (ssbroyden.lr 0.1).
 #
-# FIRST-EXERCISE NOTES: first kdv through this pipeline (solver-generated
-# ground truth per window, order-3 split loss, fine-tune inside time
-# marching) and first live use of fine_tune.collar_data_ratio — watch
-# window 0's first hour: dataset generation, [SplitData] face counts,
-# the M=2 tree (very few leaves expected), and the
-# "[Sampling] fine_tune: segment-local collar_data_ratio = 0.3" line.
+# RUN 1 kdv_w0_quadratic_experts30: allocation unchanged (quadratic ->
+#   W0 M=2, the SAME 3-leaf tree as the failing runs: mega-leaf
+#   x[-0.46, 0.53]) but experts [2,30,30,30,1] (~1981 params, 2.2x).
+#   Pure capacity test — decomposition/faces/data identical.
+# RUN 2 kdv_w0_equal_M20: allocation equal -> W0 M=6 -> 5 leaves (verified
+#   in perfect_tree_examples/sweep/kdv/M_20_W_3_equal: the mega-leaf
+#   splits, the soliton zone x[0.451, 0.529] gets its own thin leaf);
+#   experts stay [2,20,20,20,1]. Decomposition-granularity test.
 #
-# All segments: float64, full batch, 20k residual + 256 IC/BC per window,
-# resample_every_epochs 99999 (static; Adam warmups redraw every epoch via
-# the cadence rule), eval_every 1000 x patience 10, seed 42.
+# Success bar: middle-region rel-L2 approaching root-local ~3-5e-8 (edge
+# experts already reach 5-6e-8). Compare per_expert_rel_l2_phase3 panels.
+#
+# All segments: float64, full batch, 20k residual + 256 IC/BC (window 0),
+# resample_every_epochs 99999 (Adam warmup redraws every epoch via the
+# cadence rule), eval_every 1000, seed 42.
 #
 # This is the DEFAULT plan: `python run_experiments.py` reads it as-is;
 # AWS_scripts/run_and_terminate.sh launches it and stops the box after.
@@ -309,6 +307,17 @@ base_config:
       freeze_previous_windows: true
       m_distribution: quadratic
       num_windows: 3
+      # DEBUG: run only these window indices (contiguous, e.g. [1] or
+      # [1, 2]); null = all windows. Skipped windows produce nothing; a
+      # partial run skips the combined model / full-domain rel-L2 stages.
+      debug_windows: null
+      # IC source when debug_windows starts at window k>0: a checkpoint of
+      # window k-1 whose prediction at t_start(k) becomes the IC. Accepts a
+      # root checkpoint (best_model_root.pt, base-only forward) OR a full
+      # AToE checkpoint (best_model_phase3/fine_tune.pt, soft-blend
+      # forward). E.g. roots_checkpoints/double_precision/
+      # kdv_no_resample-4-60-roots/root/window_0_best_model_root.pt
+      last_window_checkpoint: null
     tree_smoothness_threshold: 0.4
     wavelet_threshold: 0.0025
     window_smoothness_order: 3
@@ -373,6 +382,9 @@ base_config:
       freeze_previous_windows: true
       m_distribution: quadratic
       num_windows: 5
+      # Same debug mechanism as kdv.time_marching (see comments there).
+      debug_windows: null
+      last_window_checkpoint: null
     tree_smoothness_threshold: 0.3
     wavelet_threshold: 0.04
     window_smoothness_order: 4
@@ -503,12 +515,47 @@ base_config:
   ssbroyden:
     lr: 1.0
     tolerance_grad: 1.0e-10
-experiment_name: kdv_full_flow_no_resample
+experiment_name: kdv_w0_capacity_pair
 experiments:
-# Root [2, 60x4, 1] = 11,221 params -> SSBroyden Hessian peak ~6 GB of
-# the A10G's 24 GB (per window; windows run sequentially).
-- name: kdv_full_flow_tm3
+# RUN 1 — capacity via WIDER EXPERTS, decomposition unchanged (quadratic ->
+# W0 M=2, the same 3-leaf tree as the failing runs). 3 experts x ~1981
+# params. Top-level epochs/switch/patience govern PHASE 3.
+- name: kdv_w0_quadratic_experts30
+  problem: kdv
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 30, 30, 30, 1]
+  epochs: 41000
+  optimizer_switch_epoch: 1000
+  patience_evals: 5
+  adaptive_pinn:
+    fine_tune:
+      sigma_fraction: 0.1
+      collar_data_ratio: 0.5
+  kdv:
+    # Root-only resume: null the experts checkpoint (base value would skip
+    # phase 3 and jump straight to fine-tune).
+    pretrained_local_expert_checkpoint: null
+    time_marching:
+      debug_windows: [0]
+
+# RUN 2 — capacity via DECOMPOSITION: equal allocation -> W0 M=6 -> 5
+# leaves (mega-leaf splits; soliton zone x[0.451,0.529] gets its own
+# leaf). Experts stay [2,20,20,20,1].
+- name: kdv_w0_equal_M20
   problem: kdv
   model: AToELeaves
   base_architecture: [2, 60, 60, 60, 60, 1]
   experts_architecture: [2, 20, 20, 20, 1]
+  epochs: 41000
+  optimizer_switch_epoch: 1000
+  patience_evals: 5
+  adaptive_pinn:
+    fine_tune:
+      sigma_fraction: 0.1
+      collar_data_ratio: 0.5
+  kdv:
+    pretrained_local_expert_checkpoint: null
+    time_marching:
+      m_distribution: equal
+      debug_windows: [0]

@@ -528,6 +528,91 @@ def _plot_combined_heatmap(
         logger.info(f"    Warning: Could not create combined heatmap: {e}")
 
 
+def _load_prev_window_model(
+    ckpt_path: str,
+    model_class,
+    architecture: List[int],
+    activation: str,
+    config: Dict,
+    prev_window: TimeWindow,
+    device: torch.device,
+) -> nn.Module:
+    """Frozen stand-in for the previous window's trained model (debug mode).
+
+    Used when ``time_marching.debug_windows`` starts at window k > 0: the
+    checkpoint supplies window k-1's terminal prediction for the IC override
+    and the IC-face target re-minting, exactly like an in-run predecessor.
+
+    Accepts either a root checkpoint (base weights only — the prediction is
+    the base forward) or a full AToE-Leaves checkpoint (``adaptive_state``
+    with experts, e.g. best_model_phase3.pt / best_model_fine_tune.pt — the
+    prediction is the soft PoU composition).
+    """
+    from trainer.setup import _load_pretrained_base, _load_pretrained_experts
+
+    p = Path(ckpt_path)
+    if not p.exists():
+        raise FileNotFoundError(
+            f"time_marching.last_window_checkpoint not found: {ckpt_path}")
+
+    ckpt = torch.load(p, map_location='cpu', weights_only=False)
+
+    # Construct the stand-in from the CHECKPOINT's own stored config when
+    # available. The composition geometry (fixed sigma_fraction collars,
+    # window smoothness/type) is baked in at construction from the config —
+    # NOT from the weights — so building with the current plan's config
+    # would blend the loaded experts with different overlap widths than
+    # they were trained/reconciled under and silently predict differently
+    # (measured: a sigma 0.05-trained fine_tune checkpoint rebuilt at
+    # sigma 0.2 degraded from ~1e-6 to 2.9e-4 at the handoff slice).
+    _ckpt_cfg = ckpt.get('config') if isinstance(ckpt, dict) else None
+    if _ckpt_cfg:
+        prev_cfg = copy.deepcopy(_ckpt_cfg)
+        architecture = prev_cfg.get('base_architecture', architecture)
+        activation = prev_cfg.get('activation', activation)
+        logger.info("  [Debug] Stand-in built from the checkpoint's stored "
+                    "config (composition geometry matches its training run).")
+    else:
+        prev_cfg = narrow_config_for_window(config, prev_window,
+                                            prev_model=None)
+        logger.warning("  [Debug] Checkpoint has no stored config — building "
+                       "stand-in from the CURRENT plan config; if collar/"
+                       "window settings changed since that run, its blended "
+                       "prediction will differ from the original.")
+
+    # Constructing + loading under the run's precision: modules created
+    # during load (load_state_dict_extended recreates experts) must already
+    # be float64, or load_state_dict would silently round the checkpoint
+    # through float32. In-run this is a no-op (run_training already set the
+    # default dtype); it matters when this helper is used standalone.
+    _prev_dtype = torch.get_default_dtype()
+    if prev_cfg.get('precision', config.get('precision', 'float32')) == 'float64':
+        torch.set_default_dtype(torch.float64)
+    try:
+        model = model_class(
+            architecture, activation, prev_cfg, prev_cfg['adaptive_pinn'],
+            experts_architecture=resolve_experts_architecture(prev_cfg),
+        )
+        astate = ckpt.get('adaptive_state') if isinstance(ckpt, dict) else None
+        if astate and astate.get('experts'):
+            _load_pretrained_experts(model, str(p), prev_cfg)
+            kind = (f"full AToE ({len(astate['experts'])} experts, "
+                    f"soft-blend prediction)")
+        else:
+            _load_pretrained_base(model, str(p), prev_cfg)
+            kind = "root (base-only prediction)"
+    finally:
+        torch.set_default_dtype(_prev_dtype)
+
+    model = model.to(device)
+    for q in model.parameters():
+        q.requires_grad = False
+    model.eval()
+    logger.info(f"  [Debug] last_window_checkpoint loaded as window "
+                f"{prev_window.idx} stand-in: {kind} — {ckpt_path}")
+    return model
+
+
 def train_with_time_marching(
     model_class,
     architecture: List[int],
@@ -614,11 +699,57 @@ def train_with_time_marching(
     segment_manifests: Dict[str, Dict] = {}
     window_segment_paths: List[Dict[str, Path]] = []
 
+    # ── Debug window selection (time_marching.debug_windows) ──────────────
+    # Run only the listed window indices (contiguous, e.g. [1] or [1, 2]);
+    # every other window is skipped outright — no datasets, no training, no
+    # checkpoint collection. When the first executed window is > 0, its
+    # predecessor's terminal prediction must be supplied via
+    # time_marching.last_window_checkpoint (root OR full-AToE checkpoint;
+    # see _load_prev_window_model).
+    debug_windows = tm_cfg.get('debug_windows') or None
+    if debug_windows is not None:
+        debug_windows = sorted({int(i) for i in debug_windows})
+        _valid_idx = {w.idx for w in windows}
+        _bad = [i for i in debug_windows if i not in _valid_idx]
+        if _bad:
+            raise ValueError(
+                f"time_marching.debug_windows contains invalid indices "
+                f"{_bad} (valid: 0..{len(windows) - 1}).")
+        if any(b - a != 1 for a, b in zip(debug_windows, debug_windows[1:])):
+            raise ValueError(
+                f"time_marching.debug_windows must be contiguous (got "
+                f"{debug_windows}): a later window's IC comes from its "
+                f"immediate predecessor, and only the FIRST executed window "
+                f"may take it from last_window_checkpoint.")
+        logger.info(f"  [Debug] debug_windows active: running only "
+                    f"{debug_windows} of {[w.idx for w in windows]}")
+
     window_models: List[Tuple[TimeWindow, nn.Module]] = []
     prev_model = None
     last_checkpoint_path = None
 
+    _lwc = tm_cfg.get('last_window_checkpoint')
+    if debug_windows is not None and debug_windows[0] > 0:
+        if not _lwc:
+            raise ValueError(
+                f"time_marching.debug_windows starts at window "
+                f"{debug_windows[0]} (> 0): set "
+                f"time_marching.last_window_checkpoint to a window-"
+                f"{debug_windows[0] - 1} checkpoint (best_model_root.pt for "
+                f"a root IC, or best_model_phase3/fine_tune.pt for a full "
+                f"AToE IC) so the window has an IC source.")
+        prev_model = _load_prev_window_model(
+            _lwc, model_class, architecture, activation, config,
+            windows[debug_windows[0] - 1], device)
+    elif _lwc:
+        logger.info("  [Debug] last_window_checkpoint set but not needed "
+                    "(first executed window is 0) — ignored.")
+
     for window in windows:
+        if debug_windows is not None and window.idx not in debug_windows:
+            logger.info(f"\n  [Debug] Skipping window {window.idx} "
+                        f"(not in debug_windows={debug_windows})")
+            continue
         logger.info(f"\n{'='*60}")
         logger.info(f"  WINDOW {window.idx + 1}/{len(windows)}: t in [{window.t_start:.4f}, {window.t_end:.4f}]")
         logger.info(f"  M_experts_num = {window.M}")
@@ -764,7 +895,47 @@ def train_with_time_marching(
         window_models.append((window, window_model))
         prev_model = window_model
         last_checkpoint_path = checkpoint_path
-    
+
+    # ── Partial debug run: skip the full-domain composition stages ────────
+    # The combined model, full-domain rel-L2 and combined plots all assume
+    # every window trained; with a debug subset they would be undefined (or
+    # crash on missing window_i folders). Per-window outputs and the
+    # run-level checkpoints/<segment>/ collection above are already written.
+    _all_idx = [w.idx for w in windows]
+    if debug_windows is not None and debug_windows != _all_idx:
+        logger.info(f"\n{'='*60}")
+        logger.info(f"  [Debug] Ran windows {debug_windows} of {_all_idx} — "
+                    f"skipping combined model checkpoint, full-domain rel-L2 "
+                    f"and combined plots (undefined for a partial run).")
+        logger.info(f"{'='*60}")
+        combined_model = TimeMarchingModel(window_models)
+        import json as _json
+        final_metrics = {
+            'debug_windows': debug_windows,
+            'full_domain_rel_l2': None,
+            'num_windows_total': len(windows),
+            'num_windows_run': len(window_models),
+            'm_per_window_run': [w.M for w, _ in window_models],
+            'problem': config['problem'],
+        }
+        with open(run_dir / 'time_marching_final_metrics.json', 'w') as _f:
+            _json.dump(final_metrics, _f, indent=2)
+        _live_root = config.get('_experiment_live_dir')
+        if _live_root:
+            try:
+                _mirror = Path(_live_root) / f"{run_dir.name}_partial"
+                if _mirror.exists():
+                    shutil.rmtree(_mirror)
+                    logger.info(f"  [LiveMirror] removed {_mirror} "
+                                f"(run complete)")
+            except Exception as _lm_err:                        # noqa: BLE001
+                logger.warning(f"  [LiveMirror] cleanup failed (non-fatal): "
+                               f"{_lm_err}")
+        logger.info(f"\n{'='*60}")
+        logger.info(f"  Time marching training complete (debug subset)!")
+        logger.info(f"{'='*60}")
+        return combined_model, last_checkpoint_path
+
     # 9. Combine into TimeMarchingModel
     logger.info(f"\n{'='*60}")
     logger.info(f"  Creating combined TimeMarchingModel")
