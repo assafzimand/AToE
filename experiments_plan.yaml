@@ -1,38 +1,37 @@
 # ==========================================================================
-# KDV WINDOW-0 CAPACITY PAIR (debug_windows): 2 runs, window 0 only.
+# KDV WINDOW-1 T1 (ic=50): 1 run, window 1 only, phase3 -> fine-tune.
 # ==========================================================================
 #
-# Purpose: apportion window 0's phase-3 gap (middle expert 1.15e-6 vs root
-# 3.4e-8 LOCAL in the same region; its residual RMS 7.5e-6 = 77x the
-# root's) between raw expert capacity and decomposition granularity. The
-# interface N-1 terms were exonerated as the accuracy cap (satisfied to
-# ~1e-12 at convergence; face data good to 2e-8) — see 09-Aug analysis.
+# T1 of the unified anchor-rebalancing matrix: raise loss_weights.ic 1->50
+# and change NOTHING else vs the failing W1 baseline (20260809_063705
+# window_1: 10k Adam warmup, 50k phase3 budget, patience 5, ft sigma 0.2 /
+# collar_data 0.5 — all kept identical here for a single-variable
+# comparison).
 #
-# BOTH runs: debug_windows [0] (windows 1-2 skipped; combined stages
-# skipped), pretrained ROOT loaded per window from
-# roots_checkpoints/double_precision/kdv_no_resample-4-60-roots/root
-# (pretrained_local_expert_checkpoint NULLED so phase 3 actually runs —
-# the base value would jump straight to fine-tune).
+# Target pathology (measured in the baseline): expert 5 (x[-0.08,0.25])
+# fell into a wrong low-residual solution — value anchors traded away
+# during the interface-scale-imbalance era (ic fit 0.099@2k -> 0.324@10k
+# while iface fell 223->43), then SSBroyden polished the wrong basin
+# (end state: ic=0.703, iface_val=0.190, residual=0.168, region rel-L2
+# 1.24). With w_ic=50 the stuck state costs 35 instead of 0.7 vs ~0 for
+# the true solution — the basin becomes strongly repulsive late. Known
+# limitation: does NOT prevent the early trade (iface gains ~180 still
+# outweigh 50x0.225=11) — that part is T2's (normalization) job.
 #
-#   phase 3   1k Adam -> 40k SSBroyden static (epochs 41000, switch 1000),
-#             patience 5 (global patience_evals; also inherited by the
-#             fine-tune segment). Order-3 split loss unchanged.
-#   fine-tune 40k pure SSBroyden, FIXED sigma_fraction 0.1,
-#             collar_data_ratio 0.5, damped trial step (ssbroyden.lr 0.1).
+# Success metric: e5's ic series in split_expert_losses never settles at
+# O(0.1-1) after the switch; region-5 phase3 rel-L2 << 1.24 (baseline).
+# Watch also: w_ic=50 feeds the SAME loss_weights key used by fine-tune,
+# so ft's IC term is x50 too (residual still dominates early ft: 1.7e5 vs
+# 0.11*50); judge ft vs baseline ft (rescued to 5.3e-4, still descending).
 #
-# RUN 1 kdv_w0_quadratic_experts30: allocation unchanged (quadratic ->
-#   W0 M=2, the SAME 3-leaf tree as the failing runs: mega-leaf
-#   x[-0.46, 0.53]) but experts [2,30,30,30,1] (~1981 params, 2.2x).
-#   Pure capacity test — decomposition/faces/data identical.
-# RUN 2 kdv_w0_equal_M20: allocation equal -> W0 M=6 -> 5 leaves (verified
-#   in perfect_tree_examples/sweep/kdv/M_20_W_3_equal: the mega-leaf
-#   splits, the soliton zone x[0.451, 0.529] gets its own thin leaf);
-#   experts stay [2,20,20,20,1]. Decomposition-granularity test.
+# Window mechanics: debug_windows [1]; window-1 ROOT loaded from the roots
+# folder (skips phase 1); pretrained_local_expert_checkpoint NULLED so
+# phase 3 runs; IC supplied by last_window_checkpoint = window-0 ROOT
+# (rel-L2 2.8e-8; NOTE baseline's IC came from its in-run fine-tuned W0 at
+# 5.96e-6 — this run's IC is slightly BETTER, minor confound to keep in
+# mind, negligible vs the O(1) e5 failure).
 #
-# Success bar: middle-region rel-L2 approaching root-local ~3-5e-8 (edge
-# experts already reach 5-6e-8). Compare per_expert_rel_l2_phase3 panels.
-#
-# All segments: float64, full batch, 20k residual + 256 IC/BC (window 0),
+# All segments: float64, full batch, 20k residual + 256 IC/BC (window 1),
 # resample_every_epochs 99999 (Adam warmup redraws every epoch via the
 # cadence rule), eval_every 1000, seed 42.
 #
@@ -515,47 +514,32 @@ base_config:
   ssbroyden:
     lr: 1.0
     tolerance_grad: 1.0e-10
-experiment_name: kdv_w0_capacity_pair
+experiment_name: kdv_w1_T1_ic50
 experiments:
-# RUN 1 — capacity via WIDER EXPERTS, decomposition unchanged (quadratic ->
-# W0 M=2, the same 3-leaf tree as the failing runs). 3 experts x ~1981
-# params. Top-level epochs/switch/patience govern PHASE 3.
-- name: kdv_w0_quadratic_experts30
-  problem: kdv
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 30, 30, 30, 1]
-  epochs: 41000
-  optimizer_switch_epoch: 1000
-  patience_evals: 5
-  adaptive_pinn:
-    fine_tune:
-      sigma_fraction: 0.1
-      collar_data_ratio: 0.5
-  kdv:
-    # Root-only resume: null the experts checkpoint (base value would skip
-    # phase 3 and jump straight to fine-tune).
-    pretrained_local_expert_checkpoint: null
-    time_marching:
-      debug_windows: [0]
-
-# RUN 2 — capacity via DECOMPOSITION: equal allocation -> W0 M=6 -> 5
-# leaves (mega-leaf splits; soliton zone x[0.451,0.529] gets its own
-# leaf). Experts stay [2,20,20,20,1].
-- name: kdv_w0_equal_M20
+# T1 — window 1 only, ic weight 1 -> 50, everything else identical to the
+# failing W1 baseline (10k warmup / 50k phase3 budget / patience 5 / ft
+# sigma 0.2 + collar 0.5 all come from base_config; only patience needs an
+# override since base moved to 10 after the baseline ran).
+- name: kdv_w1_T1_ic50
   problem: kdv
   model: AToELeaves
   base_architecture: [2, 60, 60, 60, 60, 1]
   experts_architecture: [2, 20, 20, 20, 1]
-  epochs: 41000
-  optimizer_switch_epoch: 1000
   patience_evals: 5
   adaptive_pinn:
     fine_tune:
-      sigma_fraction: 0.1
+      # Explicit (same as base): the T1 spec is sigma 0.2 + collar 0.5.
+      sigma_fraction: 0.2
       collar_data_ratio: 0.5
   kdv:
+    loss_weights:
+      # THE single tested variable: value-anchor weight on the IC term
+      # (split loss w_ic; also multiplies the ft loss's IC term).
+      ic: 50.0
+    # Root-only resume: null the experts checkpoint (base value would skip
+    # phase 3 and jump straight to fine-tune).
     pretrained_local_expert_checkpoint: null
     time_marching:
-      m_distribution: equal
-      debug_windows: [0]
+      debug_windows: [1]
+      # Window-0 stand-in for the IC override (base-only forward, 2.8e-8).
+      last_window_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-4-60-roots/root/window_0_best_model_root.pt
