@@ -1,32 +1,20 @@
 # ==========================================================================
-# KDV W0+W1 EXPERTS-ONLY (ic=100, NO fine-tune): 2 runs, one window each.
+# KDV ROOT CREATION (ic=100, tolerance_grad 1e-14): 2 runs, 3 windows
+# each, roots ONLY — no phase 3, no fine-tune, root-to-root IC chaining.
+# Run 1 = static draws (the proven regime); Run 2 = identical + RAD
+# (adaptive_ratio 0.3, resample every 2000) as a single-variable ablation.
 # ==========================================================================
 #
-# Question: what is the TRUE local-expert ceiling per window under the
-# ic=100 recipe, with phase 3 running to its own plateau? The ic=50 T1 run
-# (20260810_062828-SUCCESSFULL_IC-50-EXPERTS) hit its 42k budget cap
-# mid-descent (composed hard-blend 4.7e-6, still -10%/eval, no plateau
-# event) — ceiling unknown; may be at or below root parity (W1 root 1.4e-6).
-#
-# RECIPE (both runs):
-#   ic weight   loss_weights.ic = 100; bc stays 1.
-#   phase 3     2k Adam -> 60k SSBroyden (epochs 62000, switch 2000),
-#               patience 5 = the stopper (budget is a backstop, not the
-#               terminator). SSBroyden lr = 1.0 (global block). Order-3
-#               split loss unchanged.
-#   fine-tune   DISABLED (fine_tune.epochs 0 -> orchestrator skips it;
-#               "phase-3 composition is final"). Collar-geometry keys kept
-#               at benchmark values (read at construction, unused here).
-#
-# Readouts: per-window phase3 plateau level + epoch; per-region
-# per_expert_rel_l2 (W0: does e2's ~1.15e-6 floor persist with 2x budget
-# + ic100? W1: do all 7 regions keep descending past 4.7e-6 composed?);
-# where patience fires vs the 82k cap.
-#
-# Window mechanics: debug_windows per run; W1 gets IC from the window-0
-# ROOT checkpoint via last_window_checkpoint; both load their window's
-# pretrained root (phase 1 skipped) and NULL the experts checkpoint so
-# phase 3 runs.
+# Both existing roots were killed mid-descent by SSBroyden's
+# tolerance_grad=1e-10 (bit-frozen tails: W0 root from epoch 35k at
+# rel-L2 2.795e-8; W1 root from 31k at 1.357e-6). This run regenerates
+# all 3 window roots with tolerance 1e-14, ic=100, 2k Adam + 40k
+# SSBroyden, patience 5. M_experts_num=0 => nothing spawns => the window
+# model stays base-only, so the next window's IC comes from the previous
+# ROOT directly. Expected: W1/W2 roots measurably better (W1 had 1.5
+# decades of headroom); W0 root ~unchanged (already at the gt-reference
+# floor, conv_rel_l2 ~4.8e-8). Output checkpoints/root/ folder is a
+# drop-in replacement for roots_checkpoints.
 #
 # All segments: float64, full batch, 20k residual + 256 IC/BC per window,
 # resample_every_epochs 99999 (Adam warmup redraws every epoch via the
@@ -509,55 +497,87 @@ base_config:
   ssbroyden:
     lr: 1.0
     tolerance_grad: 1.0e-10
-experiment_name: kdv_w0w1_experts_only_ic100
+experiment_name: kdv_roots_ic100_tol14
 experiments:
-# EXPERTS-ONLY W0 — phase 3 to ITS OWN plateau, NO fine-tune
-# (fine_tune.epochs 0 -> orchestrator skips; phase-3 composition final).
-# Budget 62k (2k Adam + 60k SSBroyden): enough headroom past the 42k cap
-# that patience 5, not the budget, decides the stop.
-- name: kdv_w0_experts_only_ic100
+# ROOT CREATION, all 3 windows, NO phase 3 / NO fine-tune. Each window's
+# IC = the PREVIOUS window's ROOT (with M_experts_num 0 nothing spawns, so
+# the model's forward stays base-only — the root never retires and the
+# in-memory IC override chains root -> root -> root).
+#
+# Purpose: regenerate the KdV roots WITHOUT the SSBroyden tolerance floor.
+# Both old roots were bit-frozen mid-descent by tolerance_grad=1e-10
+# (scimba: stop stepping when max|grad| <= tol): W0 root froze at epoch
+# 35k (loss 2.9e-15, rel-L2 2.795e-8 — already at the gt-reference floor,
+# conv_rel_l2 ~4.8e-8, so W0 may not measurably improve); W1 root froze at
+# 31k (loss 3.6e-13, rel-L2 1.357e-6 — REAL measurable headroom).
+# ic=100 also applies to the root loss (same loss_weights key).
+#
+# Collected outputs: checkpoints/root/window_{0,1,2}_best_model_root.pt
+# (+ manifest) — drop-in replacement folder for roots_checkpoints.
+- name: kdv_roots_ic100_tol14
   problem: kdv
   model: AToELeaves
   base_architecture: [2, 60, 60, 60, 60, 1]
   experts_architecture: [2, 20, 20, 20, 1]
-  epochs: 62000
-  optimizer_switch_epoch: 2000
   patience_evals: 5
+  # THE tolerance fix (global block; phase-agnostic). MUST stay > 0 —
+  # scimba asserts 0 < tolerance_grad.
+  ssbroyden:
+    tolerance_grad: 1.0e-14
   adaptive_pinn:
+    # Zero experts: M-term tree accepts nothing, "[Orchestrator] Zero
+    # experts spawned — finishing after root" — window model = pure root.
+    M_experts_num: 0
+    initial_train:
+      # 2k Adam + 40k SSBroyden; patience 5 is the stopper (the old roots
+      # froze at 31-35k under tol 1e-10; with 1e-14 they get headroom).
+      epochs: 42000
+      optimizer_switch_epoch: 2000
     fine_tune:
       epochs: 0
-      # Collar geometry keys still read at model construction; values kept
-      # at the benchmark recipe for consistency (unused in training here).
-      sigma_fraction: 0.05
-      collar_data_ratio: 0.3
   kdv:
     loss_weights:
       ic: 100.0
-    # Root-only resume: null the experts checkpoint (base value would skip
-    # phase 3 and jump straight to fine-tune).
+    # Train roots from scratch — both resume keys must be null.
+    pretrained_base_checkpoint: null
     pretrained_local_expert_checkpoint: null
     time_marching:
-      debug_windows: [0]
+      # equal so M=0 -> [0,0,0] ('linear' force-assigns 1 per window).
+      m_distribution: equal
+      debug_windows: null
+      last_window_checkpoint: null
 
-# EXPERTS-ONLY W1 — same recipe; IC from the window-0 ROOT checkpoint.
-- name: kdv_w1_experts_only_ic100
+# RUN 2 — EXACT same roots recipe + RAD: residual-based adaptive redraws
+# (ratio 0.3 of each redraw drawn proportional to residual, rest uniform),
+# resample every 2000 epochs under SSBroyden (Adam's every-epoch redraws
+# become adaptive too). Single-variable ablation vs run 1: does adaptive
+# sampling buy the roots anything once the tolerance floor is gone?
+- name: kdv_roots_ic100_tol14_rad03
   problem: kdv
   model: AToELeaves
   base_architecture: [2, 60, 60, 60, 60, 1]
   experts_architecture: [2, 20, 20, 20, 1]
-  epochs: 62000
-  optimizer_switch_epoch: 2000
   patience_evals: 5
+  ssbroyden:
+    tolerance_grad: 1.0e-14
+  sampling:
+    resample_every_epochs: 2000
   adaptive_pinn:
+    M_experts_num: 0
+    initial_train:
+      epochs: 42000
+      optimizer_switch_epoch: 2000
     fine_tune:
       epochs: 0
-      sigma_fraction: 0.05
-      collar_data_ratio: 0.3
   kdv:
+    adaptive_sampling:
+      enabled: true
+      adaptive_ratio: 0.3
     loss_weights:
       ic: 100.0
+    pretrained_base_checkpoint: null
     pretrained_local_expert_checkpoint: null
     time_marching:
-      debug_windows: [1]
-      # Window-0 stand-in for the IC override (base-only forward, 2.8e-8).
-      last_window_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-4-60-roots/root/window_0_best_model_root.pt
+      m_distribution: equal
+      debug_windows: null
+      last_window_checkpoint: null
