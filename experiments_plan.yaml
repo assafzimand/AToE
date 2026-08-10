@@ -2,11 +2,14 @@
 # KDV WINDOW-1 T1 (ic=50): 1 run, window 1 only, phase3 -> fine-tune.
 # ==========================================================================
 #
-# T1 of the unified anchor-rebalancing matrix: raise loss_weights.ic 1->50
-# and change NOTHING else vs the failing W1 baseline (20260809_063705
-# window_1: 10k Adam warmup, 50k phase3 budget, patience 5, ft sigma 0.2 /
-# collar_data 0.5 — all kept identical here for a single-variable
-# comparison).
+# T1 of the unified anchor-rebalancing matrix: raise loss_weights.ic 1->50.
+# SECOND deliberate change vs the failing W1 baseline (20260809_063705):
+# Adam warmup 10k -> 2k (see the experiment entry comment for the 1k/2k/10k
+# evidence; 1k = all-fail regime per the 20260808 run, 10k = measured e5
+# damage era). Everything else identical to the baseline: patience 5,
+# ft sigma 0.2 / collar_data 0.5 / 40k / damped ssbroyden.lr 0.1.
+# Two-variable caveat acknowledged: if this run succeeds, attribution
+# between ic=50 and the 2k switch needs a follow-up cell (ic=1 @ 2k).
 #
 # Target pathology (measured in the baseline): expert 5 (x[-0.08,0.25])
 # fell into a wrong low-residual solution — value anchors traded away
@@ -525,6 +528,14 @@ experiments:
   model: AToELeaves
   base_architecture: [2, 60, 60, 60, 60, 1]
   experts_architecture: [2, 20, 20, 20, 1]
+  # Warmup 10k -> 2k (2k Adam + 40k SSBroyden). Evidence: 1k is the all-fail
+  # regime for W1 (20260808 run, correct roots: ALL 7 experts stuck 1.1-8.3
+  # at phase3, ft only 6.6e-3); 10k measurably damaged e5 (its best state
+  # was epoch ~2000: rel-L2 0.678, ic 0.099 — degraded to 0.836/0.324 by
+  # 10k via the value-anchor trade-away). 2k = e5's measured optimum; the
+  # cohort converges under SSBroyden from anywhere (O(1) -> 1e-3 in 5k).
+  epochs: 42000
+  optimizer_switch_epoch: 2000
   patience_evals: 5
   adaptive_pinn:
     fine_tune:
