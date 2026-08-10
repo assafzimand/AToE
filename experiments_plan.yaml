@@ -1,40 +1,34 @@
 # ==========================================================================
-# KDV WINDOW-1 T1 (ic=50): 1 run, window 1 only, phase3 -> fine-tune.
+# KDV W0+W1 EXPERTS-ONLY (ic=100, NO fine-tune): 2 runs, one window each.
 # ==========================================================================
 #
-# T1 of the unified anchor-rebalancing matrix: raise loss_weights.ic 1->50.
-# SECOND deliberate change vs the failing W1 baseline (20260809_063705):
-# Adam warmup 10k -> 2k (see the experiment entry comment for the 1k/2k/10k
-# evidence; 1k = all-fail regime per the 20260808 run, 10k = measured e5
-# damage era). Everything else identical to the baseline: patience 5,
-# ft sigma 0.2 / collar_data 0.5 / 40k / damped ssbroyden.lr 0.1.
-# Two-variable caveat acknowledged: if this run succeeds, attribution
-# between ic=50 and the 2k switch needs a follow-up cell (ic=1 @ 2k).
+# Question: what is the TRUE local-expert ceiling per window under the
+# ic=100 recipe, with phase 3 running to its own plateau? The ic=50 T1 run
+# (20260810_062828-SUCCESSFULL_IC-50-EXPERTS) hit its 42k budget cap
+# mid-descent (composed hard-blend 4.7e-6, still -10%/eval, no plateau
+# event) — ceiling unknown; may be at or below root parity (W1 root 1.4e-6).
 #
-# Target pathology (measured in the baseline): expert 5 (x[-0.08,0.25])
-# fell into a wrong low-residual solution — value anchors traded away
-# during the interface-scale-imbalance era (ic fit 0.099@2k -> 0.324@10k
-# while iface fell 223->43), then SSBroyden polished the wrong basin
-# (end state: ic=0.703, iface_val=0.190, residual=0.168, region rel-L2
-# 1.24). With w_ic=50 the stuck state costs 35 instead of 0.7 vs ~0 for
-# the true solution — the basin becomes strongly repulsive late. Known
-# limitation: does NOT prevent the early trade (iface gains ~180 still
-# outweigh 50x0.225=11) — that part is T2's (normalization) job.
+# RECIPE (both runs):
+#   ic weight   loss_weights.ic = 100; bc stays 1.
+#   phase 3     2k Adam -> 60k SSBroyden (epochs 62000, switch 2000),
+#               patience 5 = the stopper (budget is a backstop, not the
+#               terminator). SSBroyden lr = 1.0 (global block). Order-3
+#               split loss unchanged.
+#   fine-tune   DISABLED (fine_tune.epochs 0 -> orchestrator skips it;
+#               "phase-3 composition is final"). Collar-geometry keys kept
+#               at benchmark values (read at construction, unused here).
 #
-# Success metric: e5's ic series in split_expert_losses never settles at
-# O(0.1-1) after the switch; region-5 phase3 rel-L2 << 1.24 (baseline).
-# Watch also: w_ic=50 feeds the SAME loss_weights key used by fine-tune,
-# so ft's IC term is x50 too (residual still dominates early ft: 1.7e5 vs
-# 0.11*50); judge ft vs baseline ft (rescued to 5.3e-4, still descending).
+# Readouts: per-window phase3 plateau level + epoch; per-region
+# per_expert_rel_l2 (W0: does e2's ~1.15e-6 floor persist with 2x budget
+# + ic100? W1: do all 7 regions keep descending past 4.7e-6 composed?);
+# where patience fires vs the 82k cap.
 #
-# Window mechanics: debug_windows [1]; window-1 ROOT loaded from the roots
-# folder (skips phase 1); pretrained_local_expert_checkpoint NULLED so
-# phase 3 runs; IC supplied by last_window_checkpoint = window-0 ROOT
-# (rel-L2 2.8e-8; NOTE baseline's IC came from its in-run fine-tuned W0 at
-# 5.96e-6 — this run's IC is slightly BETTER, minor confound to keep in
-# mind, negligible vs the O(1) e5 failure).
+# Window mechanics: debug_windows per run; W1 gets IC from the window-0
+# ROOT checkpoint via last_window_checkpoint; both load their window's
+# pretrained root (phase 1 skipped) and NULL the experts checkpoint so
+# phase 3 runs.
 #
-# All segments: float64, full batch, 20k residual + 256 IC/BC (window 1),
+# All segments: float64, full batch, 20k residual + 256 IC/BC per window,
 # resample_every_epochs 99999 (Adam warmup redraws every epoch via the
 # cadence rule), eval_every 1000, seed 42.
 #
@@ -87,12 +81,10 @@ base_config:
       optimizer_switch_epoch: 99999
       sigma_fraction: 0.2
       single_corrector: false
-      # Damped strong-Wolfe trial step for the fine-tune only: the kdv
-      # window-0 damage profile (8.3e-7 -> 5.5e-6 inside the first 1k
-      # epochs, then partial recovery) is early line-search aggression on
-      # the collar-dominated gradient. Best-restore bounds the downside.
+      # lr 1.0 = the proven 2nd-order ft recipe (2026-08-10; the damped 0.1
+      # belonged to the wide-collar sigma-0.2 regime and is retired).
       ssbroyden:
-        lr: 0.1
+        lr: 1.0
         tolerance_grad: 1.0e-10
     initial_train:
       # ROOT — SKIPPED in every cell (pretrained_local_expert_checkpoint is
@@ -517,38 +509,53 @@ base_config:
   ssbroyden:
     lr: 1.0
     tolerance_grad: 1.0e-10
-experiment_name: kdv_w1_T1_ic50
+experiment_name: kdv_w0w1_experts_only_ic100
 experiments:
-# T1 — window 1 only, ic weight 1 -> 50, everything else identical to the
-# failing W1 baseline (10k warmup / 50k phase3 budget / patience 5 / ft
-# sigma 0.2 + collar 0.5 all come from base_config; only patience needs an
-# override since base moved to 10 after the baseline ran).
-- name: kdv_w1_T1_ic50
+# EXPERTS-ONLY W0 — phase 3 to ITS OWN plateau, NO fine-tune
+# (fine_tune.epochs 0 -> orchestrator skips; phase-3 composition final).
+# Budget 62k (2k Adam + 60k SSBroyden): enough headroom past the 42k cap
+# that patience 5, not the budget, decides the stop.
+- name: kdv_w0_experts_only_ic100
   problem: kdv
   model: AToELeaves
   base_architecture: [2, 60, 60, 60, 60, 1]
   experts_architecture: [2, 20, 20, 20, 1]
-  # Warmup 10k -> 2k (2k Adam + 40k SSBroyden). Evidence: 1k is the all-fail
-  # regime for W1 (20260808 run, correct roots: ALL 7 experts stuck 1.1-8.3
-  # at phase3, ft only 6.6e-3); 10k measurably damaged e5 (its best state
-  # was epoch ~2000: rel-L2 0.678, ic 0.099 — degraded to 0.836/0.324 by
-  # 10k via the value-anchor trade-away). 2k = e5's measured optimum; the
-  # cohort converges under SSBroyden from anywhere (O(1) -> 1e-3 in 5k).
-  epochs: 42000
+  epochs: 62000
   optimizer_switch_epoch: 2000
   patience_evals: 5
   adaptive_pinn:
     fine_tune:
-      # Explicit (same as base): the T1 spec is sigma 0.2 + collar 0.5.
-      sigma_fraction: 0.2
-      collar_data_ratio: 0.5
+      epochs: 0
+      # Collar geometry keys still read at model construction; values kept
+      # at the benchmark recipe for consistency (unused in training here).
+      sigma_fraction: 0.05
+      collar_data_ratio: 0.3
   kdv:
     loss_weights:
-      # THE single tested variable: value-anchor weight on the IC term
-      # (split loss w_ic; also multiplies the ft loss's IC term).
-      ic: 50.0
+      ic: 100.0
     # Root-only resume: null the experts checkpoint (base value would skip
     # phase 3 and jump straight to fine-tune).
+    pretrained_local_expert_checkpoint: null
+    time_marching:
+      debug_windows: [0]
+
+# EXPERTS-ONLY W1 — same recipe; IC from the window-0 ROOT checkpoint.
+- name: kdv_w1_experts_only_ic100
+  problem: kdv
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  epochs: 62000
+  optimizer_switch_epoch: 2000
+  patience_evals: 5
+  adaptive_pinn:
+    fine_tune:
+      epochs: 0
+      sigma_fraction: 0.05
+      collar_data_ratio: 0.3
+  kdv:
+    loss_weights:
+      ic: 100.0
     pretrained_local_expert_checkpoint: null
     time_marching:
       debug_windows: [1]
