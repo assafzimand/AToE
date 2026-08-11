@@ -343,6 +343,7 @@ patience_rel_delta: 0.01
 precision: float64
 print_every: 1000
 problem: allen_cahn
+refresh_2nd_order_optimizer: false
 resume_from: null
 sampling:
   collar_data_ratio: 0.0

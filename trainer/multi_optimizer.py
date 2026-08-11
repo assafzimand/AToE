@@ -87,6 +87,11 @@ class MultiExpertOptimizer:
                       if p.requires_grad]
             self.opts.append(SSBroyden(params, lr=lr, tolerance_grad=tol,
                                        method='ssbroyden'))
+        # freeze-refresh: a group whose line search returns t=0 poisons its
+        # Hk (s=y=0 -> NaN update skipped) and repeats bit-identically; the
+        # per-group loss detects this exactly, per step.
+        self._refresh = bool(cfg.get('refresh_2nd_order_optimizer', False))
+        self._refresh_hist = [[] for _ in groups]
         n_par = [sum(p.numel() for i in g for p in model.experts[i].parameters())
                  for g in groups]
         logger.info(f"[MultiOpt] phase3 per-group SSBroyden: "
@@ -124,9 +129,31 @@ class MultiExpertOptimizer:
         self._cache_key, self._subbatches = key, subs
         return subs
 
+    def _maybe_refresh(self, j: int, loss_val: float):
+        """Reset group j's curvature state after 3 bit-identical step losses.
+
+        In-place reset (k=0, Hk=I) rather than re-instantiation: it reuses the
+        existing state tensor's device/dtype and keeps the optimizer object
+        (and its param_groups) stable for the surrounding trainer.
+        """
+        h = self._refresh_hist[j]
+        h.append(loss_val)
+        if len(h) > 3:
+            h.pop(0)
+        if len(h) == 3 and h[0] == h[1] == h[2]:
+            opt = self.opts[j]
+            st = opt.state[opt.param_groups[0]['params'][0]]
+            st['k'] = 0
+            st['Hk'] = torch.eye(st['Hk'].shape[0], dtype=st['Hk'].dtype,
+                                 device=st['Hk'].device)
+            logger.info(f"[MultiOpt][Refresh] group {self.groups[j]} loss "
+                        f"bit-identical for 3 steps ({loss_val:.6e}) — "
+                        f"reset its SSBroyden curvature state.")
+            h.clear()
+
     def step(self, closure: Callable = None):  # noqa: ARG002 — see class doc
         total = None
-        for opt, sub in zip(self.opts, self._group_batches()):
+        for j, (opt, sub) in enumerate(zip(self.opts, self._group_batches())):
             def group_closure(sub=sub, opt=opt):
                 opt.zero_grad()
                 loss = self.loss_fn(self.model, sub)
@@ -134,6 +161,8 @@ class MultiExpertOptimizer:
                 return loss
             l = opt.step(group_closure)
             l = l.detach() if torch.is_tensor(l) else torch.tensor(float(l))
+            if self._refresh:
+                self._maybe_refresh(j, float(l))
             total = l if total is None else total + l
         return total
 

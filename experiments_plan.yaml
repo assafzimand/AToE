@@ -1,28 +1,33 @@
 # ==========================================================================
-# KDV PER-WINDOW EXPERTS on the NEW tol14/ic100 ROOTS, interface order
-# capped at 1 (u + u_x only): 3 runs, one window each, phase 3 only.
+# KDV W0 FREEZE-REFRESH A/B: joint vs multi-opt SSBroyden, both with
+# refresh_2nd_order_optimizer. 2 runs, window 0 only, phase 3 only.
 # ==========================================================================
 #
-# New roots (kdv_no_resample-4-60-roots_ic_100_tol14, full 42k, no freeze):
-#   W0 9.97e-9 | W1 9.40e-8 | W2 2.99e-7   (old: 2.8e-8 / 1.36e-6 / n.a.)
+# Twins of the two measured W0 runs (2026-08-11):
+#   joint ref  kdv_w012_experts_iface1_20260811_052432: best 1.146e-7 at
+#     31000, froze bit-identically 31000-36000 at loss 2.5418e-12
+#   multi-opt  kdv_w012_experts_iface1_multiopt_20260811_093335: e2 group
+#     froze bit-identically at 11000 (group loss 5.878e-11), stop 16000,
+#     composed 2.230e-6
+# Both freezes = scimba strong-Wolfe returning t=0 -> s=y=0 -> NaN Hessian
+# update silently skipped -> Hk never recovers (traced in scimba 1.3.4).
 #
-# Tested mechanism: split_icbc.max_interface_derivative_order = 1 — the
-# interface transmits value + u_x only (u_xx dropped). 4 conditions per
-# interior interface: over KdV's well-posed 3 by one (consistent-by-
-# construction), exactly KS's 4. Removes the worst-scaled interface term
-# (dxx init ~1e5 in W1 vs dx ~8e2, value ~1); with ic=100 the init loss
-# terms are roughly balanced with no normalization machinery. Periodic
-# pairing and the root/plain loss keep full order.
+# THE tested mechanism: refresh_2nd_order_optimizer — 3 bit-identical
+# losses (per-epoch for the joint optimizer, per-group-step under
+# multi-opt) trigger a rebuild/reset of the frozen optimizer's curvature
+# state at the current weights (fresh Hk=I; the local A/B showed -26%
+# descent in 150 steps from a frozen point). Detection is per epoch,
+# far inside the 5x1000-epoch patience window.
 #
-# Common recipe: 2k Adam + 40k SSBroyden (42000/2000), patience 5,
-# tolerance_grad 1e-14, ic=100, experts 3x20, M=20 quadratic (W0 M=2 /
-# W1 M=6 / W2 M=12), STATIC draws, NO fine-tune (ft.epochs 0). Each
-# window loads its own new root; W1/W2 take their IC from the previous
-# window's new root via last_window_checkpoint.
+# The pair answers jointness-vs-freshness: if refresh rescues multi-opt
+# past 2.2e-6, e2's early freeze was the whole story; if refreshed joint
+# beats refreshed multi-opt, jointness itself helps the laggard.
 #
-# All segments: float64, full batch, 20k residual + 256 IC/BC per window,
-# resample_every_epochs 99999 (Adam warmup redraws every epoch via the
-# cadence rule), eval_every 1000, seed 42.
+# Common recipe (identical to the 052432 reference): experts 3x20 (921
+# params), 2k Adam + 40k SSBroyden (42000/2000), patience 5,
+# tolerance_grad 1e-14, iface order 1, ic=100, W0 M=2, static draws,
+# no fine-tune, root = tol14/ic100 (W0 9.97e-9). float64, full batch,
+# 20k residual + 256 IC/BC, resample 99999, eval_every 1000, seed 42.
 #
 # This is the DEFAULT plan: `python run_experiments.py` reads it as-is;
 # AWS_scripts/run_and_terminate.sh launches it and stops the box after.
@@ -405,6 +410,12 @@ base_config:
   # experts hit their float64 floor. Roughly runtime-neutral (per-group
   # closures evaluate only their own rows).
   multi_optimizers: false
+  # Freeze-refresh (2026-08-11): rebuild/reset a 2nd-order optimizer whose
+  # loss repeats bit-identically for 3 epochs (joint path) or 3 group steps
+  # (multi-opt path) — the scimba t=0 line-search freeze poisons Hk via a
+  # silently-skipped NaN update and never recovers on its own. Monitored
+  # every epoch, i.e. well inside the patience window (5 x eval_every 1000).
+  refresh_2nd_order_optimizer: true
   # Top-level keys govern PHASE 3: 10k Adam (fresh per-expert draws every
   # epoch via the Adam cadence rule) -> SSBroyden on a static draw.
   # Warmup extended 1k -> 10k for kdv: the interface derivative terms start
@@ -516,33 +527,28 @@ base_config:
   ssbroyden:
     lr: 1.0
     tolerance_grad: 1.0e-10
-experiment_name: kdv_w012_experts_iface1_4x20
+experiment_name: kdv_w0_refresh_joint_vs_multiopt
 experiments:
-# THREE PER-WINDOW EXPERT RUNS on the NEW tol14/ic100 roots (rel-L2:
-# W0 9.97e-9, W1 9.40e-8, W2 2.99e-7). Phase 3 only (no fine-tune), static
-# draws (no resampling), each window loads its own root and takes its IC
-# from the PREVIOUS window's root checkpoint.
+# TWO W0 RUNS, exact twins of the 052432 joint reference (experts 3x20,
+# 921 params) except: refresh_2nd_order_optimizer true (base) and, in run
+# 2 only, multi_optimizers true. Everything else byte-for-byte the
+# reference recipe — same root, same seed, same draws — so epochs 1-2000
+# must reproduce the reference bit-identically (proven env-invariant on
+# Colab A100 / torch 2.11).
 #
-# THE tested mechanism: interface derivative matching capped at order 1
-# (split_icbc.max_interface_derivative_order: 1 -> transmit u and u_x
-# only, u_xx dropped). Condition count: 4 per interior interface — over
-# the 3 KdV needs by one (consistent), exactly the 4 KS needs — and it
-# removes the worst-scaled interface term (dxx started ~1e5 in W1 vs
-# dx ~8e2, value ~1); with ic=100 the init loss terms are roughly
-# balanced without any normalization machinery.
-#
-# Common recipe: 2k Adam + 40k SSBroyden (42000/2000), patience 5,
-# tolerance_grad 1e-14, ic=100, experts 4x20 (1341 params vs the
-# reference run's 3x20/921), M=20 quadratic (W0 M=2 / W1 M=6 /
-# W2 M=12), static draws, no fine-tune, single joint optimizer.
-- name: kdv_w0_experts_iface1_4x20
+# Expected refresh points (from the measured twins): joint ~31000 (froze
+# at loss 2.5418e-12, best 1.146e-7); multi-opt e2 group ~11000 (froze at
+# group loss 5.878e-11, composed 2.230e-6). Success = descent resumes
+# after [Refresh] lines; comparison of the two answers jointness-vs-
+# freshness for the laggard e2.
+- name: kdv_w0_experts_iface1_refresh_joint
   problem: kdv
   # THE tested variable vs kdv_w012_experts_iface1_20260811_052432:
-  # expert DEPTH 3x20 -> 4x20 (921 -> 1341 params), single joint
-  # optimizer (multi_optimizers stays false in base).
+  # refresh_2nd_order_optimizer true (from base). Single joint optimizer
+  # (multi_optimizers false in base), experts back at 3x20/921.
   model: AToELeaves
   base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 20, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
   epochs: 42000
   optimizer_switch_epoch: 2000
   patience_evals: 5
@@ -561,17 +567,18 @@ experiments:
     time_marching:
       debug_windows: [0]
 
-- name: kdv_w1_experts_iface1_4x20
+- name: kdv_w0_experts_iface1_refresh_multiopt
   problem: kdv
-  # THE tested variable vs kdv_w012_experts_iface1_20260811_052432:
-  # expert DEPTH 3x20 -> 4x20 (921 -> 1341 params), single joint
-  # optimizer (multi_optimizers stays false in base).
+  # THE tested variable vs the run above: multi_optimizers true — per-
+  # group SSBroyden ({pair 0,1} + {e2}) with per-group freeze-refresh.
+  # Twin of the 093335 multi-opt run + refresh.
   model: AToELeaves
   base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 20, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
   epochs: 42000
   optimizer_switch_epoch: 2000
   patience_evals: 5
+  multi_optimizers: true
   ssbroyden:
     tolerance_grad: 1.0e-14
   adaptive_pinn:
@@ -585,34 +592,4 @@ experiments:
     pretrained_base_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-4-60-roots_ic_100_tol14/root
     pretrained_local_expert_checkpoint: null
     time_marching:
-      debug_windows: [1]
-      # IC = previous window's NEW root (9.97e-9).
-      last_window_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-4-60-roots_ic_100_tol14/root/window_0_best_model_root.pt
-
-- name: kdv_w2_experts_iface1_4x20
-  problem: kdv
-  # THE tested variable vs kdv_w012_experts_iface1_20260811_052432:
-  # expert DEPTH 3x20 -> 4x20 (921 -> 1341 params), single joint
-  # optimizer (multi_optimizers stays false in base).
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 20, 1]
-  epochs: 42000
-  optimizer_switch_epoch: 2000
-  patience_evals: 5
-  ssbroyden:
-    tolerance_grad: 1.0e-14
-  adaptive_pinn:
-    split_icbc:
-      max_interface_derivative_order: 1
-    fine_tune:
-      epochs: 0
-  kdv:
-    loss_weights:
-      ic: 100.0
-    pretrained_base_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-4-60-roots_ic_100_tol14/root
-    pretrained_local_expert_checkpoint: null
-    time_marching:
-      debug_windows: [2]
-      # IC = previous window's NEW root (9.40e-8).
-      last_window_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-4-60-roots_ic_100_tol14/root/window_1_best_model_root.pt
+      debug_windows: [0]

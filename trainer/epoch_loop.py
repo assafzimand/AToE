@@ -348,6 +348,14 @@ def _train_segment(
     evals_no_improve = 0
     # optimizer_1 is watched from the segment start; reset to switch_epoch at the switch.
     patience_start_epoch = segment_start_epoch
+    # ── freeze-refresh (refresh_2nd_order_optimizer) ──
+    # A full-batch 2nd-order optimizer whose strong-Wolfe line search returns
+    # t=0 poisons its own curvature state (s=y=0 -> NaN Hessian update is
+    # silently skipped) and then repeats bit-identically forever. Exact float
+    # equality of consecutive epoch losses detects it; checked every epoch,
+    # far more frequently than the rel-L2 patience (eval_every-based).
+    _refresh_2nd = bool(cfg.get('refresh_2nd_order_optimizer', False))
+    _refresh_hist = []
     _nan_detected = False
     _stopped_early = False
     _stop_reason = 'budget'
@@ -1011,6 +1019,7 @@ def _train_segment(
             best_rel_l2_pat = float('inf')
             evals_no_improve = 0
             patience_start_epoch = switch_epoch
+            _refresh_hist.clear()
             metrics['optimizer_events'].append({
                 'epoch': epoch,
                 'from': _prev_opt,
@@ -1058,6 +1067,28 @@ def _train_segment(
             logger.info(f"{'!'*60}\n")
             _nan_detected = True
             break
+
+        # Freeze-refresh: rebuild a bricked 2nd-order optimizer at the current
+        # weights (fresh curvature state). The multi-opt wrapper monitors its
+        # groups itself — the summed loss keeps moving while a single group is
+        # frozen, so the epoch-level check would miss it.
+        if (_refresh_2nd and current_optimizer_name in ('LBFGS', 'SSBroyden')
+                and not hasattr(optimizer, 'opts')):
+            _refresh_hist.append(train_loss)
+            if len(_refresh_hist) > 3:
+                _refresh_hist.pop(0)
+            if (len(_refresh_hist) == 3
+                    and _refresh_hist[0] == _refresh_hist[1] == _refresh_hist[2]):
+                logger.info(
+                    f"  [Refresh] train loss bit-identical for 3 epochs "
+                    f"({train_loss:.6e}) — rebuilding {current_optimizer_name} "
+                    f"with fresh state at epoch {epoch}.")
+                _set_default_torch_device(device, full_batch=True)
+                optimizer, current_optimizer_name = _create_optimizer_by_name(
+                    current_optimizer_name.lower(), model, seg_cfg)
+                metrics['optimizer_events'].append(
+                    {'epoch': epoch, 'refresh': current_optimizer_name})
+                _refresh_hist.clear()
 
         # LRA: update adaptive loss weights periodically
         if lra_weights is not None and epoch > 0 and epoch % lra_weights.update_every == 0:
