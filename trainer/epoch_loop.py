@@ -328,6 +328,10 @@ def _train_segment(
     if full_batch_opt1:
         optimizer, current_optimizer_name = _create_optimizer_by_name(
             optimizer_1_name, model, seg_cfg)
+        from trainer.multi_optimizer import maybe_wrap_multi_optimizer
+        optimizer = maybe_wrap_multi_optimizer(
+            optimizer, current_optimizer_name, model, cfg, seg_cfg,
+            ctx, loss_fn, segment_name)
         lr_scheduler = None
     else:
         optimizer, current_optimizer_name = _create_primary_optimizer(model, seg_cfg)
@@ -995,6 +999,13 @@ def _train_segment(
             _prev_opt = current_optimizer_name
             optimizer, current_optimizer_name = _create_optimizer_by_name(
                 optimizer_2_name, model, seg_cfg)
+            # multi_optimizers (phase-3 only): per-expert-group SSBroyden —
+            # each group gets its own Hessian/line-search/stopping instead
+            # of one shared set across experts at incompatible scales.
+            from trainer.multi_optimizer import maybe_wrap_multi_optimizer
+            optimizer = maybe_wrap_multi_optimizer(
+                optimizer, current_optimizer_name, model, cfg, seg_cfg,
+                ctx, loss_fn, segment_name)
             lr_scheduler = None  # optimizer_2 uses its own LR / line search
             # Reset patience at the switch; optimizer_2 gets a fresh grace window.
             best_rel_l2_pat = float('inf')
