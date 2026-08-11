@@ -516,7 +516,7 @@ base_config:
   ssbroyden:
     lr: 1.0
     tolerance_grad: 1.0e-10
-experiment_name: kdv_w012_experts_iface1_multiopt
+experiment_name: kdv_w012_experts_iface1_4x20
 experiments:
 # THREE PER-WINDOW EXPERT RUNS on the NEW tol14/ic100 roots (rel-L2:
 # W0 9.97e-9, W1 9.40e-8, W2 2.99e-7). Phase 3 only (no fine-tune), static
@@ -532,16 +532,17 @@ experiments:
 # balanced without any normalization machinery.
 #
 # Common recipe: 2k Adam + 40k SSBroyden (42000/2000), patience 5,
-# tolerance_grad 1e-14, ic=100, experts 3x20, M=20 quadratic
-# (W0 M=2 / W1 M=6 / W2 M=12), static draws, no fine-tune.
-- name: kdv_w0_experts_iface1_multiopt
+# tolerance_grad 1e-14, ic=100, experts 4x20 (1341 params vs the
+# reference run's 3x20/921), M=20 quadratic (W0 M=2 / W1 M=6 /
+# W2 M=12), static draws, no fine-tune, single joint optimizer.
+- name: kdv_w0_experts_iface1_4x20
   problem: kdv
   # THE tested variable vs kdv_w012_experts_iface1_20260811_052432:
-  # per-expert-group SSBroyden in phase 3.
-  multi_optimizers: true
+  # expert DEPTH 3x20 -> 4x20 (921 -> 1341 params), single joint
+  # optimizer (multi_optimizers stays false in base).
   model: AToELeaves
   base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
+  experts_architecture: [2, 20, 20, 20, 20, 1]
   epochs: 42000
   optimizer_switch_epoch: 2000
   patience_evals: 5
@@ -560,14 +561,14 @@ experiments:
     time_marching:
       debug_windows: [0]
 
-- name: kdv_w1_experts_iface1_multiopt
+- name: kdv_w1_experts_iface1_4x20
   problem: kdv
   # THE tested variable vs kdv_w012_experts_iface1_20260811_052432:
-  # per-expert-group SSBroyden in phase 3.
-  multi_optimizers: true
+  # expert DEPTH 3x20 -> 4x20 (921 -> 1341 params), single joint
+  # optimizer (multi_optimizers stays false in base).
   model: AToELeaves
   base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
+  experts_architecture: [2, 20, 20, 20, 20, 1]
   epochs: 42000
   optimizer_switch_epoch: 2000
   patience_evals: 5
@@ -588,14 +589,14 @@ experiments:
       # IC = previous window's NEW root (9.97e-9).
       last_window_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-4-60-roots_ic_100_tol14/root/window_0_best_model_root.pt
 
-- name: kdv_w2_experts_iface1_multiopt
+- name: kdv_w2_experts_iface1_4x20
   problem: kdv
   # THE tested variable vs kdv_w012_experts_iface1_20260811_052432:
-  # per-expert-group SSBroyden in phase 3.
-  multi_optimizers: true
+  # expert DEPTH 3x20 -> 4x20 (921 -> 1341 params), single joint
+  # optimizer (multi_optimizers stays false in base).
   model: AToELeaves
   base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
+  experts_architecture: [2, 20, 20, 20, 20, 1]
   epochs: 42000
   optimizer_switch_epoch: 2000
   patience_evals: 5
