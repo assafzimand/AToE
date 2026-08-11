@@ -1,45 +1,39 @@
 # ==========================================================================
-# KDV W0 RESAMPLING A/B: uniform redraw every 500 vs RAD every 500, both
-# under the single joint SSBroyden. 2 runs, window 0 only, phase 3 only.
-# ==========================================================================
+# KDV W0 FINE-TUNE SWEEP (AWS): sigma_fraction {0.05, 0.1} x {collar 0.3,
+# RAD 0.3}. 4 runs, window 0 only, FINE-TUNE ONLY (root and phase 3 are
+# skipped: pretrained_local_expert_checkpoint is set, so each window jumps
+# straight to fine-tune from the benchmark experts).
 #
-# Motivation (measured 2026-08-11): every phase-3 stall is a DETERMINISTIC
-# freeze on a STATIC draw — scimba's strong-Wolfe returns t=0 once the
-# productive parameter step drops below its hard-coded 1e-9 resolution,
-# and on a fixed landscape the state then repeats bit-identically forever.
-# Optimizer-side fixes are exhausted: multi-opt made composed rel-L2 worse
-# (2.2e-6), Hk-refresh restarts insta-refroze 1700x at the same loss
-# (joint 5.08e-12, multi 1.58e-12). Loss terms/weights were audited and
-# are NOT the problem (floor is 97% interior residual; rel-L2 tracks
-# 0.07-0.19*sqrt(loss) for experts AND roots alike). Both flags stay OFF
-# from now on.
+# Launch: python run_experiments.py experiment_plans/kdv_w0_finetune_sigma_collar_vs_rad.yaml
+# (run_and_terminate.sh runs the default experiments_plan.yaml � copy this
+# file over it on the box, or pass the path.)
 #
-# THE tested mechanism: periodic redraw of the training set DURING the
-# SSBroyden phase — the recipe of the SSBroyden source paper (Urban,
-# Stefanou & Pons, JCP 2025: refresh every 500 iterations). Each redraw
-# perturbs the loss landscape, giving the line search real descent again
-# without touching optimizer state. Run 1 = uniform redraws; run 2 = RAD
-# (residual^2-weighted, ratio 0.3, Wu et al. CMAME 2023) — the floor is
-# 97% e2-interior residual, so RAD concentrates points exactly there.
+# Starting point = the 052432 benchmark W0 experts (loss 2.5418e-12,
+# rel-L2 1.146e-7, per-region e0=1.07e-8 e1=2.96e-8 e2=1.60e-7), stored at
+# roots_checkpoints/.../kdv_no_resample-4-60-roots_ic_100_tol14/phase3.
+# Base loads the matching tol14 root; W0 takes its IC from the true t=0
+# data (last_window_checkpoint only matters for W1/W2 later).
 #
-# Reference to beat: joint static W0 = loss 2.5418e-12 / rel-L2 1.146e-7
-# (froze at 31000). Root parity target: loss ~1.7e-14 / rel-L2 ~1e-8.
+# Fine-tune recipe (base): 40k PURE SSBroyden (no Adam warmup), lr 1.0,
+# tolerance_grad 1e-14 (the 1e-10 default would quit early - measured),
+# FIXED collar sigma (adaptive_collar_size false; sigma_fraction is the
+# tested knob), patience 10 (known ft dips), float64, static draw.
+# Runs 1/3: draw = 30% collar points around interfaces (collar_data_ratio
+# 0.3). Runs 2/4: collar 0 + RAD (adaptive_sampling ratio 0.3, phi
+# quadratic - residual^2-weighted over the pool) + redraw every 500
+# epochs during SSBroyden, so RAD re-targets the current residual field.
+# Collar runs keep the static draw (resample 99999).
 #
-# Common recipe (identical to the 052432 reference otherwise): experts
-# 3x20 (921 params), 2k Adam + 40k SSBroyden (42000/2000), patience 5,
-# tolerance_grad 1e-14, iface order 1, ic=100, W0 M=2, no fine-tune,
-# root = tol14/ic100 (W0 9.97e-9). float64, full batch, 20k residual +
-# 256 IC/BC, eval_every 1000, seed 42.
-#
-# This is the DEFAULT plan: `python run_experiments.py` reads it as-is;
-# AWS_scripts/run_and_terminate.sh launches it and stops the box after.
+# Rationale (2026-08-11 evidence): fine-tune is per-region optimization
+# with a fresh optimizer on a changed landscape - the only shape that ever
+# descended from a frozen point (e2-only A/B: -26% in 150 steps). Success
+# = composed rel-L2 below the 1.146e-7 benchmark, toward root parity
+# ~1e-8; watch per-expert rel-L2 (e2 is the laggard).
 # ==========================================================================
 base_config:
   activation: tanh
   adam:
-    betas:
-    - 0.9
-    - 0.999
+    betas: [0.9, 0.999]
     eps: 1.0e-08
   adaptive_pinn:
     AToE_threshold_capacity: null
@@ -49,25 +43,12 @@ base_config:
     enable_timing: false
     enabled: true
     expert_type: mlp
-    # FINE-TUNE (the only segment that runs): 40k PURE SSBroyden — NO Adam
-    # warmup. Adaptive collars q=0.9 clamped [0.05, 0.5] are the BASELINE;
-    # cells 2-3 override to fixed sigma, cells 4-5 switch on the single
-    # corrector. The lr key is inert (Adam-only); SSBroyden reads the
-    # ssbroyden block. sigma_fraction is the fallback if sizing fails.
     fine_tune:
       adaptive_collar_grid: 257
       adaptive_collar_quantile: 0.9
       adaptive_collar_sigma_max: 0.5
       adaptive_collar_sigma_min: 0.05
       adaptive_collar_size: false
-      # Segment-scoped: applies to the fine-tune ONLY (flat key, read in
-      # epoch_loop); the global sampling.collar_data_ratio stays 0.0 so
-      # phase 3 keeps its proven uniform per-expert draw. THIS RUN: wide
-      # collars (sigma 0.2) + heavy collar share (0.5) — testing the
-      # wide-blend regime, aimed at windows 1-2 whose fresh experts may
-      # carry real collar mismatch. Window 0 (reconciled handoff) is
-      # expected to start WORSE under sigma 0.2 (measured: sigma 0.1
-      # already 5x worse there); best-restore bounds its downside.
       collar_data_ratio: 0.5
       corrector_architecture: null
       corrector_init: zero
@@ -80,322 +61,144 @@ base_config:
       optimizer_switch_epoch: 99999
       sigma_fraction: 0.2
       single_corrector: false
-      # lr 1.0 = the proven 2nd-order ft recipe (2026-08-10; the damped 0.1
-      # belonged to the wide-collar sigma-0.2 regime and is retired).
-      ssbroyden:
-        lr: 1.0
-        tolerance_grad: 1.0e-10
-    initial_train:
-      # ROOT — SKIPPED in every cell (pretrained_local_expert_checkpoint is
-      # set, which skips root AND phase 3; this block is ignored).
-      epochs: 41000
-      lr: 0.001
-      lr_decay_rate: 0.98
-      lr_decay_steps: 1000
-      lr_schedule: none
-      lr_warmup_steps: 0
-      optimizer_1: adam
-      optimizer_2: ssbroyden
-      optimizer_switch_epoch: 1000
+      ssbroyden: {lr: 1.0, tolerance_grad: 1.0e-14}
+    initial_train: {epochs: 41000, lr: 0.001, lr_decay_rate: 0.98, lr_decay_steps: 1000, lr_schedule: none,
+      lr_warmup_steps: 0, optimizer_1: adam, optimizer_2: ssbroyden, optimizer_switch_epoch: 1000}
     max_experts: 150
-    split_icbc:
-      enabled: true
-      # Cap on the interface derivative-matching order. null = N-1 (the
-      # method default: KdV matches u,u_x,u_xx; KS adds u_xxx). 1 = value +
-      # u_x only: 4 conditions per interior interface, >= the 3 KdV needs
-      # and exactly the 4 KS needs, and it removes the worst-scaled term
-      # (interface_bc_dxx started at ~1e5 in W1 vs dx ~8e2, value ~1).
-      # Interface terms only; periodic pairing keeps full order.
-      max_interface_derivative_order: null
+    split_icbc: {enabled: true, max_interface_derivative_order: 1}
     tree_max_depth: 15
     tree_min_samples_leaf: 50
     variable_for_expert_size: norm
     variable_for_node_accept: norm
   allen_cahn:
     D: 0.0001
-    adaptive_sampling:
-      adaptive_ratio: 0.5
-      enabled: false
-      phi: quadratic
-      phi_epsilon: 1.0
-      phi_power: 2.0
+    adaptive_sampling: {adaptive_ratio: 0.5, enabled: false, phi: quadratic, phi_epsilon: 1.0, phi_power: 2.0}
     causal_training:
       enabled: false
       min_weight_threshold: 0.99
       num_chunks: 32
-      tol_schedule:
-      - 0.01
-      - 0.1
-      - 1.0
+      tol_schedule: [0.01, 0.1, 1.0]
     expert_grad_clip_norm: null
-    fourier_features:
-      dim: 10
-      enabled: false
-      periodic: false
-      scale: 3.0
+    fourier_features: {dim: 10, enabled: false, periodic: false, scale: 3.0}
     grad_clip_norm: null
-    init:
-      hidden: default
-      ls_use_bias: false
-      output: default
-    loss_weights:
-      bc: 1.0
-      continuity: 0.0
-      ic: 1.0
-      residual: 1.0
-    lra:
-      alpha: 0.1
-      enabled: false
-      epsilon: 1.0e-05
-      scheme: grad_norm
-      update_every: 100
+    init: {hidden: default, ls_use_bias: false, output: default}
+    loss_weights: {bc: 1.0, continuity: 0.0, ic: 1.0, residual: 1.0}
+    lra: {alpha: 0.1, enabled: false, epsilon: 1.0e-05, scheme: grad_norm, update_every: 100}
     new_norm_threshold: 0.04
     output_dim: 1
     pretrained_base_checkpoint: null
     pretrained_local_expert_checkpoint: null
-    rwf:
-      enabled: false
-      mean: 1.0
-      std: 0.1
+    rwf: {enabled: false, mean: 1.0, std: 0.1}
     spatial_dim: 1
     spatial_domain:
-    - - -1.0
-      - 1.0
-    temporal_domain:
-    - 0.0
-    - 1.0
-    time_marching:
-      enabled: false
-      freeze_previous_windows: true
-      m_distribution: quadratic
-      num_windows: 5
+    - [-1.0, 1.0]
+    temporal_domain: [0.0, 1.0]
+    time_marching: {enabled: false, freeze_previous_windows: true, m_distribution: quadratic, num_windows: 5}
     tree_smoothness_threshold: 0.5
     wavelet_threshold: 0.002
     window_smoothness_order: 2
     window_type: smoothstep
+  base_architecture: [2, 60, 60, 60, 60, 1]
   batch_size: 99999
   burgers1d:
-    adaptive_sampling:
-      adaptive_ratio: 0.5
-      enabled: false
-      phi: quadratic
-      phi_epsilon: 1.0
-      phi_power: 2.0
+    adaptive_sampling: {adaptive_ratio: 0.5, enabled: false, phi: quadratic, phi_epsilon: 1.0, phi_power: 2.0}
     causal_training:
       enabled: false
       min_weight_threshold: 0.99
       num_chunks: 32
-      tol_schedule:
-      - 0.01
-      - 0.1
-      - 1.0
+      tol_schedule: [0.01, 0.1, 1.0]
     expert_grad_clip_norm: null
-    fourier_features:
-      dim: 128
-      enabled: false
-      periodic: false
-      scale: 1.0
+    fourier_features: {dim: 128, enabled: false, periodic: false, scale: 1.0}
     grad_clip_norm: null
-    init:
-      hidden: default
-      ls_use_bias: false
-      output: default
-    loss_weights:
-      bc: 1.0
-      continuity: 0.0
-      ic: 1.0
-      residual: 1.0
-    lra:
-      alpha: 0.1
-      enabled: false
-      epsilon: 1.0e-05
-      scheme: grad_norm
-      update_every: 100
+    init: {hidden: default, ls_use_bias: false, output: default}
+    loss_weights: {bc: 1.0, continuity: 0.0, ic: 1.0, residual: 1.0}
+    lra: {alpha: 0.1, enabled: false, epsilon: 1.0e-05, scheme: grad_norm, update_every: 100}
     new_norm_threshold: 0.015
     nu: 0.01
     output_dim: 1
     pretrained_base_checkpoint: null
     pretrained_local_expert_checkpoint: null
-    rwf:
-      enabled: false
-      mean: 1.0
-      std: 0.1
+    rwf: {enabled: false, mean: 1.0, std: 0.1}
     spatial_dim: 1
     spatial_domain:
-    - - -1.0
-      - 1.0
-    temporal_domain:
-    - 0.0
-    - 1.0
-    time_marching:
-      enabled: false
-      freeze_previous_windows: true
-      m_distribution: quadratic
-      num_windows: 5
+    - [-1.0, 1.0]
+    temporal_domain: [0.0, 1.0]
+    time_marching: {enabled: false, freeze_previous_windows: true, m_distribution: quadratic, num_windows: 5}
     tree_smoothness_threshold: 0.5
     wavelet_threshold: 0.001
     window_smoothness_order: 2
     window_type: smoothstep
   cuda: true
-  # PHASE 3 budget: 10k Adam warmup + 40k SSBroyden (per window).
   epochs: 50000
-  # The VERIFIED stopping rule: eval 1000 x patience 10 = a 10k window. The
-  # adacollar recipe has a known plateau around epochs 10-15k before its
-  # second descent — the 30-Jul verified run crossed it with 2 evals to
-  # spare; the 2.5k triage window executed it mid-plateau.
   eval_every: 1000
   eval_only: false
+  experts_architecture: [2, 20, 20, 20, 1]
   kdv:
-    adaptive_sampling:
-      adaptive_ratio: 0.3
-      enabled: false
-      phi: quadratic
-      phi_epsilon: 1.0
-      phi_power: 2.0
+    adaptive_sampling: {adaptive_ratio: 0.3, enabled: false, phi: quadratic, phi_epsilon: 1.0, phi_power: 2.0}
     causal_training:
       enabled: false
       min_weight_threshold: 0.99
       num_chunks: 16
-      tol_schedule:
-      - 0.01
+      tol_schedule: [0.01]
     expert_grad_clip_norm: null
-    fourier_features:
-      dim: 10
-      enabled: false
-      periodic: false
-      scale: 2.0
+    fourier_features: {dim: 10, enabled: false, periodic: false, scale: 2.0}
     grad_clip_norm: null
-    init:
-      hidden: default
-      ls_use_bias: false
-      output: default
-    loss_weights:
-      bc: 1.0
-      continuity: 0.0
-      ic: 1.0
-      residual: 1.0
-    lra:
-      alpha: 0.1
-      enabled: false
-      epsilon: 1.0e-05
-      scheme: grad_norm
-      update_every: 1000
+    init: {hidden: default, ls_use_bias: false, output: default}
+    loss_weights: {bc: 1.0, continuity: 0.0, ic: 100.0, residual: 1.0}
+    lra: {alpha: 0.1, enabled: false, epsilon: 1.0e-05, scheme: grad_norm, update_every: 1000}
     mu: 0.022
     new_norm_threshold: 0.2
     output_dim: 1
-    # Window/segment resume: each key may point at a SEGMENT folder holding
-    # window_{idx}_*.pt files (+ manifest). Per window, the LATEST stage
-    # with a file wins: experts file -> start at fine-tune; else root file
-    # -> start at phase 3; else train the window from scratch (soft miss).
-    # Current folder: phase3/window_0, root/window_{0,1} => window 0 jumps
-    # to fine-tune, window 1 to phase 3, window 2 runs the full flow.
-    pretrained_base_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-4-60-roots/root
-    pretrained_local_expert_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-4-60-roots/phase3
-    rwf:
-      enabled: false
-      mean: 1.0
-      std: 0.1
+    pretrained_base_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-4-60-roots_ic_100_tol14/root
+    pretrained_local_expert_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-4-60-roots_ic_100_tol14/phase3
+    rwf: {enabled: false, mean: 1.0, std: 0.1}
     spatial_dim: 1
     spatial_domain:
-    - - -1.0
-      - 1.0
-    temporal_domain:
-    - 0.0
-    - 1.0
+    - [-1.0, 1.0]
+    temporal_domain: [0.0, 1.0]
     time_marching:
+      debug_windows: [0]
       enabled: true
       freeze_previous_windows: true
+      last_window_checkpoint: null
       m_distribution: quadratic
       num_windows: 3
-      # DEBUG: run only these window indices (contiguous, e.g. [1] or
-      # [1, 2]); null = all windows. Skipped windows produce nothing; a
-      # partial run skips the combined model / full-domain rel-L2 stages.
-      debug_windows: null
-      # IC source when debug_windows starts at window k>0: a checkpoint of
-      # window k-1 whose prediction at t_start(k) becomes the IC. Accepts a
-      # root checkpoint (best_model_root.pt, base-only forward) OR a full
-      # AToE checkpoint (best_model_phase3/fine_tune.pt, soft-blend
-      # forward). E.g. roots_checkpoints/double_precision/
-      # kdv_no_resample-4-60-roots/root/window_0_best_model_root.pt
-      last_window_checkpoint: null
     tree_smoothness_threshold: 0.4
     wavelet_threshold: 0.0025
     window_smoothness_order: 3
     window_type: smoothstep
   ks:
-    adaptive_sampling:
-      adaptive_ratio: 0.5
-      enabled: false
-      phi: quadratic
-      phi_epsilon: 1.0
-      phi_power: 2.0
+    adaptive_sampling: {adaptive_ratio: 0.5, enabled: false, phi: quadratic, phi_epsilon: 1.0, phi_power: 2.0}
     alpha: 6.25
     beta: 0.390625
     causal_training:
       enabled: false
       min_weight_threshold: 0.99
       num_chunks: 32
-      tol_schedule:
-      - 0.01
-      - 0.1
-      - 1
+      tol_schedule: [0.01, 0.1, 1]
     expert_grad_clip_norm: null
-    fourier_features:
-      dim: 10
-      enabled: false
-      periodic: false
-      scale: 1.0
+    fourier_features: {dim: 10, enabled: false, periodic: false, scale: 1.0}
     gamma: 0.00152587890625
     grad_clip_norm: null
-    init:
-      hidden: default
-      ls_use_bias: false
-      output: default
-    loss_weights:
-      bc: 1.0
-      continuity: 0.0
-      ic: 1.0
-      residual: 1.0
-    lra:
-      alpha: 0.1
-      enabled: false
-      epsilon: 1.0e-05
-      scheme: grad_norm
-      update_every: 100
+    init: {hidden: default, ls_use_bias: false, output: default}
+    loss_weights: {bc: 1.0, continuity: 0.0, ic: 1.0, residual: 1.0}
+    lra: {alpha: 0.1, enabled: false, epsilon: 1.0e-05, scheme: grad_norm, update_every: 100}
     new_norm_threshold: 10.0
     output_dim: 1
     pretrained_base_checkpoint: null
     pretrained_local_expert_checkpoint: null
-    rwf:
-      enabled: false
-      mean: 1.0
-      std: 0.1
+    rwf: {enabled: false, mean: 1.0, std: 0.1}
     spatial_dim: 1
     spatial_domain:
-    - - 0.0
-      - 6.283185307179586
-    temporal_domain:
-    - 0.0
-    - 1.0
-    time_marching:
-      enabled: true
-      freeze_previous_windows: true
-      m_distribution: quadratic
-      num_windows: 5
-      # Same debug mechanism as kdv.time_marching (see comments there).
-      debug_windows: null
-      last_window_checkpoint: null
+    - [0.0, 6.283185307179586]
+    temporal_domain: [0.0, 1.0]
+    time_marching: {debug_windows: null, enabled: true, freeze_previous_windows: true, last_window_checkpoint: null,
+      m_distribution: quadratic, num_windows: 5}
     tree_smoothness_threshold: 0.3
     wavelet_threshold: 0.04
     window_smoothness_order: 4
     window_type: smoothstep
-  lbfgs:
-    history_size: 100
-    line_search: strong_wolfe
-    lr: 1.0
-    max_iter: 1
-    tolerance_change: 0.0
-    tolerance_grad: 0.0
+  lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 1.0, max_iter: 1, tolerance_change: 0.0, tolerance_grad: 0.0}
   lr: 0.001
   lr_decay_rate: 0.98
   lr_decay_steps: 1000
@@ -404,205 +207,76 @@ base_config:
   lr_warmup_steps: 0
   min_epochs: 1
   model: AToELeaves
-  # PHASE-3 ONLY: per-expert-group SSBroyden (one optimizer per interior
-  # expert + one for the periodic-boundary pair) instead of a single joint
-  # optimizer. Motivation (measured 2026-08-11): the split loss is block-
-  # separable, but the shared line search / Hessian / stopping froze the
-  # whole run with a healthy 6.7e-6 gradient on the laggard once the fast
-  # experts hit their float64 floor. Roughly runtime-neutral (per-group
-  # closures evaluate only their own rows).
   multi_optimizers: false
-  # Freeze-refresh: RETIRED for benchmarks (2026-08-11 A/B) — fresh Hk=I
-  # restarts insta-refroze 1700x at the stalled point; the wall is the line
-  # search's hard-coded 1e-9 parameter-step resolution, not stale curvature.
-  # Periodic resampling (sampling.resample_every_epochs) is the working
-  # counter to static-draw freezes.
-  refresh_2nd_order_optimizer: false
-  # Top-level keys govern PHASE 3: 10k Adam (fresh per-expert draws every
-  # epoch via the Adam cadence rule) -> SSBroyden on a static draw.
-  # Warmup extended 1k -> 10k for kdv: the interface derivative terms start
-  # ~9 orders above the residual (u_xx ~ 1e3 at packet-crossing faces);
-  # Adam's per-coordinate scaling is the one optimizer indifferent to that
-  # spread, and it was still descending steeply at the old 1k switch
-  # (6.4e6 -> 3.5e5); SSBroyden latched immediately after.
   optimizer_1: adam
   optimizer_2: ssbroyden
   optimizer_switch_epoch: 10000
-  # 10 evals x eval_every 1000 = 10k epochs without a 1% improvement.
-  # Bumped from 5 (2026-08-09): window_0 fine-tune best-stopped at epoch 4000
-  # then early-stopped at 9000 mid-recovery from a dip; window_1 phase3
-  # early-stopped at epoch 15000/50000 (only 30% of budget) while several
-  # experts were still improving. Applies to root/phase3 directly (no
-  # dedicated segment block) and to fine_tune's inherited default.
   patience_evals: 10
   patience_rel_delta: 0.01
   precision: float64
   print_every: 1000
   problem: kdv
-  profiling:
-    enabled: false
+  profiling: {enabled: false}
+  refresh_2nd_order_optimizer: false
   resume_from: null
-  sampling:
-    collar_data_ratio: 0.0
-    collar_margin: 1.0
-    eval_train_ratio: 0.25
-    min_points_per_expert: 1024
-    n_boundary_train: 256
-    n_initial_train: 256
-    n_residual_train: 20000
-    plot_samples_every: 1000
-    rad_pool_size: 100000
-    rad_pool_chunk: 5000
-    # NO periodic resampling (the 24-Jul regime): Adam warmups still redraw
-    # every epoch via the cadence rule; SSBroyden phases are static.
-    resample_every_epochs: 99999
-    sample_volume_ratio: 35
+  sampling: {collar_data_ratio: 0.0, collar_margin: 1.0, eval_train_ratio: 0.25, min_points_per_expert: 1024,
+    n_boundary_train: 256, n_initial_train: 256, n_residual_train: 20000, plot_samples_every: 1000, rad_pool_chunk: 5000,
+    rad_pool_size: 100000, resample_every_epochs: 99999, sample_volume_ratio: 35}
   save_every: 999999
   schrodinger:
-    adaptive_sampling:
-      adaptive_ratio: 0.5
-      enabled: false
-      phi: quadratic
-      phi_epsilon: 1.0
-      phi_power: 2.0
+    adaptive_sampling: {adaptive_ratio: 0.5, enabled: false, phi: quadratic, phi_epsilon: 1.0, phi_power: 2.0}
     causal_training:
       enabled: false
       min_weight_threshold: 0.99
       num_chunks: 32
-      tol_schedule:
-      - 0.01
-      - 0.1
-      - 1.0
+      tol_schedule: [0.01, 0.1, 1.0]
     expert_grad_clip_norm: null
-    fourier_features:
-      dim: 128
-      enabled: false
-      periodic: false
-      scale: 1.0
+    fourier_features: {dim: 128, enabled: false, periodic: false, scale: 1.0}
     grad_clip_norm: null
-    init:
-      hidden: default
-      ls_use_bias: false
-      output: default
-    loss_weights:
-      bc: 1.0
-      continuity: 0.0
-      ic: 1.0
-      residual: 1.0
-    lra:
-      alpha: 0.1
-      enabled: false
-      epsilon: 1.0e-05
-      scheme: grad_norm
-      update_every: 100
+    init: {hidden: default, ls_use_bias: false, output: default}
+    loss_weights: {bc: 1.0, continuity: 0.0, ic: 1.0, residual: 1.0}
+    lra: {alpha: 0.1, enabled: false, epsilon: 1.0e-05, scheme: grad_norm, update_every: 100}
     new_norm_threshold: 2.0
     output_dim: 2
     pretrained_base_checkpoint: null
     pretrained_local_expert_checkpoint: null
-    rwf:
-      enabled: false
-      mean: 1.0
-      std: 0.1
+    rwf: {enabled: false, mean: 1.0, std: 0.1}
     spatial_dim: 1
     spatial_domain:
-    - - -5.0
-      - 5.0
-    temporal_domain:
-    - 0.0
-    - 1.5707963267948966
-    time_marching:
-      enabled: false
-      freeze_previous_windows: true
-      m_distribution: quadratic
-      num_windows: 5
+    - [-5.0, 5.0]
+    temporal_domain: [0.0, 1.5707963267948966]
+    time_marching: {enabled: false, freeze_previous_windows: true, m_distribution: quadratic, num_windows: 5}
     tree_smoothness_threshold: 0.7
     wavelet_threshold: 0.1
     window_smoothness_order: 2
     window_type: smoothstep
   seed: 42
   soap:
-    betas:
-    - 0.95
-    - 0.95
+    betas: [0.95, 0.95]
     precondition_frequency: 10
     weight_decay: 0.0
-  ssbroyden:
-    lr: 1.0
-    tolerance_grad: 1.0e-10
-experiment_name: kdv_w0_resample500_vs_rad
+  ssbroyden: {lr: 1.0, tolerance_grad: 1.0e-10}
+experiment_name: kdv_w0_finetune_sigma_collar_vs_rad
 experiments:
-# TWO W0 RUNS, exact twins of the 052432 joint reference (experts 3x20,
-# 921 params, single joint SSBroyden, no refresh) except the SSBroyden
-# phase now REDRAWS its training set every 500 epochs. Run 1 draws
-# uniformly; run 2 draws with RAD (adaptive_sampling: residual^2-weighted
-# pool sampling, adaptive_ratio 0.3 -> 30% of the 20k redraw targeted,
-# 70% uniform). Adam warmup (epochs 1-2000) is untouched — it already
-# redraws every epoch — so both runs reproduce the reference through
-# epoch 2000.
-#
-# What to look for: the reference froze bit-identically at 31000 (loss
-# 2.5418e-12, rel-L2 1.146e-7). Success = no permanent freeze (any stall
-# is broken by the next redraw within <=500 epochs) and loss walking
-# below ~2.5e-12 toward the root-parity target ~1.7e-14 / rel-L2 ~1e-8.
-# Train loss will jump at each redraw — judge by rel-L2 (eval grid is
-# fixed), which is also what patience watches.
-- name: kdv_w0_experts_iface1_resample500
+- adaptive_pinn:
+    fine_tune: {collar_data_ratio: 0.3, sigma_fraction: 0.05}
+  name: kdv_w0_ft_sig005_collar03
   problem: kdv
-  # THE tested variable vs kdv_w012_experts_iface1_20260811_052432:
-  # sampling.resample_every_epochs 99999 -> 500 (uniform redraws during
-  # SSBroyden, the Urban et al. cadence). Everything else identical.
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  epochs: 42000
-  optimizer_switch_epoch: 2000
-  patience_evals: 5
-  sampling:
-    resample_every_epochs: 500
-  ssbroyden:
-    tolerance_grad: 1.0e-14
-  adaptive_pinn:
-    split_icbc:
-      max_interface_derivative_order: 1
-    fine_tune:
-      epochs: 0
+- adaptive_pinn:
+    fine_tune: {collar_data_ratio: 0.0, sigma_fraction: 0.05}
   kdv:
-    loss_weights:
-      ic: 100.0
-    pretrained_base_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-4-60-roots_ic_100_tol14/root
-    pretrained_local_expert_checkpoint: null
-    time_marching:
-      debug_windows: [0]
-
-- name: kdv_w0_experts_iface1_rad500
+    adaptive_sampling: {adaptive_ratio: 0.3, enabled: true, phi: quadratic}
+  name: kdv_w0_ft_sig005_rad03
   problem: kdv
-  # THE tested variable vs the run above: the 500-epoch redraws use RAD
-  # (kdv.adaptive_sampling.enabled true, ratio 0.3, phi quadratic =
-  # residual^2 weighting over the 100k candidate pool). The phase-3 floor
-  # is 97% e2-interior residual, so RAD concentrates the redraw there.
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  epochs: 42000
-  optimizer_switch_epoch: 2000
-  patience_evals: 5
-  sampling:
-    resample_every_epochs: 500
-  ssbroyden:
-    tolerance_grad: 1.0e-14
-  adaptive_pinn:
-    split_icbc:
-      max_interface_derivative_order: 1
-    fine_tune:
-      epochs: 0
+  sampling: {resample_every_epochs: 500}
+- adaptive_pinn:
+    fine_tune: {collar_data_ratio: 0.3, sigma_fraction: 0.1}
+  name: kdv_w0_ft_sig010_collar03
+  problem: kdv
+- adaptive_pinn:
+    fine_tune: {collar_data_ratio: 0.0, sigma_fraction: 0.1}
   kdv:
-    adaptive_sampling:
-      enabled: true
-      adaptive_ratio: 0.3
-      phi: quadratic
-    loss_weights:
-      ic: 100.0
-    pretrained_base_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-4-60-roots_ic_100_tol14/root
-    pretrained_local_expert_checkpoint: null
-    time_marching:
-      debug_windows: [0]
+    adaptive_sampling: {adaptive_ratio: 0.3, enabled: true, phi: quadratic}
+  name: kdv_w0_ft_sig010_rad03
+  problem: kdv
+  sampling: {resample_every_epochs: 500}
