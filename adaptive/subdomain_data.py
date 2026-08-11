@@ -166,6 +166,158 @@ def _sample_per_expert_direct(
     }
 
 
+def _sample_per_expert_localized_adaptive(
+    new_expert_indices: List[int],
+    regions,
+    pc: Dict,
+    spatial_dim: int,
+    output_dim: int,
+    n_res_total: int,
+    min_per_expert: int,
+    device: torch.device,
+    cached_residuals: list,
+    as_cfg: Dict,
+    epoch=None,
+) -> Dict[str, torch.Tensor]:
+    """Per-expert residual draw with a LOCALIZED adaptive share.
+
+    Each expert's budget n_e is identical to :func:`_sample_per_expert_direct`
+    (volume-proportional + min floor). Of it, round(adaptive_ratio * n_e)
+    points are drawn by particle-filter resampling from the expert's OWN
+    cached residuals (previous-epoch (x, t, r^2) from the split loss,
+    restricted to its region), with region-scaled Gaussian jitter clamped to
+    its box — the same phi machinery as the global adaptive sampler
+    (:func:`utils.dataset_gen._sample_adaptive_residual_points`), applied per
+    region. The remainder is uniform in the region. An expert with no cached
+    points in its region falls back to a fully uniform draw.
+    """
+    from utils.dataset_gen import _compute_phi_pdf
+
+    as_ratio = float(as_cfg.get('adaptive_ratio', 0.0) or 0.0)
+    phi_cfg = {
+        'phi': as_cfg.get('phi', 'quadratic'),
+        'phi_epsilon': as_cfg.get('phi_epsilon', 1.0),
+        'phi_power': as_cfg.get('phi_power', 2.0),
+    }
+
+    # Concatenate the cache once, on the training device.
+    x_c = torch.cat([r[0] for r in cached_residuals], dim=0).to(device)
+    t_c = torch.cat([r[1] for r in cached_residuals], dim=0).to(device)
+    r2_c = torch.cat([r[2] for r in cached_residuals], dim=0).to(device)
+    r2_c = r2_c.reshape(-1)
+
+    dom_lo = [pc['spatial_domain'][d][0] for d in range(spatial_dim)]
+    dom_hi = [pc['spatial_domain'][d][1] for d in range(spatial_dim)]
+    dom_lo.append(pc['temporal_domain'][0])
+    dom_hi.append(pc['temporal_domain'][1])
+    dom_vol = 1.0
+    for lo, hi in zip(dom_lo, dom_hi):
+        dom_vol *= max(float(hi) - float(lo), 1e-30)
+
+    dtype = torch.get_default_dtype()
+    xs, ts, gs, eids, ks, bc_fids = [], [], [], [], [], []
+    counts, floored, n_adapt_total, empty_cache = {}, 0, 0, 0
+
+    for eidx in new_expert_indices:
+        region = regions[eidx]
+        bl, bu = region.bounds_lower, region.bounds_upper
+
+        vol_e = 1.0
+        for d in range(spatial_dim + 1):
+            vol_e *= max(float(bu[d]) - float(bl[d]), 0.0)
+        n_prop = int(round(n_res_total * vol_e / dom_vol))
+        n_e = max(min_per_expert, n_prop)
+        if n_e > n_prop:
+            floored += 1
+        counts[eidx] = n_e
+        if n_e <= 0:
+            continue
+
+        # The expert's own slice of the residual cache.
+        m_mask = torch.ones(x_c.shape[0], dtype=torch.bool, device=device)
+        for d in range(spatial_dim):
+            m_mask &= (x_c[:, d] >= bl[d]) & (x_c[:, d] <= bu[d])
+        m_mask &= (t_c[:, 0] >= bl[spatial_dim]) & (t_c[:, 0] <= bu[spatial_dim])
+        m = int(m_mask.sum().item())
+
+        n_adapt = int(round(as_ratio * n_e)) if m > 0 else 0
+        n_adapt = min(n_adapt, n_e)
+        if m == 0:
+            empty_cache += 1
+
+        parts_x, parts_t = [], []
+        if n_adapt > 0:
+            x_m, t_m, r2_m = x_c[m_mask], t_c[m_mask], r2_c[m_mask]
+            probs = _compute_phi_pdf(torch.sqrt(r2_m + 1e-10), phi_cfg)
+            # Without replacement only when the local pool comfortably
+            # exceeds the draw (same rule as the global sampler).
+            _no_replace = m >= 4 * n_adapt
+            idx = torch.multinomial(probs, num_samples=n_adapt,
+                                    replacement=not _no_replace)
+            x_sel = x_m[idx].clone()
+            t_sel = t_m[idx].clone()
+            # Region-scaled jitter, clamped to the expert's box.
+            for d in range(spatial_dim):
+                rng = float(bu[d]) - float(bl[d])
+                noise_std = rng / (m ** 0.5)
+                x_sel[:, d] += torch.randn(n_adapt, device=device,
+                                           dtype=x_sel.dtype) * noise_std
+                x_sel[:, d] = torch.clamp(x_sel[:, d],
+                                          min=float(bl[d]), max=float(bu[d]))
+            t_rng = float(bu[spatial_dim]) - float(bl[spatial_dim])
+            t_noise = t_rng / (m ** 0.5)
+            t_sel += torch.randn(n_adapt, 1, device=device,
+                                 dtype=t_sel.dtype) * t_noise
+            t_sel = torch.clamp(t_sel, min=float(bl[spatial_dim]),
+                                max=float(bu[spatial_dim]))
+            parts_x.append(x_sel.to(dtype))
+            parts_t.append(t_sel.to(dtype))
+            n_adapt_total += n_adapt
+
+        n_uni = n_e - n_adapt
+        if n_uni > 0:
+            x_u = torch.empty(n_uni, spatial_dim, device=device, dtype=dtype)
+            for d in range(spatial_dim):
+                x_u[:, d].uniform_(float(bl[d]), float(bu[d]))
+            t_u = torch.empty(n_uni, 1, device=device, dtype=dtype)
+            t_u.uniform_(float(bl[spatial_dim]), float(bu[spatial_dim]))
+            parts_x.append(x_u)
+            parts_t.append(t_u)
+
+        x_e = torch.cat(parts_x, dim=0)
+        t_e = torch.cat(parts_t, dim=0)
+        xs.append(x_e)
+        ts.append(t_e)
+        gs.append(torch.zeros(n_e, output_dim, device=device))
+        eids.append(torch.full((n_e,), eidx, dtype=torch.long, device=device))
+        ks.append(torch.full((n_e,), KIND_RESIDUAL, dtype=torch.long,
+                             device=device))
+        bc_fids.append(torch.full((n_e,), -1, dtype=torch.long, device=device))
+
+    if epoch is None or epoch <= 1 or epoch % 1000 == 0:
+        _tot = sum(counts.values())
+        logger.info(
+            f"  [SubdomainData] LOCALIZED adaptive draw: {_tot} residual "
+            f"points over {len(counts)} experts ({n_adapt_total} adaptive at "
+            f"ratio {as_ratio}, {floored} at the {min_per_expert}-point "
+            f"floor, {empty_cache} with empty region cache -> uniform)")
+
+    if not xs:
+        return _empty(spatial_dim, output_dim, device)
+
+    n_pts = sum(x.shape[0] for x in xs)
+    return {
+        'x': torch.cat(xs, dim=0),
+        't': torch.cat(ts, dim=0),
+        'h_gt': torch.cat(gs, dim=0),
+        'expert_id': torch.cat(eids, dim=0),
+        'kind': torch.cat(ks, dim=0),
+        'bc_face_id': torch.cat(bc_fids, dim=0),
+        'cont_neighbor': torch.full((n_pts,), -1, dtype=torch.long, device=device),
+        'cont_dim': torch.full((n_pts,), -1, dtype=torch.long, device=device),
+    }
+
+
 def sample_subdomain_residuals(
     new_expert_indices: List[int],
     regions,
@@ -222,6 +374,20 @@ def sample_subdomain_residuals(
         return _sample_per_expert_direct(
             new_expert_indices, regions, pc, spatial_dim, output_dim,
             n_res_total, min_per_expert, device, epoch)
+
+    # ── LOCALIZED adaptive draw (phase-3 RAD) ──────────────────────────────
+    # Each expert keeps its OWN count n_e (volume share + floor, identical to
+    # the direct path) and draws adaptive_ratio of it from its OWN cached
+    # residuals, the rest uniform in its region. A global residual-weighted
+    # draw would migrate points toward the worst expert's region and reweight
+    # experts against each other; this keeps per-expert budgets fixed.
+    # Collar+adaptive together still use the global path below (phase 3 runs
+    # with collar_data_ratio 0, so this branch is the phase-3 RAD path).
+    if _adaptive_active and not _collar_active:
+        return _sample_per_expert_localized_adaptive(
+            new_expert_indices, regions, pc, spatial_dim, output_dim,
+            n_res_total, min_per_expert, device, cached_residuals,
+            _as_cfg, epoch)
 
     if cached_residuals:
         # Split-loss cache tensors live on CPU; the sampler mixes them with

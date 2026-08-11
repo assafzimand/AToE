@@ -207,10 +207,11 @@ def _train_segment(
     # residual sits in those collars, so the fine-tune's adaptive draw lands
     # there without being aimed.
     if segment_name == 'phase3' and adaptive_sampling_enabled:
-        adaptive_sampling_enabled = False
         logger.info(
-            "  [Sampling] phase3: adaptive sampling force-disabled for this "
-            "segment (uniform per-expert draw).")
+            "  [Sampling] phase3: adaptive sampling ENABLED (LOCALIZED: each "
+            "expert keeps its own point budget and draws its adaptive share "
+            "from its OWN cached residuals; redraws follow the resample "
+            "cadence instead of the static-draw default).")
     # ── Phase 3 under a full-batch optimizer trains on a STATIC draw ────────
     # Redrawing the per-expert interiors mid-segment turned phase 3 into a
     # moving-target problem the experts cannot converge on. Measured on the
@@ -225,7 +226,12 @@ def _train_segment(
     # per-redraw jolt is orders larger. Adam/SOAP keep their every-epoch
     # refresh (stochastic steps average over draws — the proven warmup
     # regime); only the deterministic full-batch phase goes static.
-    _phase3_static = (segment_name == 'phase3')
+    # Static remains the DEFAULT for phase 3 (the measured burgers failure
+    # above). adaptive_sampling.enabled=true opts phase 3 into the normal
+    # resample cadence, with the LOCALIZED per-expert adaptive redraws
+    # (see _sample_per_expert_localized_adaptive) instead of uniform ones.
+    _phase3_static = (segment_name == 'phase3'
+                      and not adaptive_sampling_enabled)
     if _phase3_static and resample_every > 0:
         logger.info(
             "  [Sampling] phase3: residual draw is STATIC under full-batch "
