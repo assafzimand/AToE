@@ -1,20 +1,24 @@
 # ==========================================================================
-# KDV ROOT CREATION (ic=100, tolerance_grad 1e-14): 2 runs, 3 windows
-# each, roots ONLY — no phase 3, no fine-tune, root-to-root IC chaining.
-# Run 1 = static draws (the proven regime); Run 2 = identical + RAD
-# (adaptive_ratio 0.3, resample every 2000) as a single-variable ablation.
+# KDV PER-WINDOW EXPERTS on the NEW tol14/ic100 ROOTS, interface order
+# capped at 1 (u + u_x only): 3 runs, one window each, phase 3 only.
 # ==========================================================================
 #
-# Both existing roots were killed mid-descent by SSBroyden's
-# tolerance_grad=1e-10 (bit-frozen tails: W0 root from epoch 35k at
-# rel-L2 2.795e-8; W1 root from 31k at 1.357e-6). This run regenerates
-# all 3 window roots with tolerance 1e-14, ic=100, 2k Adam + 40k
-# SSBroyden, patience 5. M_experts_num=0 => nothing spawns => the window
-# model stays base-only, so the next window's IC comes from the previous
-# ROOT directly. Expected: W1/W2 roots measurably better (W1 had 1.5
-# decades of headroom); W0 root ~unchanged (already at the gt-reference
-# floor, conv_rel_l2 ~4.8e-8). Output checkpoints/root/ folder is a
-# drop-in replacement for roots_checkpoints.
+# New roots (kdv_no_resample-4-60-roots_ic_100_tol14, full 42k, no freeze):
+#   W0 9.97e-9 | W1 9.40e-8 | W2 2.99e-7   (old: 2.8e-8 / 1.36e-6 / n.a.)
+#
+# Tested mechanism: split_icbc.max_interface_derivative_order = 1 — the
+# interface transmits value + u_x only (u_xx dropped). 4 conditions per
+# interior interface: over KdV's well-posed 3 by one (consistent-by-
+# construction), exactly KS's 4. Removes the worst-scaled interface term
+# (dxx init ~1e5 in W1 vs dx ~8e2, value ~1); with ic=100 the init loss
+# terms are roughly balanced with no normalization machinery. Periodic
+# pairing and the root/plain loss keep full order.
+#
+# Common recipe: 2k Adam + 40k SSBroyden (42000/2000), patience 5,
+# tolerance_grad 1e-14, ic=100, experts 3x20, M=20 quadratic (W0 M=2 /
+# W1 M=6 / W2 M=12), STATIC draws, NO fine-tune (ft.epochs 0). Each
+# window loads its own new root; W1/W2 take their IC from the previous
+# window's new root via last_window_checkpoint.
 #
 # All segments: float64, full batch, 20k residual + 256 IC/BC per window,
 # resample_every_epochs 99999 (Adam warmup redraws every epoch via the
@@ -89,6 +93,13 @@ base_config:
     max_experts: 150
     split_icbc:
       enabled: true
+      # Cap on the interface derivative-matching order. null = N-1 (the
+      # method default: KdV matches u,u_x,u_xx; KS adds u_xxx). 1 = value +
+      # u_x only: 4 conditions per interior interface, >= the 3 KdV needs
+      # and exactly the 4 KS needs, and it removes the worst-scaled term
+      # (interface_bc_dxx started at ~1e5 in W1 vs dx ~8e2, value ~1).
+      # Interface terms only; periodic pairing keeps full order.
+      max_interface_derivative_order: null
     tree_max_depth: 15
     tree_min_samples_leaf: 50
     variable_for_expert_size: norm
@@ -497,87 +508,93 @@ base_config:
   ssbroyden:
     lr: 1.0
     tolerance_grad: 1.0e-10
-experiment_name: kdv_roots_ic100_tol14
+experiment_name: kdv_w012_experts_iface1
 experiments:
-# ROOT CREATION, all 3 windows, NO phase 3 / NO fine-tune. Each window's
-# IC = the PREVIOUS window's ROOT (with M_experts_num 0 nothing spawns, so
-# the model's forward stays base-only — the root never retires and the
-# in-memory IC override chains root -> root -> root).
+# THREE PER-WINDOW EXPERT RUNS on the NEW tol14/ic100 roots (rel-L2:
+# W0 9.97e-9, W1 9.40e-8, W2 2.99e-7). Phase 3 only (no fine-tune), static
+# draws (no resampling), each window loads its own root and takes its IC
+# from the PREVIOUS window's root checkpoint.
 #
-# Purpose: regenerate the KdV roots WITHOUT the SSBroyden tolerance floor.
-# Both old roots were bit-frozen mid-descent by tolerance_grad=1e-10
-# (scimba: stop stepping when max|grad| <= tol): W0 root froze at epoch
-# 35k (loss 2.9e-15, rel-L2 2.795e-8 — already at the gt-reference floor,
-# conv_rel_l2 ~4.8e-8, so W0 may not measurably improve); W1 root froze at
-# 31k (loss 3.6e-13, rel-L2 1.357e-6 — REAL measurable headroom).
-# ic=100 also applies to the root loss (same loss_weights key).
+# THE tested mechanism: interface derivative matching capped at order 1
+# (split_icbc.max_interface_derivative_order: 1 -> transmit u and u_x
+# only, u_xx dropped). Condition count: 4 per interior interface — over
+# the 3 KdV needs by one (consistent), exactly the 4 KS needs — and it
+# removes the worst-scaled interface term (dxx started ~1e5 in W1 vs
+# dx ~8e2, value ~1); with ic=100 the init loss terms are roughly
+# balanced without any normalization machinery.
 #
-# Collected outputs: checkpoints/root/window_{0,1,2}_best_model_root.pt
-# (+ manifest) — drop-in replacement folder for roots_checkpoints.
-- name: kdv_roots_ic100_tol14
+# Common recipe: 2k Adam + 40k SSBroyden (42000/2000), patience 5,
+# tolerance_grad 1e-14, ic=100, experts 3x20, M=20 quadratic
+# (W0 M=2 / W1 M=6 / W2 M=12), static draws, no fine-tune.
+- name: kdv_w0_experts_iface1
   problem: kdv
   model: AToELeaves
   base_architecture: [2, 60, 60, 60, 60, 1]
   experts_architecture: [2, 20, 20, 20, 1]
+  epochs: 42000
+  optimizer_switch_epoch: 2000
   patience_evals: 5
-  # THE tolerance fix (global block; phase-agnostic). MUST stay > 0 —
-  # scimba asserts 0 < tolerance_grad.
   ssbroyden:
     tolerance_grad: 1.0e-14
   adaptive_pinn:
-    # Zero experts: M-term tree accepts nothing, "[Orchestrator] Zero
-    # experts spawned — finishing after root" — window model = pure root.
-    M_experts_num: 0
-    initial_train:
-      # 2k Adam + 40k SSBroyden; patience 5 is the stopper (the old roots
-      # froze at 31-35k under tol 1e-10; with 1e-14 they get headroom).
-      epochs: 42000
-      optimizer_switch_epoch: 2000
+    split_icbc:
+      max_interface_derivative_order: 1
     fine_tune:
       epochs: 0
   kdv:
     loss_weights:
       ic: 100.0
-    # Train roots from scratch — both resume keys must be null.
-    pretrained_base_checkpoint: null
+    pretrained_base_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-4-60-roots_ic_100_tol14/root
     pretrained_local_expert_checkpoint: null
     time_marching:
-      # equal so M=0 -> [0,0,0] ('linear' force-assigns 1 per window).
-      m_distribution: equal
-      debug_windows: null
-      last_window_checkpoint: null
+      debug_windows: [0]
 
-# RUN 2 — EXACT same roots recipe + RAD: residual-based adaptive redraws
-# (ratio 0.3 of each redraw drawn proportional to residual, rest uniform),
-# resample every 2000 epochs under SSBroyden (Adam's every-epoch redraws
-# become adaptive too). Single-variable ablation vs run 1: does adaptive
-# sampling buy the roots anything once the tolerance floor is gone?
-- name: kdv_roots_ic100_tol14_rad03
+- name: kdv_w1_experts_iface1
   problem: kdv
   model: AToELeaves
   base_architecture: [2, 60, 60, 60, 60, 1]
   experts_architecture: [2, 20, 20, 20, 1]
+  epochs: 42000
+  optimizer_switch_epoch: 2000
   patience_evals: 5
   ssbroyden:
     tolerance_grad: 1.0e-14
-  sampling:
-    resample_every_epochs: 2000
   adaptive_pinn:
-    M_experts_num: 0
-    initial_train:
-      epochs: 42000
-      optimizer_switch_epoch: 2000
+    split_icbc:
+      max_interface_derivative_order: 1
     fine_tune:
       epochs: 0
   kdv:
-    adaptive_sampling:
-      enabled: true
-      adaptive_ratio: 0.3
     loss_weights:
       ic: 100.0
-    pretrained_base_checkpoint: null
+    pretrained_base_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-4-60-roots_ic_100_tol14/root
     pretrained_local_expert_checkpoint: null
     time_marching:
-      m_distribution: equal
-      debug_windows: null
-      last_window_checkpoint: null
+      debug_windows: [1]
+      # IC = previous window's NEW root (9.97e-9).
+      last_window_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-4-60-roots_ic_100_tol14/root/window_0_best_model_root.pt
+
+- name: kdv_w2_experts_iface1
+  problem: kdv
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  epochs: 42000
+  optimizer_switch_epoch: 2000
+  patience_evals: 5
+  ssbroyden:
+    tolerance_grad: 1.0e-14
+  adaptive_pinn:
+    split_icbc:
+      max_interface_derivative_order: 1
+    fine_tune:
+      epochs: 0
+  kdv:
+    loss_weights:
+      ic: 100.0
+    pretrained_base_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-4-60-roots_ic_100_tol14/root
+    pretrained_local_expert_checkpoint: null
+    time_marching:
+      debug_windows: [2]
+      # IC = previous window's NEW root (9.40e-8).
+      last_window_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-4-60-roots_ic_100_tol14/root/window_1_best_model_root.pt

@@ -74,6 +74,17 @@ def build_split_loss(
     w_bc = loss_weights['bc']
     w_cont = loss_weights.get('continuity', 1.0)
 
+    # Optional cap on the interface derivative-matching order (see
+    # _compute_expert_loss). None = default N-1.
+    max_iface_order = (cfg.get('adaptive_pinn', {})
+                       .get('split_icbc', {}) or {}).get(
+                       'max_interface_derivative_order')
+    if max_iface_order is not None:
+        _full = pde_spatial_order(problem) - 1
+        logger.info(f"[SplitLoss] Interface derivative matching capped at "
+                    f"order {int(max_iface_order)} (default for {problem}: "
+                    f"{_full}); periodic pairing keeps full order.")
+
     iface_src = interface_model if interface_model is not None else getattr(
         model, 'base_model', None)
 
@@ -144,6 +155,7 @@ def build_split_loss(
                 device,
                 problem, iface_src,
                 residual_loss=residual_losses.get(eidx),
+                max_iface_order=max_iface_order,
             )
             total_loss = total_loss + comps['total']
             _record(per_expert_history, eidx, comps)
@@ -278,10 +290,22 @@ def _compute_expert_loss(
     w_res, w_ic, w_bc, is_periodic, device,
     problem, interface_model,
     residual_loss=None,
+    max_iface_order=None,
 ):
-    """Per-expert local loss (no PoU). Residual is supplied precomputed."""
+    """Per-expert local loss (no PoU). Residual is supplied precomputed.
+
+    ``max_iface_order`` caps the interface derivative-matching order (the
+    ``split_icbc.max_interface_derivative_order`` config key): None keeps the
+    default N-1 (all orders the PDE acts on); e.g. 1 transmits value + u_x
+    only. Condition counting: value+dx on both faces = 4 conditions, >= the
+    3 KdV needs (over-determined by one, consistent) and exactly the 4 KS
+    needs (the classical clamped-type set). Affects the interface terms
+    ONLY — the periodic BC pairing keeps its full order.
+    """
     z = torch.tensor(0.0, device=device)
     n_deriv = pde_spatial_order(problem) - 1
+    if max_iface_order is not None:
+        n_deriv = min(n_deriv, max(0, int(max_iface_order)))
     comps = {
         'residual': residual_loss if residual_loss is not None else z.clone(),
         'ic': z.clone(),
