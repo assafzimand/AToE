@@ -1,33 +1,35 @@
 # ==========================================================================
-# KDV W0 FREEZE-REFRESH A/B: joint vs multi-opt SSBroyden, both with
-# refresh_2nd_order_optimizer. 2 runs, window 0 only, phase 3 only.
+# KDV W0 RESAMPLING A/B: uniform redraw every 500 vs RAD every 500, both
+# under the single joint SSBroyden. 2 runs, window 0 only, phase 3 only.
 # ==========================================================================
 #
-# Twins of the two measured W0 runs (2026-08-11):
-#   joint ref  kdv_w012_experts_iface1_20260811_052432: best 1.146e-7 at
-#     31000, froze bit-identically 31000-36000 at loss 2.5418e-12
-#   multi-opt  kdv_w012_experts_iface1_multiopt_20260811_093335: e2 group
-#     froze bit-identically at 11000 (group loss 5.878e-11), stop 16000,
-#     composed 2.230e-6
-# Both freezes = scimba strong-Wolfe returning t=0 -> s=y=0 -> NaN Hessian
-# update silently skipped -> Hk never recovers (traced in scimba 1.3.4).
+# Motivation (measured 2026-08-11): every phase-3 stall is a DETERMINISTIC
+# freeze on a STATIC draw — scimba's strong-Wolfe returns t=0 once the
+# productive parameter step drops below its hard-coded 1e-9 resolution,
+# and on a fixed landscape the state then repeats bit-identically forever.
+# Optimizer-side fixes are exhausted: multi-opt made composed rel-L2 worse
+# (2.2e-6), Hk-refresh restarts insta-refroze 1700x at the same loss
+# (joint 5.08e-12, multi 1.58e-12). Loss terms/weights were audited and
+# are NOT the problem (floor is 97% interior residual; rel-L2 tracks
+# 0.07-0.19*sqrt(loss) for experts AND roots alike). Both flags stay OFF
+# from now on.
 #
-# THE tested mechanism: refresh_2nd_order_optimizer — 3 bit-identical
-# losses (per-epoch for the joint optimizer, per-group-step under
-# multi-opt) trigger a rebuild/reset of the frozen optimizer's curvature
-# state at the current weights (fresh Hk=I; the local A/B showed -26%
-# descent in 150 steps from a frozen point). Detection is per epoch,
-# far inside the 5x1000-epoch patience window.
+# THE tested mechanism: periodic redraw of the training set DURING the
+# SSBroyden phase — the recipe of the SSBroyden source paper (Urban,
+# Stefanou & Pons, JCP 2025: refresh every 500 iterations). Each redraw
+# perturbs the loss landscape, giving the line search real descent again
+# without touching optimizer state. Run 1 = uniform redraws; run 2 = RAD
+# (residual^2-weighted, ratio 0.3, Wu et al. CMAME 2023) — the floor is
+# 97% e2-interior residual, so RAD concentrates points exactly there.
 #
-# The pair answers jointness-vs-freshness: if refresh rescues multi-opt
-# past 2.2e-6, e2's early freeze was the whole story; if refreshed joint
-# beats refreshed multi-opt, jointness itself helps the laggard.
+# Reference to beat: joint static W0 = loss 2.5418e-12 / rel-L2 1.146e-7
+# (froze at 31000). Root parity target: loss ~1.7e-14 / rel-L2 ~1e-8.
 #
-# Common recipe (identical to the 052432 reference): experts 3x20 (921
-# params), 2k Adam + 40k SSBroyden (42000/2000), patience 5,
-# tolerance_grad 1e-14, iface order 1, ic=100, W0 M=2, static draws,
-# no fine-tune, root = tol14/ic100 (W0 9.97e-9). float64, full batch,
-# 20k residual + 256 IC/BC, resample 99999, eval_every 1000, seed 42.
+# Common recipe (identical to the 052432 reference otherwise): experts
+# 3x20 (921 params), 2k Adam + 40k SSBroyden (42000/2000), patience 5,
+# tolerance_grad 1e-14, iface order 1, ic=100, W0 M=2, no fine-tune,
+# root = tol14/ic100 (W0 9.97e-9). float64, full batch, 20k residual +
+# 256 IC/BC, eval_every 1000, seed 42.
 #
 # This is the DEFAULT plan: `python run_experiments.py` reads it as-is;
 # AWS_scripts/run_and_terminate.sh launches it and stops the box after.
@@ -410,12 +412,12 @@ base_config:
   # experts hit their float64 floor. Roughly runtime-neutral (per-group
   # closures evaluate only their own rows).
   multi_optimizers: false
-  # Freeze-refresh (2026-08-11): rebuild/reset a 2nd-order optimizer whose
-  # loss repeats bit-identically for 3 epochs (joint path) or 3 group steps
-  # (multi-opt path) — the scimba t=0 line-search freeze poisons Hk via a
-  # silently-skipped NaN update and never recovers on its own. Monitored
-  # every epoch, i.e. well inside the patience window (5 x eval_every 1000).
-  refresh_2nd_order_optimizer: true
+  # Freeze-refresh: RETIRED for benchmarks (2026-08-11 A/B) — fresh Hk=I
+  # restarts insta-refroze 1700x at the stalled point; the wall is the line
+  # search's hard-coded 1e-9 parameter-step resolution, not stale curvature.
+  # Periodic resampling (sampling.resample_every_epochs) is the working
+  # counter to static-draw freezes.
+  refresh_2nd_order_optimizer: false
   # Top-level keys govern PHASE 3: 10k Adam (fresh per-expert draws every
   # epoch via the Adam cadence rule) -> SSBroyden on a static draw.
   # Warmup extended 1k -> 10k for kdv: the interface derivative terms start
@@ -527,33 +529,36 @@ base_config:
   ssbroyden:
     lr: 1.0
     tolerance_grad: 1.0e-10
-experiment_name: kdv_w0_refresh_joint_vs_multiopt
+experiment_name: kdv_w0_resample500_vs_rad
 experiments:
 # TWO W0 RUNS, exact twins of the 052432 joint reference (experts 3x20,
-# 921 params) except: refresh_2nd_order_optimizer true (base) and, in run
-# 2 only, multi_optimizers true. Everything else byte-for-byte the
-# reference recipe — same root, same seed, same draws — so epochs 1-2000
-# must reproduce the reference bit-identically (proven env-invariant on
-# Colab A100 / torch 2.11).
+# 921 params, single joint SSBroyden, no refresh) except the SSBroyden
+# phase now REDRAWS its training set every 500 epochs. Run 1 draws
+# uniformly; run 2 draws with RAD (adaptive_sampling: residual^2-weighted
+# pool sampling, adaptive_ratio 0.3 -> 30% of the 20k redraw targeted,
+# 70% uniform). Adam warmup (epochs 1-2000) is untouched — it already
+# redraws every epoch — so both runs reproduce the reference through
+# epoch 2000.
 #
-# Expected refresh points (from the measured twins): joint ~31000 (froze
-# at loss 2.5418e-12, best 1.146e-7); multi-opt e2 group ~11000 (froze at
-# group loss 5.878e-11, composed 2.230e-6). Success = descent resumes
-# after [Refresh] lines; comparison of the two answers jointness-vs-
-# freshness for the laggard e2.
-
-- name: kdv_w0_experts_iface1_refresh_multiopt
+# What to look for: the reference froze bit-identically at 31000 (loss
+# 2.5418e-12, rel-L2 1.146e-7). Success = no permanent freeze (any stall
+# is broken by the next redraw within <=500 epochs) and loss walking
+# below ~2.5e-12 toward the root-parity target ~1.7e-14 / rel-L2 ~1e-8.
+# Train loss will jump at each redraw — judge by rel-L2 (eval grid is
+# fixed), which is also what patience watches.
+- name: kdv_w0_experts_iface1_resample500
   problem: kdv
-  # THE tested variable vs the run above: multi_optimizers true — per-
-  # group SSBroyden ({pair 0,1} + {e2}) with per-group freeze-refresh.
-  # Twin of the 093335 multi-opt run + refresh.
+  # THE tested variable vs kdv_w012_experts_iface1_20260811_052432:
+  # sampling.resample_every_epochs 99999 -> 500 (uniform redraws during
+  # SSBroyden, the Urban et al. cadence). Everything else identical.
   model: AToELeaves
   base_architecture: [2, 60, 60, 60, 60, 1]
   experts_architecture: [2, 20, 20, 20, 1]
   epochs: 42000
   optimizer_switch_epoch: 2000
   patience_evals: 5
-  multi_optimizers: true
+  sampling:
+    resample_every_epochs: 500
   ssbroyden:
     tolerance_grad: 1.0e-14
   adaptive_pinn:
@@ -562,6 +567,39 @@ experiments:
     fine_tune:
       epochs: 0
   kdv:
+    loss_weights:
+      ic: 100.0
+    pretrained_base_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-4-60-roots_ic_100_tol14/root
+    pretrained_local_expert_checkpoint: null
+    time_marching:
+      debug_windows: [0]
+
+- name: kdv_w0_experts_iface1_rad500
+  problem: kdv
+  # THE tested variable vs the run above: the 500-epoch redraws use RAD
+  # (kdv.adaptive_sampling.enabled true, ratio 0.3, phi quadratic =
+  # residual^2 weighting over the 100k candidate pool). The phase-3 floor
+  # is 97% e2-interior residual, so RAD concentrates the redraw there.
+  model: AToELeaves
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 20, 20, 20, 1]
+  epochs: 42000
+  optimizer_switch_epoch: 2000
+  patience_evals: 5
+  sampling:
+    resample_every_epochs: 500
+  ssbroyden:
+    tolerance_grad: 1.0e-14
+  adaptive_pinn:
+    split_icbc:
+      max_interface_derivative_order: 1
+    fine_tune:
+      epochs: 0
+  kdv:
+    adaptive_sampling:
+      enabled: true
+      adaptive_ratio: 0.3
+      phi: quadratic
     loss_weights:
       ic: 100.0
     pretrained_base_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-4-60-roots_ic_100_tol14/root
