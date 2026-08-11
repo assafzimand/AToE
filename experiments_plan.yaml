@@ -541,31 +541,6 @@ experiments:
 # group loss 5.878e-11, composed 2.230e-6). Success = descent resumes
 # after [Refresh] lines; comparison of the two answers jointness-vs-
 # freshness for the laggard e2.
-- name: kdv_w0_experts_iface1_refresh_joint
-  problem: kdv
-  # THE tested variable vs kdv_w012_experts_iface1_20260811_052432:
-  # refresh_2nd_order_optimizer true (from base). Single joint optimizer
-  # (multi_optimizers false in base), experts back at 3x20/921.
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  epochs: 42000
-  optimizer_switch_epoch: 2000
-  patience_evals: 5
-  ssbroyden:
-    tolerance_grad: 1.0e-14
-  adaptive_pinn:
-    split_icbc:
-      max_interface_derivative_order: 1
-    fine_tune:
-      epochs: 0
-  kdv:
-    loss_weights:
-      ic: 100.0
-    pretrained_base_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-4-60-roots_ic_100_tol14/root
-    pretrained_local_expert_checkpoint: null
-    time_marching:
-      debug_windows: [0]
 
 - name: kdv_w0_experts_iface1_refresh_multiopt
   problem: kdv
