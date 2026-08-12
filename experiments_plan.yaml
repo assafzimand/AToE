@@ -1,38 +1,26 @@
 # ==========================================================================
-# KDV W0 FINE-TUNE ABLATIONS 2 (AWS): around the sweep-1 winner
-# sig010_rad03_r500 = 5.554e-8 (from phase-3 experts at 1.146e-7; root
-# 9.97e-9; measurement floor ~4.85e-8 - gains below ~5e-8 measure
-# distance-to-reference only). W0 keeps the ablations comparable to
-# sweep 1; W1/W2 get separate PHASE-3 budget tests later (their phase 3
-# stopped mid-descent at 42k, so fine-tuning them now would conflate
-# knob effects with plain missing epochs).
+# KDV W1/W2 PHASE-3 BUDGET EXTENSION (Colab): exact twins of the 052432
+# benchmark runs except epochs 42000 -> 80000 (2k Adam + 78k SSBroyden).
+# Question: both windows hit the 42k budget MID-DESCENT (loss still
+# shrinking x0.83-0.84 per 1k epochs, decelerating from x0.71-0.74) -
+# where do they actually stop?
 #
-# 9 runs, window 0 only, FINE-TUNE ONLY (experts from the tol14 phase3
-# checkpoint; root and phase 3 skipped; W0 IC = true t=0 data).
-#   1     CONTROL: plain per-region fine-tune (no collar data, no RAD,
-#         static) - isolates fine-tune structure from the sampling knobs.
-#         W0's phase 3 FROZE (converged), so this asks: does per-region
-#         splitting alone unstick it?
-#   2-4   collar side (static): 0.5 @ sig 0.1, 0.5 @ sig 0.3, 0.3 @ sig 0.2
-#   5-7   single-variable moves off the sweep-1 winner: cadence 500->2000,
-#         RAD ratio 0.3->0.5, sigma 0.1->0.2
-#   8-9   combos if 5-7 trend well
-# The winner itself (sig 0.1, RAD 0.3, r500) is NOT rerun - sweep 1
-# already measured it. Trim from the tail if the box budget is tight;
-# expect ~20-30h total (sweep-1 pace: 2-3.5h/run).
+# Benchmark finals (42k):  W1 loss 8.859e-11 / rel-L2 1.177e-6
+#                          W2 loss 8.702e-10 / rel-L2 2.842e-6
+# Root-parity targets:     W1 loss 2.66e-13 / rel-L2 9.40e-8  (334x away)
+#                          W2 loss 2.46e-12 / rel-L2 2.99e-7  (354x away)
+# At the last-6k rate that is ~31-33k more epochs; the rate is decaying,
+# so 80k total may or may not reach parity - either outcome answers the
+# budget question. Patience 5 (eval 1000, >1%) stops a freeze/wall early;
+# late-phase improvement is ~8%/eval, well above the 1% bar.
+# Also watch: W1's laggards are the BOUNDARY PAIR e0/e1 (3.6/2.4e-11 vs
+# interior ~2e-12) - a different laggard pattern than W0's e2.
 #
-# W0 sweep-1 result (reference): sig005_collar03 1.257e-7 | sig005_rad03
-# 1.022e-7 | sig010_collar03 7.085e-8 | sig010_rad03_r500 5.554e-8.
-# Phase-3 resampling A/B: FAILED (uniform 1.87e-6, RAD 6.35e-6 vs static
-# 1.146e-7) - redraws only help from a converged start; phase 3 stays
-# static.
-#
-# Fine-tune recipe (base, unchanged): 40k PURE SSBroyden, lr 1.0,
-# tolerance_grad 1e-14, FIXED collar sigma (adaptive_collar_size false;
-# sigma_fraction sets the blend width, collar_data_ratio the collar share
-# of the draw), patience 10, float64. RAD = adaptive_sampling ratio over
-# the residual^2-weighted pool at each redraw. resample_every_epochs
-# 99999 (static) unless set.
+# Setup notes: per-run pretrained_local_expert_checkpoint: null clears
+# the base's phase3 pointer (else phase 3 would be SKIPPED); each window
+# loads its own tol14 root and takes its IC from the previous window's
+# root. Static draws, no RAD, no refresh, single joint optimizer,
+# fine_tune epochs 0. Cost estimate (A100 pace): W1 ~5.5h, W2 ~8h.
 # ==========================================================================
 base_config:
   activation: tanh
@@ -260,74 +248,35 @@ base_config:
     precondition_frequency: 10
     weight_decay: 0.0
   ssbroyden: {lr: 1.0, tolerance_grad: 1.0e-10}
-experiment_name: kdv_w0_ft_ablations2
+experiment_name: kdv_w12_experts_iface1_80k
 experiments:
 - adaptive_pinn:
-    fine_tune: {collar_data_ratio: 0.0, sigma_fraction: 0.1}
-  base_architecture: &id001 [2, 60, 60, 60, 60, 1]
-  experts_architecture: &id002 [2, 20, 20, 20, 1]
-  name: kdv_w0_ft_plain_sig010
-  problem: kdv
-- adaptive_pinn:
-    fine_tune: {collar_data_ratio: 0.5, sigma_fraction: 0.1}
-  base_architecture: *id001
-  experts_architecture: *id002
-  name: kdv_w0_ft_sig010_collar05
-  problem: kdv
-- adaptive_pinn:
-    fine_tune: {collar_data_ratio: 0.5, sigma_fraction: 0.3}
-  base_architecture: *id001
-  experts_architecture: *id002
-  name: kdv_w0_ft_sig030_collar05
-  problem: kdv
-- adaptive_pinn:
-    fine_tune: {collar_data_ratio: 0.3, sigma_fraction: 0.2}
-  base_architecture: *id001
-  experts_architecture: *id002
-  name: kdv_w0_ft_sig020_collar03
-  problem: kdv
-- adaptive_pinn:
-    fine_tune: {collar_data_ratio: 0.0, sigma_fraction: 0.1}
-  base_architecture: *id001
-  experts_architecture: *id002
+    fine_tune: {epochs: 0}
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  epochs: 80000
+  experts_architecture: [2, 20, 20, 20, 1]
   kdv:
-    adaptive_sampling: {adaptive_ratio: 0.3, enabled: true, phi: quadratic}
-  name: kdv_w0_ft_sig010_rad03_r2000
+    pretrained_local_expert_checkpoint: null
+    time_marching:
+      debug_windows: [1]
+      last_window_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-4-60-roots_ic_100_tol14/root/window_0_best_model_root.pt
+  name: kdv_w1_experts_iface1_80k
+  optimizer_switch_epoch: 2000
+  patience_evals: 5
   problem: kdv
-  sampling: {resample_every_epochs: 2000}
+  ssbroyden: {tolerance_grad: 1.0e-14}
 - adaptive_pinn:
-    fine_tune: {collar_data_ratio: 0.0, sigma_fraction: 0.1}
-  base_architecture: *id001
-  experts_architecture: *id002
+    fine_tune: {epochs: 0}
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  epochs: 80000
+  experts_architecture: [2, 20, 20, 20, 1]
   kdv:
-    adaptive_sampling: {adaptive_ratio: 0.5, enabled: true, phi: quadratic}
-  name: kdv_w0_ft_sig010_rad05_r500
+    pretrained_local_expert_checkpoint: null
+    time_marching:
+      debug_windows: [2]
+      last_window_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-4-60-roots_ic_100_tol14/root/window_1_best_model_root.pt
+  name: kdv_w2_experts_iface1_80k
+  optimizer_switch_epoch: 2000
+  patience_evals: 5
   problem: kdv
-  sampling: {resample_every_epochs: 500}
-- adaptive_pinn:
-    fine_tune: {collar_data_ratio: 0.0, sigma_fraction: 0.2}
-  base_architecture: *id001
-  experts_architecture: *id002
-  kdv:
-    adaptive_sampling: {adaptive_ratio: 0.3, enabled: true, phi: quadratic}
-  name: kdv_w0_ft_sig020_rad03_r500
-  problem: kdv
-  sampling: {resample_every_epochs: 500}
-- adaptive_pinn:
-    fine_tune: {collar_data_ratio: 0.0, sigma_fraction: 0.1}
-  base_architecture: *id001
-  experts_architecture: *id002
-  kdv:
-    adaptive_sampling: {adaptive_ratio: 0.5, enabled: true, phi: quadratic}
-  name: kdv_w0_ft_sig010_rad05_r2000
-  problem: kdv
-  sampling: {resample_every_epochs: 2000}
-- adaptive_pinn:
-    fine_tune: {collar_data_ratio: 0.0, sigma_fraction: 0.2}
-  base_architecture: *id001
-  experts_architecture: *id002
-  kdv:
-    adaptive_sampling: {adaptive_ratio: 0.5, enabled: true, phi: quadratic}
-  name: kdv_w0_ft_sig020_rad05_r2000
-  problem: kdv
-  sampling: {resample_every_epochs: 2000}
+  ssbroyden: {tolerance_grad: 1.0e-14}
