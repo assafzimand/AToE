@@ -336,47 +336,22 @@ def _compute_full_domain_rel_l2(
     combined_model: nn.Module,
     config: Dict,
     device: torch.device,
-    n_x: int = 256,
-    n_t: int = 200,
 ) -> float:
     """Compute rel-L2 of the combined model over the full temporal domain.
 
-    Uses a dense regular grid so the metric is independent of the training
-    dataset composition (per-window splits, IC overrides, etc.).
+    Scored on the solver's NATIVE solution grid (compute_native_grid_metrics)
+    — the same metric as the per-window training curves, just un-windowed.
+    Ground truth is never interpolated: off-node linear interpolation of the
+    reference adds an artificial error floor across steep fronts (measured
+    ~1.5e-3 on KdV's 512-point grid, swamping model errors of ~1e-7).
     """
-    import importlib
+    from trainer.utils import compute_native_grid_metrics
 
-    problem = config['problem']
-    pc = config[problem]
-    x_min, x_max = pc['spatial_domain'][0]
-    t_min, t_max = pc['temporal_domain']
-
-    x_vals = np.linspace(x_min, x_max, n_x)
-    t_vals = np.linspace(t_min, t_max, n_t)
-    X, T = np.meshgrid(x_vals, t_vals)
-    x_flat = X.flatten()
-    t_flat = T.flatten()
-
-    # Ground truth from solver (full-domain solve, cached)
-    solver_mod = importlib.import_module(f'solvers.{problem}_solver')
-    interp = solver_mod._get_interpolator(config)
-    gt = np.asarray(interp(x_flat, t_flat), dtype=np.float64)
-
-    # Model predictions — chunk to avoid OOM on large grids
-    precision = config.get('precision', 'float32')
-    dtype = torch.float64 if precision == 'float64' else torch.float32
-    combined_model.eval()
-    xt = torch.tensor(np.column_stack([x_flat, t_flat]), dtype=dtype, device=device)
-    chunk = 8192
-    preds = []
-    with torch.no_grad():
-        for i in range(0, len(xt), chunk):
-            preds.append(combined_model(xt[i:i + chunk])[:, 0])
-    pred = torch.cat(preds).cpu().numpy().astype(np.float64)
-
-    diff = pred - gt
-    rel_l2 = float(np.sqrt((diff ** 2).sum()) / (np.sqrt((gt ** 2).sum()) + 1e-10))
-    return rel_l2
+    metrics = compute_native_grid_metrics(combined_model, config, device)
+    if metrics is None:
+        raise RuntimeError(
+            "Solver native grid unavailable — cannot compute full-domain rel-L2")
+    return float(metrics['rel_l2'])
 
 
 def _plot_combined_loss_curves(
@@ -465,7 +440,8 @@ def _plot_combined_loss_curves(
 
     if final_rel_l2 is not None:
         ax.axhline(y=final_rel_l2, color='black', linestyle='--', linewidth=2,
-                   label=f'Full-domain Rel-L2: {final_rel_l2:.4e}', alpha=0.9)
+                   label=f'Full-domain Rel-L2 (grid): {final_rel_l2:.4e}',
+                   alpha=0.9)
 
     # Add window boundary markers
     for i, boundary in enumerate(window_boundaries[1:-1], start=1):

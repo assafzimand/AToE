@@ -20,6 +20,10 @@ from matplotlib.colors import LogNorm
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from utils.logging_config import get_logger
+
+logger = get_logger(__name__)
+
 
 # Maps problem name → solver module path and output-dimension labels.
 # Labels: list of strings, one per output dimension.
@@ -94,7 +98,8 @@ def plot_predictions_and_error_maps(
     """
     problem = config.get('problem', '')
     if problem not in _PROBLEM_META:
-        print(f"  [generic_viz] No metadata for problem '{problem}'. Skipping.")
+        logger.warning(f"  [generic_viz] No metadata for problem "
+                       f"'{problem}'. Skipping.")
         return
 
     solver_module_path, dim_labels = _PROBLEM_META[problem]
@@ -118,8 +123,9 @@ def plot_predictions_and_error_maps(
         gt_channels = _gt_channels_from_grid(h_sol, output_dim)
         n_t_eval, n_x_eval = len(t_grid), len(x_grid)
     except Exception as e:
-        print(f"  [generic_viz] Native solver grid unavailable ({e}); "
-              f"falling back to interpolator on a {n_x}x{n_t} grid.")
+        logger.warning(f"  [generic_viz] Native solver grid unavailable ({e}); "
+                       f"falling back to interpolator on a {n_x}x{n_t} grid — "
+                       f"rel-L2 will include GT interpolation error.")
 
     if gt_channels is None:
         x_min, x_max = problem_config['spatial_domain'][0]
@@ -212,6 +218,6 @@ def plot_predictions_and_error_maps(
     from utils.plot_io import save_png
     save_path = save_png(Path(save_dir) / filename, fig=fig)
     plt.close(fig)
-    print(f"  Predictions & error maps saved to {save_path} "
-          f"(rel-L2 = {rel_l2:.3e})")
+    logger.info(f"  Predictions & error maps saved to {save_path} "
+                f"(rel-L2 = {rel_l2:.3e})")
     return rel_l2
