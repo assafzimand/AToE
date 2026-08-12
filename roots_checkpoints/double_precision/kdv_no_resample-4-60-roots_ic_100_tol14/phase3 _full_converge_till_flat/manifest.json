@@ -1,0 +1,20 @@
+{
+  "problem": "kdv",
+  "temporal_domain": [
+    0.0,
+    1.0
+  ],
+  "num_windows": 3,
+  "m_distribution": "quadratic",
+  "global_M": 20,
+  "segment": "phase3",
+  "windows": [
+    {
+      "idx": 0,
+      "t_start": 0.0,
+      "t_end": 0.3333333333333333,
+      "M": 2,
+      "file": "window_0_best_model_phase3.pt"
+    }
+  ]
+}
