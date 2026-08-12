@@ -348,13 +348,20 @@ def _train_segment(
     evals_no_improve = 0
     # optimizer_1 is watched from the segment start; reset to switch_epoch at the switch.
     patience_start_epoch = segment_start_epoch
-    # ── freeze-refresh (refresh_2nd_order_optimizer) ──
+    # ── freeze monitor (freeze_stop_epochs / refresh_2nd_order_optimizer) ──
     # A full-batch 2nd-order optimizer whose strong-Wolfe line search returns
     # t=0 poisons its own curvature state (s=y=0 -> NaN Hessian update is
     # silently skipped) and then repeats bit-identically forever. Exact float
     # equality of consecutive epoch losses detects it; checked every epoch,
     # far more frequently than the rel-L2 patience (eval_every-based).
+    # freeze_stop_epochs: N>0 -> STOP the segment after N bit-identical
+    # epochs (frozen epochs are pure waste and ~2x slower: 25 rejected
+    # line-search evals per step; measured 2026-08-11-12).
+    # refresh_2nd_order_optimizer (retired 2026-08-11: restarts insta-
+    # refreeze at the wall) -> rebuild the optimizer instead; freeze-stop
+    # takes precedence when both are set.
     _refresh_2nd = bool(cfg.get('refresh_2nd_order_optimizer', False))
+    _freeze_stop_n = int(cfg.get('freeze_stop_epochs', 0) or 0)
     _refresh_hist = []
     _nan_detected = False
     _stopped_early = False
@@ -1068,17 +1075,37 @@ def _train_segment(
             _nan_detected = True
             break
 
-        # Freeze-refresh: rebuild a bricked 2nd-order optimizer at the current
-        # weights (fresh curvature state). The multi-opt wrapper monitors its
-        # groups itself — the summed loss keeps moving while a single group is
-        # frozen, so the epoch-level check would miss it.
-        if (_refresh_2nd and current_optimizer_name in ('LBFGS', 'SSBroyden')
-                and not hasattr(optimizer, 'opts')):
+        # Freeze monitor (see the init comment above): stop the segment on a
+        # deterministic line-search freeze (freeze_stop_epochs), or — retired
+        # fallback — rebuild the optimizer (refresh_2nd_order_optimizer).
+        # The multi-opt wrapper monitors its own groups for refresh, but the
+        # stop applies to it too: a bit-identical TOTAL means every group is
+        # frozen.
+        if ((_freeze_stop_n > 0 or _refresh_2nd)
+                and current_optimizer_name in ('LBFGS', 'SSBroyden')):
             _refresh_hist.append(train_loss)
-            if len(_refresh_hist) > 3:
+            _keep = max(_freeze_stop_n, 3)
+            if len(_refresh_hist) > _keep:
                 _refresh_hist.pop(0)
-            if (len(_refresh_hist) == 3
-                    and _refresh_hist[0] == _refresh_hist[1] == _refresh_hist[2]):
+            if (_freeze_stop_n > 0 and len(_refresh_hist) >= _freeze_stop_n
+                    and len(set(_refresh_hist[-_freeze_stop_n:])) == 1):
+                logger.info(
+                    f"\n  [FreezeStop] train loss bit-identical for "
+                    f"{_freeze_stop_n} epochs ({train_loss:.6e}) — "
+                    f"deterministic line-search freeze; stopping segment at "
+                    f"epoch {epoch} (rel_l2 best={best_rel_l2_pat:.6e}).")
+                metrics['plateau_events'].append({
+                    'epoch': epoch,
+                    'action': 'freeze_stop',
+                    'metric': 'train_loss',
+                })
+                _stopped_early = True
+                _stop_reason = 'freeze_stop'
+                break
+            if (_refresh_2nd and _freeze_stop_n == 0
+                    and not hasattr(optimizer, 'opts')
+                    and len(_refresh_hist) >= 3
+                    and len(set(_refresh_hist[-3:])) == 1):
                 logger.info(
                     f"  [Refresh] train loss bit-identical for 3 epochs "
                     f"({train_loss:.6e}) — rebuilding {current_optimizer_name} "

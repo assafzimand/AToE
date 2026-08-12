@@ -343,6 +343,10 @@ patience_rel_delta: 0.01
 precision: float64
 print_every: 1000
 problem: allen_cahn
+# N>0: stop the segment after N bit-identical epoch losses under a 2nd-order
+# optimizer (the deterministic line-search freeze) instead of waiting out the
+# rel-L2 patience. 0 = disabled. Takes precedence over refresh when both set.
+freeze_stop_epochs: 0
 refresh_2nd_order_optimizer: false
 resume_from: null
 sampling:
