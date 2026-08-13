@@ -1,12 +1,12 @@
 # ==========================================================================
-# KDV WINDOWED-TREE, FULL-DOMAIN EXPERTS (first real run of
-# only_for_tree_structure): single run. The time-marching windows shape
-# the TREE ONLY - 3 slices, M=10 quadratic -> [2, 3, 5] per slice, one
-# tree per slice fitted on the FULL-DOMAIN root's prediction, leaves
-# clipped to their slice and unioned - then ONE full-domain phase 3
-# trains all leaves jointly (no window loop, no freezing; slice-1/2
-# leaves take interface_ic from the frozen root at their t_lo; smoke-
-# verified 2026-08-13).
+# KDV FULL-DOMAIN EXPERTS, PLAIN TREE (no time marching at all): single
+# run. One M-term tree (M=8) fitted on the FULL-DOMAIN root's prediction
+# over the whole x-t domain - the standard single-tree flow, no window
+# slicing (the windowed-tree/quadratic_zero mechanism is implemented and
+# smoke-verified but deferred; reference layout: sweep M_8_e_0.0 = 11
+# leaves from ground truth). All leaves train jointly in ONE full-domain
+# phase 3; leaves whose region starts at interior t take interface_ic
+# from the frozen root at their t_lo (smoke-verified 2026-08-13).
 #
 # Base: the full-domain ic100/tol14 single root
 # (full_domain_single_root/best_model_root.pt). Phase 3 only (fine_tune
@@ -17,7 +17,7 @@
 # Reference points: windowed pipeline per-window (W0 root 9.97e-9 / W1
 # 9.40e-8 / W2 2.99e-7; benchmark experts 1.15e-7 / 1.18e-6 / 2.84e-6);
 # the full-domain root baseline is the loaded checkpoint's own rel-L2.
-# Measurement floor ~4.85e-8.
+# Measurement floor ~4.85e-8 (gt self-convergence).
 # ==========================================================================
 base_config:
   activation: tanh
@@ -247,10 +247,10 @@ base_config:
     precondition_frequency: 10
     weight_decay: 0.0
   ssbroyden: {lr: 1.0, tolerance_grad: 1.0e-10}
-experiment_name: kdv_wtree_fulldomain_M10
+experiment_name: kdv_experts_fulldomain_M8
 experiments:
 - adaptive_pinn:
-    M_experts_num: 10
+    M_experts_num: 8
     fine_tune: {epochs: 0}
     split_icbc: {max_interface_derivative_order: 1}
   base_architecture: [2, 60, 60, 60, 60, 1]
@@ -260,9 +260,8 @@ experiments:
     loss_weights: {ic: 100.0}
     pretrained_base_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-4-60-roots_ic_100_tol14/full_domain_single_root/best_model_root.pt
     pretrained_local_expert_checkpoint: null
-    time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null, m_distribution: quadratic,
-      num_windows: 3, only_for_tree_structure: true}
-  name: kdv_wtree_fulldomain_M10_q3
+    time_marching: {debug_windows: null, enabled: false, last_window_checkpoint: null}
+  name: kdv_experts_fulldomain_M8
   optimizer_switch_epoch: 2000
   patience_evals: 5
   problem: kdv

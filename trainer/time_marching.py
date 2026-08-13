@@ -89,9 +89,29 @@ def compute_m_per_window(global_M: int, num_windows: int, distribution: str) -> 
         for i in order[:leftover]:
             floors[i] += 1
         return [1 + f for f in floors]
-    
+
+    elif distribution in ('linear_zero', 'quadratic_zero'):
+        # ZERO-BASED variants: weights i^p (i = 0..n-1, p = 1 or 2), Hamilton
+        # over the FULL M, no per-window floor — window 0 always gets M=0.
+        # Semantics of an M=0 window: ONE expert spanning the whole window
+        # (no tree fit). Implemented for only_for_tree_structure mode (the
+        # orchestrator's windowed tree spawns the whole-slice expert); in
+        # REAL time marching an M=0 window would train root-only — use with
+        # care there.
+        power = 1 if distribution == 'linear_zero' else 2
+        weights = [i ** power for i in range(num_windows)]
+        total_weight = sum(weights)
+        raw = [global_M * w / total_weight for w in weights]
+        floors = [int(r) for r in raw]
+        leftover = global_M - sum(floors)
+        order = sorted(range(num_windows), key=lambda i: raw[i] - floors[i], reverse=True)
+        for i in order[:leftover]:
+            floors[i] += 1
+        return floors
+
     else:
-        raise ValueError(f"Unknown m_distribution: {distribution}. Use 'equal', 'linear', or 'quadratic'.")
+        raise ValueError(f"Unknown m_distribution: {distribution}. Use 'equal', "
+                         f"'linear', 'quadratic', 'linear_zero', or 'quadratic_zero'.")
 
 
 def compute_time_windows(

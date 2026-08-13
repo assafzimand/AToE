@@ -350,6 +350,10 @@ freeze_stop_epochs: 0
 # NOTE: <problem>.time_marching also accepts only_for_tree_structure (default
 # false): windows/M-distribution shape the TREE ONLY (per-time-slice trees on
 # the root's prediction, leaves unioned); training runs once, full domain.
+# m_distribution options: equal | linear | quadratic (each window gets >= 1)
+# and linear_zero | quadratic_zero (zero-based weights i^p, no floor: window
+# 0 always gets M=0 = ONE expert spanning the whole slice, no tree fit —
+# intended for only_for_tree_structure; in real marching M=0 = root-only).
 refresh_2nd_order_optimizer: false
 resume_from: null
 sampling:

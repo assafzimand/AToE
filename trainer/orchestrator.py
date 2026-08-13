@@ -699,11 +699,38 @@ def _build_tree_once(ctx: TrainingContext, retain_siblings: bool) -> Dict:
     t_col = X_eval.shape[1] - 1  # time is the last input column
     for k in range(num_windows):
         m_k = int(m_per_window[k])
-        if m_k <= 0:
-            continue
         lo, hi = float(edges[k]), float(edges[k + 1])
         smask = (X_eval[:, t_col] >= lo - 1e-12) & (X_eval[:, t_col] <= hi + 1e-12)
         n_slice = int(smask.sum())
+        if m_k <= 0:
+            # M=0 slice (the *_zero distributions): ONE expert spanning the
+            # whole slice — a synthetic accepted leaf, no tree fit. Spawning
+            # gives it the standard experts_architecture like any other leaf.
+            from adaptive.region_detector import TreeNodeInfo
+            sd = int(problem_cfg['spatial_dim'])
+            bl = [problem_cfg['spatial_domain'][d][0] for d in range(sd)] + [lo]
+            bu = [problem_cfg['spatial_domain'][d][1] for d in range(sd)] + [hi]
+            nid = (k + 1) * _ID_OFF + 1
+            node = TreeNodeInfo(
+                node_id=nid, tree_idx=0, is_leaf=True, n_samples=n_slice,
+                bounds_lower=bl, bounds_upper=bu,
+                prediction=np.zeros(1), parent_prediction=None,
+            )
+            logger.info(f"  [WindowedTree] slice {k}: t in [{lo:.4f}, {hi:.4f}], "
+                        f"M=0 -> single whole-slice expert "
+                        f"(bounds {bl} .. {bu}).")
+            merged_accepted.append((node, -1))
+            merged_children[nid] = -1
+            merged_parent[nid] = -1
+            merged_depth[nid] = 1
+            merged_diag.append({
+                'node_id': nid, 'parent_node_id': -1,
+                'wavelet_norm_squared': 0.0, 'n_samples': n_slice,
+                'is_leaf': True, 'bounds_lower': bl, 'bounds_upper': bu,
+                'tree_depth': 1,
+            })
+            total_nodes += 1
+            continue
         logger.info(f"  [WindowedTree] slice {k}: t in [{lo:.4f}, {hi:.4f}], "
                     f"{n_slice} grid points, selecting top M={m_k} "
                     f"(eps={epsilon_node_acceptance})...")
