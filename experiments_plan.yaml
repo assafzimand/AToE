@@ -1,19 +1,23 @@
 # ==========================================================================
-# KDV ROOT, FULL DOMAIN (no time marching): single run, base [2,60x4,1]
-# trained as ROOT ONLY (M_experts_num 0, no phase 3, no fine-tune) on the
-# whole t in [0,1] domain with the tol14/ic100 recipe: 2k Adam + SSBroyden,
-# loss_weights.ic=100, tolerance_grad 1e-14, static draws, float64,
-# 20k residual + 256 IC/BC, seed 42.
+# KDV WINDOWED-TREE, FULL-DOMAIN EXPERTS (first real run of
+# only_for_tree_structure): single run. The time-marching windows shape
+# the TREE ONLY - 3 slices, M=10 quadratic -> [2, 3, 5] per slice, one
+# tree per slice fitted on the FULL-DOMAIN root's prediction, leaves
+# clipped to their slice and unioned - then ONE full-domain phase 3
+# trains all leaves jointly (no window loop, no freezing; slice-1/2
+# leaves take interface_ic from the frozen root at their t_lo; smoke-
+# verified 2026-08-13).
 #
-# Budget 42000 (2k Adam + 40k SSBroyden), identical to the per-window
-# roots. Stop guards: patience 5 (eval 1000, >1% rel-L2) +
-# freeze_stop_epochs 5 (per-window roots froze at 37-39k; this run stops
-# within 5 epochs of its own freeze instead of idling).
+# Base: the full-domain ic100/tol14 single root
+# (full_domain_single_root/best_model_root.pt). Phase 3 only (fine_tune
+# epochs 0), 2k Adam + 40k SSBroyden (42000/2000), tolerance_grad 1e-14,
+# iface order 1, ic=100, static draws, float64, 20k residual + 256 IC/BC,
+# seed 42. Stop guards: patience 5 (eval 1000, >1%) + freeze_stop 5.
 #
-# Reference points: per-window tol14 roots W0 9.97e-9 / W1 9.40e-8 /
-# W2 2.99e-7 (composed windows); this run gives the single-net full-domain
-# baseline to compare the windowed pipeline against. Measurement floor
-# ~4.85e-8 (gt self-convergence).
+# Reference points: windowed pipeline per-window (W0 root 9.97e-9 / W1
+# 9.40e-8 / W2 2.99e-7; benchmark experts 1.15e-7 / 1.18e-6 / 2.84e-6);
+# the full-domain root baseline is the loaded checkpoint's own rel-L2.
+# Measurement floor ~4.85e-8.
 # ==========================================================================
 base_config:
   activation: tanh
@@ -243,20 +247,23 @@ base_config:
     precondition_frequency: 10
     weight_decay: 0.0
   ssbroyden: {lr: 1.0, tolerance_grad: 1.0e-10}
-experiment_name: kdv_root_fulldomain_ic100
+experiment_name: kdv_wtree_fulldomain_M10
 experiments:
 - adaptive_pinn:
-    M_experts_num: 0
+    M_experts_num: 10
     fine_tune: {epochs: 0}
-    initial_train: {epochs: 42000, optimizer_switch_epoch: 2000}
+    split_icbc: {max_interface_derivative_order: 1}
   base_architecture: [2, 60, 60, 60, 60, 1]
+  epochs: 42000
   experts_architecture: [2, 20, 20, 20, 1]
   kdv:
     loss_weights: {ic: 100.0}
-    pretrained_base_checkpoint: null
+    pretrained_base_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-4-60-roots_ic_100_tol14/full_domain_single_root/best_model_root.pt
     pretrained_local_expert_checkpoint: null
-    time_marching: {debug_windows: null, enabled: false, last_window_checkpoint: null}
-  name: kdv_root_fulldomain_ic100_tol14
+    time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null, m_distribution: quadratic,
+      num_windows: 3, only_for_tree_structure: true}
+  name: kdv_wtree_fulldomain_M10_q3
+  optimizer_switch_epoch: 2000
   patience_evals: 5
   problem: kdv
   ssbroyden: {tolerance_grad: 1.0e-14}
