@@ -208,9 +208,20 @@ def main():
         else:
             logger.info(f"  Training dataset found: {train_data_path}")
 
-        # Time-marching: separate models trained per temporal window
+        # Time-marching: separate models trained per temporal window.
+        # only_for_tree_structure: the window count / M distribution shape the
+        # TREE ONLY (per-time-slice trees, unioned; see orchestrator
+        # _build_tree_once) — training itself is a single full-domain run:
+        # no window loop, no freezing, no last_window_checkpoint.
         tm_cfg = config.get(problem, {}).get('time_marching', {})
-        use_time_marching = tm_cfg.get('enabled', False)
+        tree_only_tm = (tm_cfg.get('enabled', False)
+                        and tm_cfg.get('only_for_tree_structure', False))
+        use_time_marching = tm_cfg.get('enabled', False) and not tree_only_tm
+        if tree_only_tm:
+            logger.info("5. Time marching: only_for_tree_structure — windowed "
+                        "TREE on a single full-domain run "
+                        f"(windows={tm_cfg.get('num_windows')}, "
+                        f"m_distribution={tm_cfg.get('m_distribution')})")
 
         if use_time_marching:
             logger.info("5. Time marching mode enabled")

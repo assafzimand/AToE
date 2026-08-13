@@ -347,6 +347,9 @@ problem: allen_cahn
 # optimizer (the deterministic line-search freeze) instead of waiting out the
 # rel-L2 patience. 0 = disabled. Takes precedence over refresh when both set.
 freeze_stop_epochs: 0
+# NOTE: <problem>.time_marching also accepts only_for_tree_structure (default
+# false): windows/M-distribution shape the TREE ONLY (per-time-slice trees on
+# the root's prediction, leaves unioned); training runs once, full domain.
 refresh_2nd_order_optimizer: false
 resume_from: null
 sampling:

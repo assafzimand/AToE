@@ -40,14 +40,8 @@ from perfect_tree_examples import create_prefect_trees as cpt  # noqa: E402
 # uniform and leaves the yaml config untouched).
 SWEEPS = {
     'kdv': {
-        'M': [10, 15, 20],
-        'num_windows': [3, 4, 5],
-        'm_distribution': ['quadratic'],
-    },
-    'ks': {
-        'M': [10, 20, 30],
-        'num_windows': [5, 7, 10],
-        'm_distribution': ['quadratic'],
+        'M': [8, 10, 12, 15],
+        'eps': [0.0],
     },
 }
 
@@ -107,13 +101,17 @@ def _build_cfg(base_cfg, problem, M, num_windows, m_distribution, eps):
     cfg['adaptive_pinn']['M_experts_num'] = M
     if eps is not None:
         cfg['adaptive_pinn']['epsilon_node_acceptance'] = eps
+    tm_cfg = cfg[problem].setdefault('time_marching', {})
     if num_windows is not None or m_distribution is not None:
-        tm_cfg = cfg[problem].setdefault('time_marching', {})
         tm_cfg['enabled'] = True
         if num_windows is not None:
             tm_cfg['num_windows'] = num_windows
         if m_distribution is not None:
             tm_cfg['m_distribution'] = m_distribution
+    else:
+        # No window params swept -> run on the full domain even if the
+        # base yaml has time marching enabled.
+        tm_cfg['enabled'] = False
     return cfg
 
 

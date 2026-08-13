@@ -418,14 +418,17 @@ class BatchedIndicators:
             self._initialized = False
             return
         
-        # Stack all bounds into (K, D) tensors
+        # Stack all bounds into (K, D) tensors. float64 is required: float32
+        # would round non-representable bounds (e.g. a window edge at t=1/3
+        # rounds UP by ~1e-8), leaving points exactly on the edge outside
+        # every hard mask — the composed hard forward then returns 0 there.
         self.all_lower = torch.stack([
-            torch.tensor(r.bounds_lower, dtype=torch.float32, device=device)
+            torch.tensor(r.bounds_lower, dtype=torch.float64, device=device)
             for r in regions
         ])  # (K, D)
-        
+
         self.all_upper = torch.stack([
-            torch.tensor(r.bounds_upper, dtype=torch.float32, device=device)
+            torch.tensor(r.bounds_upper, dtype=torch.float64, device=device)
             for r in regions
         ])  # (K, D)
         
@@ -434,10 +437,8 @@ class BatchedIndicators:
             region_sizes = self.all_upper - self.all_lower
             fixed = (sigma_fraction * region_sizes).clamp(min=1e-6)  # (K, D)
             if delta_lo is not None and delta_hi is not None:
-                # Keep the incoming dtype: the bounds above are built as
-                # float32, and forcing the collars down to match would cost
-                # precision in a double-precision run. __call__ casts to the
-                # batch dtype anyway.
+                # Keep the incoming dtype; __call__ casts to the batch
+                # dtype anyway.
                 self.all_delta_lo = delta_lo.to(device=device).clamp(min=1e-6)
                 self.all_delta_hi = delta_hi.to(device=device).clamp(min=1e-6)
                 self.adaptive_collars = True
@@ -487,7 +488,7 @@ class BatchedIndicators:
         # Ensure bounds are on correct device and dtype
         # Each tensor is checked on its own: the collars may carry a
         # different dtype from the bounds (adaptive sizing runs in the
-        # default dtype, the bounds are built as float32).
+        # default dtype, the bounds are built as float64).
         if self.all_lower.device != device or self.all_lower.dtype != dtype:
             self.all_lower = self.all_lower.to(device=device, dtype=dtype)
             self.all_upper = self.all_upper.to(device=device, dtype=dtype)

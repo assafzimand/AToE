@@ -645,15 +645,130 @@ def _build_tree_once(ctx: TrainingContext, retain_siblings: bool) -> Dict:
     logger.info(f"\n[Tree] Computing M-term tree (retain_siblings={retain_siblings}) — "
           f"closure: {closure_desc}")
     epsilon_node_acceptance = adaptive_cfg.get('epsilon_node_acceptance', 0.0)
-    # tree_min_samples_leaf is a LITERAL minimum number of fit-grid samples
-    # per leaf (the tree is fit on the symmetric grid above) — no rescaling.
-    logger.info(f"  [M-term Tree] Fitting full tree (max_depth={region_detector.max_depth}, "
-          f"min_samples_leaf={region_detector.min_samples_leaf} of {fit_inputs.shape[0]} "
-          f"grid points), selecting top M={M} "
-          f"(eps={epsilon_node_acceptance})...")
+
+    # only_for_tree_structure: the time-marching windows shape the TREE ONLY —
+    # one tree per time slice, m_k leaves each (compute_m_per_window), unioned
+    # into a single full-domain layout; training stays one full-domain run.
+    tm = (problem_cfg or {}).get('time_marching', {}) or {}
+    windowed_tree = bool(tm.get('enabled')) and bool(tm.get('only_for_tree_structure'))
+
+    if not windowed_tree:
+        # tree_min_samples_leaf is a LITERAL minimum number of fit-grid samples
+        # per leaf (the tree is fit on the symmetric grid above) — no rescaling.
+        logger.info(f"  [M-term Tree] Fitting full tree (max_depth={region_detector.max_depth}, "
+              f"min_samples_leaf={region_detector.min_samples_leaf} of {fit_inputs.shape[0]} "
+              f"grid points), selecting top M={M} "
+              f"(eps={epsilon_node_acceptance})...")
+        part = _fit_tree_and_maps(ctx, X_eval, y_eval, M, retain_siblings,
+                                  epsilon_node_acceptance, id_offset=0)
+        logger.info(f"  [Tree] Accepted {len(part['accepted_nodes'])} node(s) of "
+              f"{part['node_count']} tree nodes.")
+        from types import SimpleNamespace
+        return {
+            'accepted_nodes': part['accepted_nodes'],
+            'tree': SimpleNamespace(node_count=part['node_count']),
+            'children_left': part['children_left'],
+            'parent_map': part['parent_map'],
+            'node_tree_depth': part['node_tree_depth'],
+            'prune_depth_stats': part['prune_depth_stats'],
+            'diag_nodes': part['diag_nodes'],
+        }
+
+    from trainer.time_marching import compute_m_per_window
+    num_windows = int(tm.get('num_windows', 1))
+    m_distribution = tm.get('m_distribution', 'equal')
+    m_per_window = compute_m_per_window(M, num_windows, m_distribution)
+    t_min, t_max = problem_cfg['temporal_domain']
+    edges = np.linspace(float(t_min), float(t_max), num_windows + 1)
+    logger.info(f"  [WindowedTree] only_for_tree_structure: {num_windows} time "
+                f"slices, M={M} distributed {m_distribution} -> {m_per_window}; "
+                f"one tree per slice on the full-domain root prediction, "
+                f"leaves unioned, single full-domain training.")
+
+    # Per-slice node ids are made globally unique by an offset per slice; the
+    # merged children/parent/depth maps are plain dicts (same [] access the
+    # consumers already use on the single-tree arrays).
+    _ID_OFF = 1_000_000
+    merged_accepted = []
+    merged_children: Dict[int, int] = {}
+    merged_parent: Dict[int, int] = {}
+    merged_depth: Dict[int, int] = {}
+    merged_prune_stats: Dict = {}
+    merged_diag = []
+    total_nodes = 0
+    t_col = X_eval.shape[1] - 1  # time is the last input column
+    for k in range(num_windows):
+        m_k = int(m_per_window[k])
+        if m_k <= 0:
+            continue
+        lo, hi = float(edges[k]), float(edges[k + 1])
+        smask = (X_eval[:, t_col] >= lo - 1e-12) & (X_eval[:, t_col] <= hi + 1e-12)
+        n_slice = int(smask.sum())
+        logger.info(f"  [WindowedTree] slice {k}: t in [{lo:.4f}, {hi:.4f}], "
+                    f"{n_slice} grid points, selecting top M={m_k} "
+                    f"(eps={epsilon_node_acceptance})...")
+        part = _fit_tree_and_maps(ctx, X_eval[smask], y_eval[smask], m_k,
+                                  retain_siblings, epsilon_node_acceptance,
+                                  id_offset=(k + 1) * _ID_OFF)
+        # Clip node boxes to the slice's t-range: sklearn tree boxes inherit
+        # the DOMAIN bounds and only refine at split cuts, so a node that
+        # never splits on t would span the full [t_min, t_max] — its region
+        # must live in its slice (this is what makes slice-1+ experts take
+        # interface_ic from the root at their t_lo instead of the true IC).
+        _t_dim = int(problem_cfg['spatial_dim'])
+        for _node, _ in part['accepted_nodes']:
+            _bl = list(_node.bounds_lower)
+            _bu = list(_node.bounds_upper)
+            _bl[_t_dim] = max(float(_bl[_t_dim]), lo)
+            _bu[_t_dim] = min(float(_bu[_t_dim]), hi)
+            _node.bounds_lower = _bl
+            _node.bounds_upper = _bu
+        for _dn in part['diag_nodes']:
+            _bl = list(_dn['bounds_lower'])
+            _bu = list(_dn['bounds_upper'])
+            _bl[_t_dim] = max(float(_bl[_t_dim]), lo)
+            _bu[_t_dim] = min(float(_bu[_t_dim]), hi)
+            _dn['bounds_lower'] = _bl
+            _dn['bounds_upper'] = _bu
+        logger.info(f"  [WindowedTree] slice {k}: accepted "
+                    f"{len(part['accepted_nodes'])} node(s) of "
+                    f"{part['node_count']} tree nodes "
+                    f"(boxes clipped to t in [{lo:.4f}, {hi:.4f}]).")
+        merged_accepted.extend(part['accepted_nodes'])
+        merged_children.update(part['children_left'])
+        merged_parent.update(part['parent_map'])
+        merged_depth.update(part['node_tree_depth'])
+        merged_prune_stats[f'w{k}'] = part['prune_depth_stats']
+        merged_diag.extend(part['diag_nodes'])
+        total_nodes += part['node_count']
+
+    logger.info(f"  [Tree] Union: {len(merged_accepted)} accepted node(s) "
+                f"across {num_windows} slices ({total_nodes} tree nodes).")
+    from types import SimpleNamespace
+    return {
+        'accepted_nodes': merged_accepted,
+        'tree': SimpleNamespace(node_count=total_nodes),
+        'children_left': merged_children,
+        'parent_map': merged_parent,
+        'node_tree_depth': merged_depth,
+        'prune_depth_stats': merged_prune_stats,
+        'diag_nodes': merged_diag,
+    }
+
+
+def _fit_tree_and_maps(ctx: TrainingContext, X, y, M: int,
+                       retain_siblings: bool, epsilon_node_acceptance: float,
+                       id_offset: int) -> Dict:
+    """Fit one M-term tree on (X, y) and return its maps, ids offset by
+    ``id_offset`` so per-slice trees can be unioned without collisions.
+
+    Must be consumed before the next fit: the tree and its wavelet norms are
+    read from ``ctx.region_detector``'s CURRENT state (each fit overwrites).
+    """
+    region_detector = ctx.region_detector
     accepted_nodes, prune_depth_stats = region_detector.fit_full_tree_and_prune(
-        X=X_eval, y=y_eval, M=M,
-        variable_for_node_accept=variable_for_node_accept,
+        X=X, y=y, M=M,
+        variable_for_node_accept=ctx.variable_for_node_accept,
         verbose=True, retain_siblings=retain_siblings,
         epsilon_node_acceptance=epsilon_node_acceptance,
     )
@@ -674,15 +789,45 @@ def _build_tree_once(ctx: TrainingContext, retain_siblings: bool) -> Dict:
                 node_tree_depth[child] = node_tree_depth[nid] + 1
                 _bfs.append(child)
 
-    logger.info(f"  [Tree] Accepted {len(accepted_nodes)} node(s) of "
-          f"{int(tree.node_count)} tree nodes.")
+    def _off(nid: int) -> int:
+        return nid + id_offset if nid >= 0 else -1
+
+    # Wavelet-norm diagnostics BEFORE the next fit overwrites the detector
+    # (accepted/spawned flags are stamped later in _record_tree_diagnostics).
+    diag_nodes = []
+    for nd in region_detector.compute_wavelet_norms():
+        if nd.node_id == 0:
+            continue
+        diag_nodes.append({
+            'node_id': _off(nd.node_id),
+            'parent_node_id': _off(parent_map.get(nd.node_id, -1)),
+            'wavelet_norm_squared': nd.wavelet_norm_squared,
+            'n_samples': nd.n_samples,
+            'is_leaf': bool(nd.is_leaf),
+            'bounds_lower': nd.bounds_lower,
+            'bounds_upper': nd.bounds_upper,
+            'tree_depth': node_tree_depth.get(nd.node_id, -1),
+        })
+
+    # Offset ids in place (TreeNodeInfo is a mutable dataclass; the nodes are
+    # freshly created by this fit).
+    accepted_off = []
+    for node, parent_tree_id in accepted_nodes:
+        node.node_id = _off(node.node_id)
+        accepted_off.append((node, _off(parent_tree_id)))
+
+    children_map = {
+        _off(nid): _off(int(children_left[nid]))
+        for nid in range(int(tree.node_count))
+    }
     return {
-        'accepted_nodes': accepted_nodes,
-        'tree': tree,
-        'children_left': children_left,
-        'parent_map': parent_map,
-        'node_tree_depth': node_tree_depth,
+        'accepted_nodes': accepted_off,
+        'children_left': children_map,
+        'parent_map': {_off(c): _off(p) for c, p in parent_map.items()},
+        'node_tree_depth': {_off(n): d for n, d in node_tree_depth.items()},
         'prune_depth_stats': prune_depth_stats,
+        'diag_nodes': diag_nodes,
+        'node_count': int(tree.node_count),
     }
 
 
@@ -719,31 +864,22 @@ def _record_tree_diagnostics(ctx: TrainingContext, build_result: Dict,
                              nodes_to_spawn) -> None:
     """Append a full per-node tree-diagnostics record to ``metrics``."""
     metrics = ctx.metrics
-    region_detector = ctx.region_detector
     epoch = ctx.epoch
     accepted_nodes = build_result['accepted_nodes']
     tree = build_result['tree']
-    parent_map = build_result['parent_map']
-    node_tree_depth = build_result['node_tree_depth']
     prune_depth_stats = build_result['prune_depth_stats']
 
     accepted_ids = {n.node_id for n, _ in accepted_nodes}
     spawned_ids = {n.node_id for n, _ in nodes_to_spawn}
+    # diag_nodes were collected at fit time (per slice under the windowed
+    # tree, where the detector state is overwritten slice by slice); the
+    # accepted/spawned flags are only known now.
     tree_diag_nodes = []
-    for nd in region_detector.compute_wavelet_norms():
-        if nd.node_id == 0:
-            continue
+    for nd in build_result['diag_nodes']:
         tree_diag_nodes.append({
-            'node_id': nd.node_id,
-            'parent_node_id': parent_map.get(nd.node_id, -1),
-            'wavelet_norm_squared': nd.wavelet_norm_squared,
-            'n_samples': nd.n_samples,
-            'is_leaf': bool(nd.is_leaf),
-            'bounds_lower': nd.bounds_lower,
-            'bounds_upper': nd.bounds_upper,
-            'accepted': bool(nd.node_id in accepted_ids),
-            'spawned_as_expert': bool(nd.node_id in spawned_ids),
-            'tree_depth': node_tree_depth.get(nd.node_id, -1),
+            **nd,
+            'accepted': bool(nd['node_id'] in accepted_ids),
+            'spawned_as_expert': bool(nd['node_id'] in spawned_ids),
         })
     metrics.setdefault('spawning_diagnostics', []).append({
         'epoch': epoch,
