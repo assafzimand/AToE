@@ -40,7 +40,9 @@ from perfect_tree_examples import create_prefect_trees as cpt  # noqa: E402
 # uniform and leaves the yaml config untouched).
 SWEEPS = {
     'kdv': {
-        'M': [8, 10, 12, 15],
+        'M': [20, 25, 30],
+        'num_windows': [5],
+        'm_distribution': ['linear', 'quadratic'],
         'eps': [0.0],
     },
 }

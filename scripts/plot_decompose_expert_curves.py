@@ -47,6 +47,11 @@ from adaptive.indicators import RegionDescriptor
 from adaptive.subdomain_data import build_subdomain_static
 
 
+TICK_SIZE = 14
+LABEL_SIZE = 17
+LEGEND_SIZE = 13
+CBAR_TICK_SIZE = 13
+
 _TERM_COLORS = {
     'residual': '#e74c3c', 'ic': '#3498db', 'interface_ic': '#9b59b6',
     'interface_bc': '#f39c12', 'interface_bc_dx': '#d68910',
@@ -128,17 +133,20 @@ def build_icbc_samples(cfg, regions, leaf_indices, seed=0):
 
 def plot_expert_figure(pde, seg, idx, leaf_indices, bounds_lower, bounds_upper,
                        x_grid, t_grid, gt_img, icbc_for_expert, loss_terms,
-                       final_rel_l2, out_dir):
+                       final_rel_l2, epoch_range, out_dir):
     extent = [x_grid.min(), x_grid.max(), t_grid.min(), t_grid.max()]
     my_lo = bounds_lower[leaf_indices.index(idx)]
     my_hi = bounds_upper[leaf_indices.index(idx)]
 
-    fig, (ax_reg, ax_loss) = plt.subplots(1, 2, figsize=(13, 5.5))
+    fig, (ax_reg, ax_loss) = plt.subplots(1, 2, figsize=(16, 6.5))
 
     # ── Left: region on GT + interface samples ──
     im = ax_reg.imshow(gt_img, origin='lower', aspect='auto', extent=extent,
                        cmap='viridis', alpha=0.85, zorder=0)
-    plt.colorbar(im, ax=ax_reg, fraction=0.046, pad=0.04)
+    cbar = plt.colorbar(im, ax=ax_reg, fraction=0.046, pad=0.04)
+    cbar.ax.tick_params(labelsize=CBAR_TICK_SIZE)
+    for lbl in cbar.ax.get_yticklabels():
+        lbl.set_fontweight('bold')
     for other_idx, lo, hi in zip(leaf_indices, bounds_lower, bounds_upper):
         is_mine = (other_idx == idx)
         ax_reg.add_patch(patches.Rectangle(
@@ -158,13 +166,22 @@ def plot_expert_figure(pde, seg, idx, leaf_indices, bounds_lower, bounds_upper,
                     my_hi[0] + pad * xr + 0.15 * (extent[1] - extent[0]))
     ax_reg.set_ylim(max(extent[2], my_lo[1] - pad * tr - 0.15 * (extent[3] - extent[2])),
                     min(extent[3], my_hi[1] + pad * tr + 0.15 * (extent[3] - extent[2])))
-    ax_reg.set_xlabel('x', fontsize=12)
-    ax_reg.set_ylabel('t', fontsize=12)
-    ax_reg.tick_params(labelsize=10)
+    ax_reg.set_xlabel('x', fontsize=LABEL_SIZE, fontweight='bold')
+    ax_reg.set_ylabel('t', fontsize=LABEL_SIZE, fontweight='bold')
+    ax_reg.tick_params(labelsize=TICK_SIZE)
+    for lbl in ax_reg.get_xticklabels() + ax_reg.get_yticklabels():
+        lbl.set_fontweight('bold')
     if icbc_for_expert:
-        ax_reg.legend(fontsize=9, loc='upper right', framealpha=0.9)
+        ax_reg.legend(fontsize=LEGEND_SIZE, loc='upper right', framealpha=0.9,
+                     markerscale=1.8)
 
     # ── Right: term-wise loss curves ──
+    # loss_terms is recorded once per closure CALL, not once per epoch --
+    # SSBroyden's line search evaluates the loss multiple times per epoch
+    # with no per-call epoch tag stored, so entry count > epoch count (seen
+    # ~2.5x for these runs). Rescaled linearly across the segment's real
+    # epoch span so the x-axis reads in epochs, not raw call count.
+    start_epoch, end_epoch = epoch_range
     any_plotted = False
     for term, values in loss_terms.items():
         if not values:
@@ -173,17 +190,19 @@ def plot_expert_figure(pde, seg, idx, leaf_indices, bounds_lower, bounds_upper,
         v = np.where(v > 0, v, np.nan)
         if not np.isfinite(v).any():
             continue
-        ax_loss.plot(np.arange(1, len(v) + 1), v,
-                    color=_TERM_COLORS.get(term, 'gray'), label=term,
+        x = np.linspace(start_epoch, end_epoch, len(v))
+        ax_loss.plot(x, v, color=_TERM_COLORS.get(term, 'gray'), label=term,
                     linewidth=1.3, alpha=0.85)
         any_plotted = True
     if any_plotted:
         ax_loss.set_yscale('log')
-        ax_loss.legend(fontsize=9)
-    ax_loss.set_xlabel('Training step (segment-local)', fontsize=12)
-    ax_loss.set_ylabel('Loss term (log)', fontsize=12)
+        ax_loss.legend(fontsize=LEGEND_SIZE, framealpha=0.9, ncol=2 if len(loss_terms) > 6 else 1)
+    ax_loss.set_xlabel('Epoch', fontsize=LABEL_SIZE, fontweight='bold')
+    ax_loss.set_ylabel('Loss term (log)', fontsize=LABEL_SIZE, fontweight='bold')
     ax_loss.grid(True, alpha=0.3)
-    ax_loss.tick_params(labelsize=10)
+    ax_loss.tick_params(labelsize=TICK_SIZE)
+    for lbl in ax_loss.get_xticklabels() + ax_loss.get_yticklabels():
+        lbl.set_fontweight('bold')
 
     plt.tight_layout()
     stat = f'expert_E{idx}_{pde}_{seg}'
@@ -224,7 +243,15 @@ def main():
     if not sel:
         print(f"Warning: no split_expert_losses['{seg}'] -- loss-term panels will be empty.")
 
-    print(f"PDE: {pde}  segment: {seg}  experts: {len(leaf_indices)}")
+    seg_event = next((e for e in metrics.get('segment_events', []) if e['segment'] == seg), None)
+    rec_event = next((e for e in metrics.get('segment_reconcile_events', []) if e['segment'] == seg), None)
+    if seg_event is None or rec_event is None:
+        raise SystemExit(f"No segment_events/segment_reconcile_events for segment '{seg}'")
+    # Segment-relative, starting at 0 (not the run's absolute epoch number).
+    epoch_range = (0, rec_event['end_epoch'] - seg_event['start_epoch'])
+
+    print(f"PDE: {pde}  segment: {seg}  experts: {len(leaf_indices)}  "
+          f"epochs: 0-{epoch_range[1]} (absolute {seg_event['start_epoch']}-{rec_event['end_epoch']})")
     x_grid, t_grid, h_sol = native_grid(cfg)
     gt_img = np.abs(h_sol) if np.iscomplexobj(h_sol) else h_sol
 
@@ -240,7 +267,7 @@ def main():
         out_path = plot_expert_figure(
             pde, seg, idx, leaf_indices, bounds_lower, bounds_upper,
             x_grid, t_grid, gt_img, icbc.get(idx, {}),
-            sel.get(str(idx), {}), final_rel_l2, args.out_dir)
+            sel.get(str(idx), {}), final_rel_l2, epoch_range, args.out_dir)
         print(f"  saved {out_path.name}")
 
 

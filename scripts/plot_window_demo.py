@@ -13,6 +13,26 @@ import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 
+TICK_SIZE = 14
+LABEL_SIZE = 17
+CBAR_TICK_SIZE = 13
+
+
+def _style_axes(ax):
+    ax.tick_params(axis='both', labelsize=TICK_SIZE)
+    for lbl in ax.get_xticklabels() + ax.get_yticklabels():
+        lbl.set_fontweight('bold')
+    ax.xaxis.label.set_fontsize(LABEL_SIZE)
+    ax.xaxis.label.set_fontweight('bold')
+    ax.yaxis.label.set_fontsize(LABEL_SIZE)
+    ax.yaxis.label.set_fontweight('bold')
+
+
+def _style_colorbar(cbar):
+    cbar.ax.tick_params(labelsize=CBAR_TICK_SIZE)
+    for lbl in cbar.ax.get_yticklabels():
+        lbl.set_fontweight('bold')
+
 
 # -----------------------------------------------------------------------------
 # Smoothstep polynomials S_N(t), t in [0,1], C^N continuity
@@ -168,7 +188,9 @@ def plot_window_demo(output_dir=None):
         ax.axvline(outer_end, color='red', linestyle=':', linewidth=0.8, alpha=0.7)
         ax.axhline(outer_start, color='red', linestyle=':', linewidth=0.8, alpha=0.7)
         ax.axhline(outer_end, color='red', linestyle=':', linewidth=0.8, alpha=0.7)
-        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        _style_colorbar(cbar)
+        _style_axes(ax)
 
     plt.tight_layout()
     heatmap_path = output_dir / "window_2d_heatmaps.png"
@@ -203,6 +225,7 @@ def plot_window_demo(output_dir=None):
     ax.set_xlim(0, 1)
     ax.set_ylim(-0.05, 1.1)
     ax.grid(True, alpha=0.3)
+    _style_axes(ax)
     
     slice_path = output_dir / "window_1d_slice.png"
     plt.savefig(slice_path, dpi=150, bbox_inches='tight')

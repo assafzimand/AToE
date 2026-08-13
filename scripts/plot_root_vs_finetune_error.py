@@ -53,6 +53,30 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils.plot_io import save_png
 from models.atoe_leaves import AToELeaves
 
+TICK_SIZE = 14
+LABEL_SIZE = 17
+CBAR_TICK_SIZE = 13
+CBAR_LABEL_SIZE = 15
+
+
+def _style_axes(ax):
+    ax.tick_params(axis='both', labelsize=TICK_SIZE)
+    for lbl in ax.get_xticklabels() + ax.get_yticklabels():
+        lbl.set_fontweight('bold')
+    ax.xaxis.label.set_fontsize(LABEL_SIZE)
+    ax.xaxis.label.set_fontweight('bold')
+    ax.yaxis.label.set_fontsize(LABEL_SIZE)
+    ax.yaxis.label.set_fontweight('bold')
+
+
+def _style_colorbar(cbar):
+    cbar.ax.tick_params(labelsize=CBAR_TICK_SIZE)
+    for lbl in cbar.ax.get_yticklabels():
+        lbl.set_fontweight('bold')
+    if cbar.ax.yaxis.label.get_text():
+        cbar.ax.yaxis.label.set_fontsize(CBAR_LABEL_SIZE)
+        cbar.ax.yaxis.label.set_fontweight('bold')
+
 
 _DIM_LABELS = {
     'allen_cahn': ['u'], 'burgers1d': ['u'], 'kdv': ['u'], 'ks': ['u'],
@@ -108,10 +132,11 @@ def save_ground_truth(pde, cfg, x_grid, t_grid, gt_channels, labels, out_dir):
         X, T = np.meshgrid(x_grid, t_grid)
         im = ax.pcolormesh(X, T, gt, shading='auto', cmap='RdBu_r',
                            vmin=-vmax, vmax=vmax)
-        plt.colorbar(im, ax=ax, pad=0.02)
-        ax.set_xlabel('x', fontsize=13)
-        ax.set_ylabel('t', fontsize=13)
-        ax.tick_params(labelsize=11)
+        cbar = plt.colorbar(im, ax=ax, pad=0.02)
+        _style_colorbar(cbar)
+        ax.set_xlabel('x')
+        ax.set_ylabel('t')
+        _style_axes(ax)
         plt.tight_layout()
         suffix = f'_{label}' if len(labels) > 1 else ''
         out_path = out_dir / f'ground_truth_{pde}{suffix}.png'
@@ -128,10 +153,11 @@ def save_error_map(pde, segment, label, n_labels, x_grid, t_grid, err,
     fig, ax = plt.subplots(figsize=(6, 5))
     im = ax.pcolormesh(X, T, np.maximum(err, vmin), shading='auto', cmap='Reds',
                        norm=LogNorm(vmin=vmin, vmax=vmax))
-    plt.colorbar(im, ax=ax, pad=0.02, label='|error| (log)')
-    ax.set_xlabel('x', fontsize=13)
-    ax.set_ylabel('t', fontsize=13)
-    ax.tick_params(labelsize=11)
+    cbar = plt.colorbar(im, ax=ax, pad=0.02, label='|error| (log)')
+    _style_colorbar(cbar)
+    ax.set_xlabel('x')
+    ax.set_ylabel('t')
+    _style_axes(ax)
     plt.tight_layout()
     suffix = f'_{label}' if n_labels > 1 else ''
     out_path = out_dir / f'error_{pde}_{segment}{suffix}_ep{epoch}_relL2_{rel_l2:.2e}.png'

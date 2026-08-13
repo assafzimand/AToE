@@ -1,23 +1,33 @@
 # ==========================================================================
-# KDV FULL-DOMAIN EXPERTS, PLAIN TREE (no time marching at all): single
-# run. One M-term tree (M=8) fitted on the FULL-DOMAIN root's prediction
-# over the whole x-t domain - the standard single-tree flow, no window
-# slicing (the windowed-tree/quadratic_zero mechanism is implemented and
-# smoke-verified but deferred; reference layout: sweep M_8_e_0.0 = 11
-# leaves from ground truth). All leaves train jointly in ONE full-domain
-# phase 3; leaves whose region starts at interior t take interface_ic
-# from the frozen root at their t_lo (smoke-verified 2026-08-13).
+# KDV FULL-DOMAIN M=20, PLAIN vs WINDOWED-TREE: 2 runs, each phase 3
+# (2k Adam + 40k SSBroyden) -> chained FINE-TUNE (40k pure SSBroyden,
+# sigma_fraction 0.05, collar_data_ratio 0.3). STATIC everywhere: no
+# resampling, no adaptive sampling. max_interface_derivative_order NULL
+# (native N-1: KdV transmits u, u_x, u_xx).
 #
-# Base: the full-domain ic100/tol14 single root
-# (full_domain_single_root/best_model_root.pt). Phase 3 only (fine_tune
-# epochs 0), 2k Adam + 40k SSBroyden (42000/2000), tolerance_grad 1e-14,
-# iface order 1, ic=100, static draws, float64, 20k residual + 256 IC/BC,
-# seed 42. Stop guards: patience 5 (eval 1000, >1%) + freeze_stop 5.
+#   1. kdv_experts_fulldomain_M20:  no time marching at all - one M=20
+#      tree on the full-domain root's prediction (GT reference: 18
+#      leaves, hot-leaf 27% of root-error mass). A10G-safe.
+#   2. kdv_wtree_fulldomain_M20_q3: only_for_tree_structure, W=3
+#      quadratic -> [2, 3, 5] slices; per-slice trees, leaves clipped
+#      and unioned, ONE full-domain training (GT reference: 20 leaves,
+#      hot-leaf 23%; quadratic chosen over linear - linear's late window
+#      leaves 44% of root-error mass in one leaf). ~18-19GB peak on A10G.
 #
-# Reference points: windowed pipeline per-window (W0 root 9.97e-9 / W1
-# 9.40e-8 / W2 2.99e-7; benchmark experts 1.15e-7 / 1.18e-6 / 2.84e-6);
-# the full-domain root baseline is the loaded checkpoint's own rel-L2.
-# Measurement floor ~4.85e-8 (gt self-convergence).
+# Base: full_domain_single_root/best_model_root.pt (rel-L2 1.618e-6 -
+# the baseline to beat). Failed predecessors for reference: plain M=8 =
+# 5.19e-5, wtree M=10 quadratic = 6.42e-5 - both budget-cut with ~90% of
+# loss in ONE soliton-corridor expert (921 params on the hardest box);
+# M=20 splits that corridor across more experts.
+# Analysis notes (2026-08-13): root error mass concentrates LATE
+# (top-1% cells all in t>0.72); trainability (steep soliton segment) is
+# a separate axis - an e6-style laggard can still appear in slice 1;
+# the fine-tune stage is the counter to it.
+#
+# Recipe: tolerance_grad 1e-14, ic=100, float64, 20k residual + 256
+# IC/BC, seed 42, patience 5 (eval 1000, >1%) + freeze_stop 5. Watch
+# [FullTree] Spawning complete: if leaves > 22 on the A10G, kill before
+# the epoch-2000 switch (Hk allocation).
 # ==========================================================================
 base_config:
   activation: tanh
@@ -54,7 +64,7 @@ base_config:
     initial_train: {epochs: 41000, lr: 0.001, lr_decay_rate: 0.98, lr_decay_steps: 1000, lr_schedule: none,
       lr_warmup_steps: 0, optimizer_1: adam, optimizer_2: ssbroyden, optimizer_switch_epoch: 1000}
     max_experts: 150
-    split_icbc: {enabled: true, max_interface_derivative_order: 1}
+    split_icbc: {enabled: true, max_interface_derivative_order: null}
     tree_max_depth: 15
     tree_min_samples_leaf: 50
     variable_for_expert_size: norm
@@ -247,12 +257,12 @@ base_config:
     precondition_frequency: 10
     weight_decay: 0.0
   ssbroyden: {lr: 1.0, tolerance_grad: 1.0e-10}
-experiment_name: kdv_experts_fulldomain_M8
+experiment_name: kdv_fulldomain_M20_plain_vs_wtree
 experiments:
 - adaptive_pinn:
-    M_experts_num: 8
-    fine_tune: {epochs: 0}
-    split_icbc: {max_interface_derivative_order: 1}
+    M_experts_num: 20
+    fine_tune: {collar_data_ratio: 0.3, epochs: 40000, sigma_fraction: 0.05}
+    split_icbc: {max_interface_derivative_order: null}
   base_architecture: [2, 60, 60, 60, 60, 1]
   epochs: 42000
   experts_architecture: [2, 20, 20, 20, 1]
@@ -261,8 +271,28 @@ experiments:
     pretrained_base_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-4-60-roots_ic_100_tol14/full_domain_single_root/best_model_root.pt
     pretrained_local_expert_checkpoint: null
     time_marching: {debug_windows: null, enabled: false, last_window_checkpoint: null}
-  name: kdv_experts_fulldomain_M8
+  name: kdv_experts_fulldomain_M20
   optimizer_switch_epoch: 2000
   patience_evals: 5
   problem: kdv
   ssbroyden: {tolerance_grad: 1.0e-14}
+
+# ---- run 2 (wtree W3-quadratic; for Colab after the AWS run) - uncomment by removing the leading "# " ----
+# - adaptive_pinn:
+#     M_experts_num: 20
+#     fine_tune: {collar_data_ratio: 0.3, epochs: 40000, sigma_fraction: 0.05}
+#     split_icbc: {max_interface_derivative_order: null}
+#   base_architecture: [2, 60, 60, 60, 60, 1]
+#   epochs: 42000
+#   experts_architecture: [2, 20, 20, 20, 1]
+#   kdv:
+#     loss_weights: {ic: 100.0}
+#     pretrained_base_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-4-60-roots_ic_100_tol14/full_domain_single_root/best_model_root.pt
+#     pretrained_local_expert_checkpoint: null
+#     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null, m_distribution: quadratic,
+#       num_windows: 3, only_for_tree_structure: true}
+#   name: kdv_wtree_fulldomain_M20_q3
+#   optimizer_switch_epoch: 2000
+#   patience_evals: 5
+#   problem: kdv
+#   ssbroyden: {tolerance_grad: 1.0e-14}

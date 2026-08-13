@@ -24,10 +24,157 @@ import argparse
 from pathlib import Path
 
 import yaml
+import matplotlib.pyplot as plt
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from trainer.plotting import plot_training_curves
+from trainer.plotting import _safe_log_scale, _draw_segment_markers
+from utils.plot_io import save_png
+
+TICK_SIZE = 14
+LABEL_SIZE = 17
+LEGEND_SIZE = 13
+
+
+def _style_axes(ax):
+    ax.tick_params(axis='both', labelsize=TICK_SIZE)
+    for lbl in ax.get_xticklabels() + ax.get_yticklabels():
+        lbl.set_fontweight('bold')
+    ax.xaxis.label.set_fontsize(LABEL_SIZE)
+    ax.xaxis.label.set_fontweight('bold')
+    ax.yaxis.label.set_fontsize(LABEL_SIZE)
+    ax.yaxis.label.set_fontweight('bold')
+
+
+def plot_training_curves_paper(metrics, save_dir, optimizer_switch_epochs=None,
+                               segment_markers=None, name_suffix=''):
+    """Paper-styled reimplementation of trainer.plotting.plot_training_curves:
+    same panels/data/markers (reuses its _safe_log_scale, _draw_segment_markers
+    helpers), just bigger/bold tick, axis-label and legend text. Kept local to
+    this script rather than editing the shared function, since that one is
+    also used by the live training pipeline.
+    """
+    save_dir = Path(save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    train_loss_epochs = metrics['train_loss_epochs']
+    eval_epochs = metrics['epochs']
+    optimizer_switch_epochs = optimizer_switch_epochs or []
+    segment_markers = segment_markers or []
+
+    loss_comps = metrics.get('loss_components', {})
+    has_components = (loss_comps.get('epochs') and
+                      len(loss_comps.get('epochs', [])) > 0 and
+                      any(loss_comps.get(k) for k in ['residual', 'ic', 'bc']))
+
+    def _draw_markers(ax):
+        for i, epoch in enumerate(optimizer_switch_epochs):
+            label = 'Optimizer switch' if i == 0 else None
+            ax.axvline(x=epoch, color='green', linestyle='--',
+                       linewidth=1.5, alpha=0.7, label=label)
+        _draw_segment_markers(ax, segment_markers)
+
+    def _finish(ax, ylabel, log_series):
+        ax.set_xlabel('Epoch')
+        is_log = _safe_log_scale(ax, log_series) if log_series else False
+        ax.set_ylabel(f'{ylabel}{" (log)" if is_log else ""}')
+        ax.legend(fontsize=LEGEND_SIZE)
+        ax.grid(True, alpha=0.3)
+        _style_axes(ax)
+
+    def _panel_loss(ax):
+        ax.plot(train_loss_epochs, metrics['train_loss'], 'b-',
+                label='Train loss', linewidth=2, alpha=0.8)
+        _draw_markers(ax)
+        _finish(ax, 'Loss', [metrics['train_loss']])
+
+    def _panel_rel_l2(ax):
+        _rl2 = metrics.get('rel_l2', metrics.get('eval_rel_l2', []))
+        ax.plot(eval_epochs, _rl2, 'r-',
+                label='Rel. $L^2$ error', linewidth=2, alpha=0.8)
+        experts_rel_l2 = metrics.get('pretrained_experts_rel_l2')
+        root_rel_l2 = metrics.get('root_rel_l2')
+        if experts_rel_l2 is not None and experts_rel_l2 > 0:
+            ax.axhline(y=experts_rel_l2, color='black', linestyle='-',
+                       linewidth=1.5, alpha=0.8,
+                       label=f'Phase-3 ckpt ({experts_rel_l2:.2e})')
+        elif (root_rel_l2 is not None and root_rel_l2 > 0
+              and metrics.get('root_loaded_from_checkpoint', False)):
+            ax.axhline(y=root_rel_l2, color='black', linestyle='-',
+                       linewidth=1.5, alpha=0.8,
+                       label=f'Root ({root_rel_l2:.2e})')
+        _draw_markers(ax)
+        _finish(ax, 'Relative $L^2$ error', [_rl2])
+
+    def _panel_components(ax):
+        comp_epochs = loss_comps['epochs']
+        term_colors = {
+            'residual': '#e74c3c', 'ic': '#3498db', 'bc': '#2ecc71',
+            'bc_dx': '#27ae60', 'bc_dxx': '#1e8449', 'bc_dxxx': '#145a32',
+            'continuity': '#e67e22', 'l2sp': '#9b59b6',
+        }
+        term_labels = {
+            'residual': 'PDE residual', 'ic': 'Initial condition',
+            'bc': 'Boundary condition', 'bc_dx': 'BC ∂ₓ periodicity',
+            'bc_dxx': 'BC ∂ₓₓ periodicity',
+            'bc_dxxx': 'BC ∂ₓₓₓ periodicity',
+            'continuity': 'Continuity', 'l2sp': 'L2-SP anchor',
+        }
+        values_for_log = []
+        for term in ['residual', 'ic', 'bc', 'bc_dx', 'bc_dxx', 'bc_dxxx',
+                     'continuity', 'l2sp']:
+            if loss_comps.get(term) and len(loss_comps[term]) > 0:
+                values = loss_comps[term]
+                if (term in ('l2sp', 'bc_dx', 'bc_dxx', 'bc_dxxx')
+                        and not any(v > 0 for v in values)):
+                    continue
+                ax.plot(comp_epochs, values, '-',
+                        color=term_colors.get(term, 'gray'),
+                        label=term_labels.get(term, term),
+                        linewidth=1.5, alpha=0.8)
+                values_for_log.append(values)
+        _draw_markers(ax)
+        _finish(ax, 'Loss component', values_for_log)
+
+    def _panel_drift(ax):
+        drift = loss_comps.get('l2sp_drift', [])
+        comp_epochs = loss_comps['epochs']
+        anchor_norm = metrics.get('l2sp_anchor_norm')
+        label = r'$\|\theta-\theta_0\|$'
+        if anchor_norm and drift:
+            label += (f'  (final: {drift[-1]:.2e} = '
+                      f'{drift[-1] / anchor_norm:.1e} of anchor norm '
+                      f'{anchor_norm:.1f})')
+        ax.plot(comp_epochs, drift, '-', color='#9b59b6',
+                label=label, linewidth=1.8, alpha=0.9)
+        _draw_markers(ax)
+        _finish(ax, 'Weight drift from anchor', [drift])
+
+    panels = [('loss', _panel_loss), ('rel_l2', _panel_rel_l2)]
+    if has_components:
+        panels.append(('components', _panel_components))
+    if any(v > 0 for v in loss_comps.get('l2sp_drift', [])):
+        panels.append(('anchor_drift', _panel_drift))
+
+    suffix = f'_{name_suffix}' if name_suffix else ''
+
+    fig, axes = plt.subplots(1, len(panels), figsize=(7.5 * len(panels), 5.5))
+    if len(panels) == 1:
+        axes = [axes]
+    for ax, (_, draw) in zip(axes, panels):
+        draw(ax)
+    plt.tight_layout()
+    save_path = save_png(save_dir / f'training_curves{suffix}.png', fig=fig)
+    plt.close(fig)
+
+    for key, draw in panels:
+        fig_s, ax_s = plt.subplots(figsize=(7.5, 5.5))
+        draw(ax_s)
+        plt.tight_layout()
+        save_png(save_dir / f'training_curves_{key}{suffix}.png', fig=fig_s)
+        plt.close(fig_s)
+
+    print(f"  Training curves saved to {save_path} (+ per-panel files)")
 
 
 def load_run(run_dir: Path):
@@ -137,7 +284,7 @@ def main():
     relL2_str = f"{relL2:.3e}" if relL2 is not None else "n/a"
     print(f"Final experts: {meta['num_experts']}, final rel-L2 (dense grid): {relL2_str}")
 
-    plot_training_curves(
+    plot_training_curves_paper(
         combined,
         save_dir=args.out_dir,
         optimizer_switch_epochs=optimizer_switch_epochs,
