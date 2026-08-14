@@ -263,7 +263,7 @@ base_config:
 experiment_name: kdv_ifnorm_M18wtree_vs_M12plain
 experiments:
 - adaptive_pinn:
-    M_experts_num: 18
+    M_experts_num: 12
     fine_tune: {epochs: 0}
     split_icbc: {max_interface_derivative_order: null, interface_term_normalization: true}
   base_architecture: [2, 60, 60, 60, 60, 1]
@@ -273,18 +273,17 @@ experiments:
     loss_weights: {ic: 100.0}
     pretrained_base_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-4-60-roots_ic_100_tol14/full_domain_single_root/best_model_root.pt
     pretrained_local_expert_checkpoint: null
-    time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
-      m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
-  name: kdv_wtree_M18_W3lin_ifnorm
+    time_marching: {debug_windows: null, enabled: false, last_window_checkpoint: null}
+  name: kdv_plain_M12_ifnorm
   optimizer_1: adam
   optimizer_2: ssbroyden
   optimizer_switch_epoch: 2000
   patience_evals: 5
   problem: kdv
   ssbroyden: {tolerance_grad: 1.0e-14}
-# ---- run 2 (plain full-domain M=12; uncomment to run) ----
+# ---- run 1 (windowed tree M=18 W=3 linear; uncomment to run) ----
 # - adaptive_pinn:
-#     M_experts_num: 12
+#     M_experts_num: 18
 #     fine_tune: {epochs: 0}
 #     split_icbc: {max_interface_derivative_order: null, interface_term_normalization: true}
 #   base_architecture: [2, 60, 60, 60, 60, 1]
@@ -294,8 +293,9 @@ experiments:
 #     loss_weights: {ic: 100.0}
 #     pretrained_base_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-4-60-roots_ic_100_tol14/full_domain_single_root/best_model_root.pt
 #     pretrained_local_expert_checkpoint: null
-#     time_marching: {debug_windows: null, enabled: false, last_window_checkpoint: null}
-#   name: kdv_plain_M12_ifnorm
+#     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
+#       m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
+#   name: kdv_wtree_M18_W3lin_ifnorm
 #   optimizer_1: adam
 #   optimizer_2: ssbroyden
 #   optimizer_switch_epoch: 2000
