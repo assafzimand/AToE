@@ -1,17 +1,20 @@
 # ==========================================================================
-# KDV M=8 FULL-DOMAIN, ADAM ABLATION: 2 runs, PHASE 3 ONLY (fine_tune
-# epochs 0), identical structure/tree — the ONLY variable is the Adam
-# warm-up. Third comparison point already exists: the 20260813 M=8 run
-# (drive, kdv_experts_fulldomain_M8) = same M=8 / iface order 1 / 42k
-# with 2k Adam @ lr 1e-3 -> phase-3 rel-L2 5.19e-5.
+# KDV FULL-DOMAIN, INTERFACE-NORMALIZATION PAIR: 2 runs, PHASE 3 ONLY
+# (fine_tune epochs 0), both loading the full-domain root, 2k Adam
+# (lr 1e-3) + 40k SSBroyden (epochs 42000), max_interface_derivative_order
+# NULL (native N-1 = 2: u, u_x, u_xx) and the NEW
+# split_icbc.interface_term_normalization: true — each order-k interface
+# derivative term divided by (1 + mean|d^k u0|^2) over the expert's
+# interface points (value term unscaled). Kills the 1e5-3.8e6 init spike
+# and redirects the interface budget to the value term (measured: laggard
+# rel-L2 ~= its interface value-RMS).
 #
-#   1. kdv_M8_adam0_pure_ssb:  SSBroyden from epoch 1 (optimizer_2 null,
-#      switch never fires). iface order 1 keeps spawn totals <= ~1.8e3 —
-#      inside SSB's proven start regime (experts that entered SSB at
-#      ~1e4 converged fine). Watch the first ~1-2k epochs: totals should
-#      drop decades; if the line search thrashes, kill early.
-#   2. kdv_M8_adam500_lr1e4:  500 Adam epochs @ lr 1e-4, then SSBroyden.
-#      Captures most of the interface demolition, caps residual damage.
+#   1. kdv_wtree_M18_W3lin_ifnorm (active): windowed TREE only
+#      (only_for_tree_structure, W=3, linear -> M per slice [4,6,8]),
+#      ONE full-domain training. GT-sweep reference: 28 accepted,
+#      17 leaves.
+#   2. kdv_plain_M12_ifnorm (commented): no time marching at all, one
+#      full-domain M=12 tree. GT-sweep reference: 30 accepted, 16 leaves.
 #
 # Why M=8 full domain (not M=10 W=3): identical-structure 2k-Adam
 # baseline exists; simplest tree path (one tree, no windowed union);
@@ -257,12 +260,12 @@ base_config:
     precondition_frequency: 10
     weight_decay: 0.0
   ssbroyden: {lr: 1.0, tolerance_grad: 1.0e-10}
-experiment_name: kdv_M8_fulldomain_adam_ablation
+experiment_name: kdv_ifnorm_M18wtree_vs_M12plain
 experiments:
 - adaptive_pinn:
-    M_experts_num: 8
+    M_experts_num: 18
     fine_tune: {epochs: 0}
-    split_icbc: {max_interface_derivative_order: 1}
+    split_icbc: {max_interface_derivative_order: null, interface_term_normalization: true}
   base_architecture: [2, 60, 60, 60, 60, 1]
   epochs: 42000
   experts_architecture: [2, 20, 20, 20, 1]
@@ -270,20 +273,20 @@ experiments:
     loss_weights: {ic: 100.0}
     pretrained_base_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-4-60-roots_ic_100_tol14/full_domain_single_root/best_model_root.pt
     pretrained_local_expert_checkpoint: null
-    time_marching: {debug_windows: null, enabled: false, last_window_checkpoint: null}
-  lr: 0.0005
-  name: kdv_M8_adam500_lr5e4
+    time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
+      m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
+  name: kdv_wtree_M18_W3lin_ifnorm
   optimizer_1: adam
   optimizer_2: ssbroyden
-  optimizer_switch_epoch: 500
+  optimizer_switch_epoch: 2000
   patience_evals: 5
   problem: kdv
   ssbroyden: {tolerance_grad: 1.0e-14}
-# ---- run 1 (no Adam, pure SSBroyden; uncomment to run) ----
+# ---- run 2 (plain full-domain M=12; uncomment to run) ----
 # - adaptive_pinn:
-#     M_experts_num: 8
+#     M_experts_num: 12
 #     fine_tune: {epochs: 0}
-#     split_icbc: {max_interface_derivative_order: 1}
+#     split_icbc: {max_interface_derivative_order: null, interface_term_normalization: true}
 #   base_architecture: [2, 60, 60, 60, 60, 1]
 #   epochs: 42000
 #   experts_architecture: [2, 20, 20, 20, 1]
@@ -292,10 +295,10 @@ experiments:
 #     pretrained_base_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-4-60-roots_ic_100_tol14/full_domain_single_root/best_model_root.pt
 #     pretrained_local_expert_checkpoint: null
 #     time_marching: {debug_windows: null, enabled: false, last_window_checkpoint: null}
-#   name: kdv_M8_adam0_pure_ssb
-#   optimizer_1: ssbroyden
-#   optimizer_2: null
-#   optimizer_switch_epoch: 99999
+#   name: kdv_plain_M12_ifnorm
+#   optimizer_1: adam
+#   optimizer_2: ssbroyden
+#   optimizer_switch_epoch: 2000
 #   patience_evals: 5
 #   problem: kdv
 #   ssbroyden: {tolerance_grad: 1.0e-14}

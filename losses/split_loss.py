@@ -76,14 +76,32 @@ def build_split_loss(
 
     # Optional cap on the interface derivative-matching order (see
     # _compute_expert_loss). None = default N-1.
-    max_iface_order = (cfg.get('adaptive_pinn', {})
-                       .get('split_icbc', {}) or {}).get(
-                       'max_interface_derivative_order')
+    _split_icbc_cfg = (cfg.get('adaptive_pinn', {})
+                       .get('split_icbc', {}) or {})
+    max_iface_order = _split_icbc_cfg.get('max_interface_derivative_order')
     if max_iface_order is not None:
         _full = pde_spatial_order(problem) - 1
         logger.info(f"[SplitLoss] Interface derivative matching capped at "
                     f"order {int(max_iface_order)} (default for {problem}: "
                     f"{_full}); periodic pairing keeps full order.")
+
+    # Per-order interface normalization: divide each order-k derivative term
+    # by (1 + mean|∂^k u0|²) over the expert's own interface points, computed
+    # from the frozen-root targets (static points + frozen root => constants).
+    # Rationale (measured on the KdV full-domain runs): the orders' natural
+    # scales differ by x1e4-1e6, so at uniform weights the u_xx term soaks the
+    # interface gradient budget while the VALUE term — which caps the expert's
+    # achievable rel-L2 (a local BVP is no better than its boundary data
+    # enforcement) — is starved. The +1 floor means a term is never AMPLIFIED
+    # (quiet faces stay absolute); the value term keeps its absolute weight.
+    # For 2nd-order PDEs (u_x scale O(1-10)) the factors are near 1, so the
+    # proven benchmarks are essentially unchanged.
+    iface_norm = bool(_split_icbc_cfg.get('interface_term_normalization',
+                                          False))
+    if iface_norm:
+        logger.info("[SplitLoss] Interface per-order normalization ENABLED: "
+                    "order-k derivative terms divided by (1 + mean|d^k u0|^2) "
+                    "from the frozen root targets; value term unscaled.")
 
     iface_src = interface_model if interface_model is not None else getattr(
         model, 'base_model', None)
@@ -156,6 +174,7 @@ def build_split_loss(
                 problem, iface_src,
                 residual_loss=residual_losses.get(eidx),
                 max_iface_order=max_iface_order,
+                iface_norm=iface_norm,
             )
             total_loss = total_loss + comps['total']
             _record(per_expert_history, eidx, comps)
@@ -291,6 +310,7 @@ def _compute_expert_loss(
     problem, interface_model,
     residual_loss=None,
     max_iface_order=None,
+    iface_norm=False,
 ):
     """Per-expert local loss (no PoU). Residual is supplied precomputed.
 
@@ -301,6 +321,13 @@ def _compute_expert_loss(
     3 KdV needs (over-determined by one, consistent) and exactly the 4 KS
     needs (the classical clamped-type set). Affects the interface terms
     ONLY — the periodic BC pairing keeps its full order.
+
+    ``iface_norm`` (the ``split_icbc.interface_term_normalization`` config
+    key) divides each order-k interface derivative term by
+    (1 + mean|∂^k u0|²) over this expert's interface points, so all orders
+    contribute O(1)-comparable gradients. The scales come from the frozen
+    root's own derivatives at the (static) interface points, i.e. they are
+    constants of the segment. The value term is left unscaled.
     """
     z = torch.tensor(0.0, device=device)
     n_deriv = pde_spatial_order(problem) - 1
@@ -369,6 +396,14 @@ def _compute_expert_loss(
             root_dx = _consecutive_x_derivatives(u_root, x_root, n_deriv)
             for o, (d_expert, d_root) in enumerate(zip(expert_dx, root_dx)):
                 term = torch.mean((d_expert - d_root.detach()) ** 2)
+                if iface_norm:
+                    # Per-order scale from the ROOT's derivative magnitude at
+                    # these points (frozen root + static draw => constant).
+                    # (1 + s) floor: never amplifies a term, only tames the
+                    # huge-scale high orders so they stop starving the value
+                    # term of the interface gradient budget.
+                    scale = 1.0 + float((d_root.detach() ** 2).mean())
+                    term = term / scale
                 comps['interface_bc' + _DERIV_SUFFIX[o]] = term  # display line
                 interface_bc = interface_bc + term               # into 'total'
         comps['interface_bc'] = interface_bc
