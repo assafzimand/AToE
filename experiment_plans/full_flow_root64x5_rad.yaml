@@ -388,7 +388,7 @@ base_config:
       - 6.283185307179586
     temporal_domain:
     - 0.0
-    - 1.0
+    - 0.5
     time_marching:
       enabled: true
       freeze_previous_windows: true

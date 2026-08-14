@@ -450,17 +450,6 @@ def _move_batch_to_device(batch: Dict, device: torch.device) -> Dict:
     return result
 
 
-def _cast_data_to_dtype(batch: Dict, dtype: torch.dtype) -> Dict:
-    """Cast floating-point tensors in a batch dictionary to specified dtype."""
-    result = {
-        'x': batch['x'].to(dtype) if batch['x'].is_floating_point() else batch['x'],
-        't': batch['t'].to(dtype) if batch['t'].is_floating_point() else batch['t'],
-        'h_gt': batch['h_gt'].to(dtype) if batch['h_gt'].is_floating_point() else batch['h_gt'],
-        'mask': batch['mask']  # masks are boolean, don't cast
-    }
-    return result
-
-
 _SPLIT_SHORTCUT_LOGGED = False
 
 
@@ -877,10 +866,21 @@ def _setup_training(
     # Move data to device
     train_data = _move_batch_to_device(train_data, device)
 
-    # Cast data to configured precision (float32 or float64)
+    # Precision guard: the dataset is generated under torch's default dtype
+    # (set from config 'precision'), so a cached file from a different
+    # precision carries wrong-dtype (float32-rounded) targets. Silently
+    # casting would hide that — fail loudly instead.
     precision = cfg.get('precision', 'float32')
     target_dtype = torch.float64 if precision == 'float64' else torch.float32
-    train_data = _cast_data_to_dtype(train_data, target_dtype)
+    for _key in ('x', 't', 'h_gt'):
+        _tensor = train_data.get(_key)
+        if (_tensor is not None and _tensor.is_floating_point()
+                and _tensor.dtype != target_dtype):
+            raise ValueError(
+                f"Cached dataset {train_data_path} has '{_key}' dtype "
+                f"{_tensor.dtype}, but precision={precision} expects "
+                f"{target_dtype}. Delete the cached dataset file so it is "
+                f"regenerated under the current precision.")
 
     # Filter train data by window temporal bounds if time marching is enabled
     time_marching_window = cfg.get('_time_marching_window', {})

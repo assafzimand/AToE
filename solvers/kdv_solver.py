@@ -22,8 +22,7 @@ from typing import Tuple, Dict
 def initial_condition(x: torch.Tensor) -> torch.Tensor:
     """Exact IC h(x, 0) = cos(pi*x). Also the whole-domain target of the
     PirateNets physics-informed output init (u(x,t) ≈ u0(x) for all t)."""
-    return torch.cos(np.pi * x[:, :1]).float()
-
+    return torch.cos(np.pi * x[:, :1])
 
 def solve_kdv(
     x_min: float = -1.0,
@@ -250,22 +249,24 @@ def generate_dataset(
     N = n_residual + n_ic + n_bc
     x = torch.zeros(N, spatial_dim, device=device)
     t = torch.zeros(N, 1, device=device)
-    h_gt = torch.zeros(N, 1, device=device, dtype=torch.float32)
+    # x/t/h_gt follow torch's default dtype, set from config 'precision'
+    # before generation — GT targets keep float64 accuracy in double runs.
+    h_gt = torch.zeros(N, 1, device=device)
     idx = 0
 
     # Residual: sample random grid indices (window rows only)
     print(f"  Sampling {n_residual} residual points from grid...")
     i_t = np.random.choice(window_rows, size=n_residual, replace=True)
     i_x = np.random.choice(nx, size=n_residual, replace=True)
-    x[idx:idx + n_residual, 0] = torch.from_numpy(x_grid[i_x].astype(np.float32)).to(device)
-    t[idx:idx + n_residual, 0] = torch.from_numpy(t_grid[i_t].astype(np.float32)).to(device)
-    h_gt[idx:idx + n_residual, 0] = torch.from_numpy(h_solution[i_t, i_x].astype(np.float32)).to(device)
+    x[idx:idx + n_residual, 0] = torch.from_numpy(x_grid[i_x]).to(device)
+    t[idx:idx + n_residual, 0] = torch.from_numpy(t_grid[i_t]).to(device)
+    h_gt[idx:idx + n_residual, 0] = torch.from_numpy(h_solution[i_t, i_x]).to(device)
     idx += n_residual
 
     # IC: sample random x from grid, t=t_min
     print(f"  Sampling {n_ic} initial condition points from grid...")
     i_x_ic = np.random.choice(nx, size=n_ic, replace=True)
-    x[idx:idx + n_ic, 0] = torch.from_numpy(x_grid[i_x_ic].astype(np.float32)).to(device)
+    x[idx:idx + n_ic, 0] = torch.from_numpy(x_grid[i_x_ic]).to(device)
     t[idx:idx + n_ic, 0] = t_min
     idx += n_ic
 
@@ -277,13 +278,13 @@ def generate_dataset(
                               replace=True)
     
     x[idx:idx + n_bc_left, 0] = x_min
-    t[idx:idx + n_bc_left, 0] = torch.from_numpy(t_grid[i_t_bc[:n_bc_left]].astype(np.float32)).to(device)
-    h_gt[idx:idx + n_bc_left, 0] = torch.from_numpy(h_solution[i_t_bc[:n_bc_left], 0].astype(np.float32)).to(device)
+    t[idx:idx + n_bc_left, 0] = torch.from_numpy(t_grid[i_t_bc[:n_bc_left]]).to(device)
+    h_gt[idx:idx + n_bc_left, 0] = torch.from_numpy(h_solution[i_t_bc[:n_bc_left], 0]).to(device)
     idx += n_bc_left
     x[idx:idx + n_bc_right, 0] = x_max
-    t[idx:idx + n_bc_right, 0] = torch.from_numpy(t_grid[i_t_bc[:n_bc_right]].astype(np.float32)).to(device)
+    t[idx:idx + n_bc_right, 0] = torch.from_numpy(t_grid[i_t_bc[:n_bc_right]]).to(device)
     # Periodic: h(x_max, t) = h(x_min, t); x_max not in half-open grid, use index 0
-    h_gt[idx:idx + n_bc_right, 0] = torch.from_numpy(h_solution[i_t_bc[:n_bc_right], 0].astype(np.float32)).to(device)
+    h_gt[idx:idx + n_bc_right, 0] = torch.from_numpy(h_solution[i_t_bc[:n_bc_right], 0]).to(device)
 
     mask_res = torch.zeros(N, dtype=torch.bool, device=device)
     mask_res[:n_residual] = True
@@ -293,8 +294,7 @@ def generate_dataset(
     mask_bc[n_residual + n_ic:] = True
 
     # Overwrite IC with exact analytical values
-    h_gt[mask_ic, 0] = torch.cos(np.pi * x[mask_ic, 0]).float()
-
+    h_gt[mask_ic, 0] = torch.cos(np.pi * x[mask_ic, 0])
     print("  Dataset generated successfully")
     return {
         "x": x, "t": t, "h_gt": h_gt,
@@ -322,4 +322,4 @@ def evaluate_on_grid(x_grid: torch.Tensor, config: Dict) -> torch.Tensor:
     i_t = np.clip(i_t, 0, len(t_grid_np) - 1)
     
     h = h_solution[i_t, i_x]
-    return torch.from_numpy(h.reshape(-1, 1).astype(np.float32))
+    return torch.from_numpy(h.reshape(-1, 1))

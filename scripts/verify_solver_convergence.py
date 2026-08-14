@@ -218,7 +218,7 @@ def verify_ks_convergence():
     print("=" * 70)
     
     x_min, x_max = 0.0, 2.0 * np.pi
-    t_min, t_max = 0.0, 1.0
+    t_min, t_max = 0.0, 0.5
     alpha = 100.0 / 16.0
     beta = 100.0 / 16.0 ** 2
     gamma = 100.0 / 16.0 ** 4

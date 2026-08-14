@@ -195,7 +195,7 @@ base_config:
     spatial_dim: 1
     spatial_domain:
     - [0.0, 6.283185307179586]
-    temporal_domain: [0.0, 1.0]
+    temporal_domain: [0.0, 0.5]
     time_marching: {debug_windows: null, enabled: true, freeze_previous_windows: true, last_window_checkpoint: null,
       m_distribution: quadratic, num_windows: 5}
     tree_smoothness_threshold: 0.3
