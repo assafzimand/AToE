@@ -103,6 +103,21 @@ def build_split_loss(
                     "order-k derivative terms divided by (1 + mean|d^k u0|^2) "
                     "from the frozen root targets; value term unscaled.")
 
+    # Per-order decay ON TOP of the normalization: order-k term additionally
+    # multiplied by decay^k (value term k=0 untouched). Rationale (measured,
+    # ifnorm runs 2026-08-14): even normalized, the dx/dxx terms consume
+    # 40-77% of the laggards' loss while matching the root's derivatives
+    # 7-20x TIGHTER than the root's own derivatives match the truth
+    # (root u_xx rel err 2.9e-4-8.3e-4 on the late-time faces vs expert
+    # mismatch-to-root 4.3e-5) — enforcement below data quality. The decay
+    # shifts that budget to the value term, which still tracks expert
+    # rel-L2 and needs ~x100 more. 1.0 = off (default).
+    iface_decay = float(_split_icbc_cfg.get('interface_order_decay', 1.0))
+    if iface_decay != 1.0:
+        logger.info(f"[SplitLoss] Interface per-order decay ENABLED: order-k "
+                    f"derivative term x {iface_decay}^k (value term "
+                    f"unscaled).")
+
     iface_src = interface_model if interface_model is not None else getattr(
         model, 'base_model', None)
 
@@ -175,6 +190,7 @@ def build_split_loss(
                 residual_loss=residual_losses.get(eidx),
                 max_iface_order=max_iface_order,
                 iface_norm=iface_norm,
+                iface_decay=iface_decay,
             )
             total_loss = total_loss + comps['total']
             _record(per_expert_history, eidx, comps)
@@ -311,6 +327,7 @@ def _compute_expert_loss(
     residual_loss=None,
     max_iface_order=None,
     iface_norm=False,
+    iface_decay=1.0,
 ):
     """Per-expert local loss (no PoU). Residual is supplied precomputed.
 
@@ -328,6 +345,12 @@ def _compute_expert_loss(
     contribute O(1)-comparable gradients. The scales come from the frozen
     root's own derivatives at the (static) interface points, i.e. they are
     constants of the segment. The value term is left unscaled.
+
+    ``iface_decay`` (the ``split_icbc.interface_order_decay`` config key)
+    additionally multiplies the order-k derivative term by decay^k, tilting
+    the interface budget toward the value term (which tracks expert rel-L2)
+    once the derivative orders are matched at the root's own fidelity level.
+    1.0 = off.
     """
     z = torch.tensor(0.0, device=device)
     n_deriv = pde_spatial_order(problem) - 1
@@ -404,6 +427,9 @@ def _compute_expert_loss(
                     # term of the interface gradient budget.
                     scale = 1.0 + float((d_root.detach() ** 2).mean())
                     term = term / scale
+                if iface_decay != 1.0:
+                    # o is 0-based over DERIVATIVE orders: order k = o + 1.
+                    term = term * (iface_decay ** (o + 1))
                 comps['interface_bc' + _DERIV_SUFFIX[o]] = term  # display line
                 interface_bc = interface_bc + term               # into 'total'
         comps['interface_bc'] = interface_bc
