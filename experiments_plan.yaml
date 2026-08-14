@@ -1,36 +1,32 @@
 # ==========================================================================
-# KDV FULL-DOMAIN, INTERFACE-NORMALIZATION PAIR: 2 runs, PHASE 3 ONLY
-# (fine_tune epochs 0), both loading the full-domain root, 2k Adam
-# (lr 1e-3) + 40k SSBroyden (epochs 42000), max_interface_derivative_order
-# NULL (native N-1 = 2: u, u_x, u_xx) and the NEW
-# split_icbc.interface_term_normalization: true — each order-k interface
-# derivative term divided by (1 + mean|d^k u0|^2) over the expert's
-# interface points (value term unscaled). Kills the 1e5-3.8e6 init spike
-# and redirects the interface budget to the value term (measured: laggard
-# rel-L2 ~= its interface value-RMS).
+# A: KS ROOT + PHASE 3 (run 1) - first higher-order transfer of the
+# interface-normalized recipe. Root trained IN-RUN (no KS checkpoint):
+# 2k Adam @1e-3 + 40k SSBroyden (initial_train 42000/switch 2000),
+# ic=1000 (CausalPINNs-scale for KS), float64, tol 1e-14, seed 42, 20k
+# residual + 256 IC/BC, static. Tree: M=18, time-marching STRUCTURE ONLY
+# (W=3 quadratic -> M per slice [2, 5, 11]). Phase 3: 2k Adam + 40k SSB,
+# max_interface_derivative_order null -> ORDER 3 for KS (u, u_x, u_xx,
+# u_xxx) + interface_term_normalization true. NO fine-tune (epochs 0).
+# Blending C^4 (ks window_smoothness_order 4). CAUTION: full-domain KS
+# root is unproven (previous KS roots were 5-window marched) - treat as a
+# root-feasibility test too. NOTE: stale float32 dataset caches (local +
+# Drive datasets/ks) must be deleted once so they regenerate in float64.
 #
-#   1. kdv_wtree_M18_W3lin_ifnorm (active): windowed TREE only
-#      (only_for_tree_structure, W=3, linear -> M per slice [4,6,8]),
-#      ONE full-domain training. GT-sweep reference: 28 accepted,
-#      17 leaves.
-#   2. kdv_plain_M12_ifnorm (commented): no time marching at all, one
-#      full-domain M=12 tree. GT-sweep reference: 30 accepted, 16 leaves.
-#
-# Why M=8 full domain (not M=10 W=3): identical-structure 2k-Adam
-# baseline exists; simplest tree path (one tree, no windowed union);
-# 11 leaves = cheap epochs + OOM-safe; and the loss floor is ONE expert
-# (E2 pre-shock box: 1.9e-7 vs ~1e-9 for the other ten) — a clean
-# single readout for the Adam effect.
-# Measured basis (per-expert traces, 2026-08-14): Adam inflates expert
-# residual x1e4-1e7 within its first 200 epochs; laggards spend 9-21k
-# epochs recovering; median 84% of Adam's total log-drop is done by
-# epoch 1000 and laggard curves are flat 1000->2000. Root shows the
-# same mechanism benignly (residual x520, ~1.4% wall-clock) — root
-# recipe unchanged.
-#
-# Root: full_domain_single_root/best_model_root.pt (rel-L2 1.618e-6).
-# Recipe: tolerance_grad 1e-14, ic=100, float64, 20k residual + 256
-# IC/BC, seed 42, patience 5 (eval 1000, >1%). Phase 3 only.
+# B: KDV FINE-TUNE ABLATION (runs 2-6) - sigma_fraction x collar_data_
+# ratio grid on the W3-M18-linear interface-normalized phase-3 checkpoint
+# (~5e-6): pretrained_local_expert_checkpoint -> phases 1+3 skipped,
+# 40k PURE SSBroyden fine-tune only (optimizer_1 ssbroyden, no warmup,
+# lr n/a, tol 1e-14), FIXED collars (adaptive_collar_size false), static
+# draw, no RAD/resample, patience 10 (known ft dips). Cells:
+#   ft1 sig 0.05 collar 0.3  - proven 2nd-order recipe (reference)
+#   ft2 sig 0.10 collar 0.3  - W0-winning sigma
+#   ft3 sig 0.20 collar 0.3  - wide-blend pole (pre-ft soft eval will
+#                              start ~1e-1 by the sigma-collapse law)
+#   ft4 sig 0.05 collar 0.0  - no-collar pole
+#   ft5 sig 0.10 collar 0.5  - wide-collar cell (R1/R2 saw 0.5 degrade)
+# Checkpoint file expected at roots_checkpoints/double_precision/
+# kdv_no_resample-4-60-roots_ic_100_tol14/full_domain_phase_W3_M18_linear/
+# best_model_phase3.pt (rename here if the file is named differently).
 # ==========================================================================
 base_config:
   activation: tanh
@@ -260,45 +256,102 @@ base_config:
     precondition_frequency: 10
     weight_decay: 0.0
   ssbroyden: {lr: 1.0, tolerance_grad: 1.0e-10}
-experiment_name: kdv_ifnorm_M18wtree_vs_M12plain
+experiment_name: ks_root_phase3_and_kdv_ft_ablation
 experiments:
 - adaptive_pinn:
-    M_experts_num: 12
+    M_experts_num: 18
     fine_tune: {epochs: 0}
+    initial_train: {epochs: 42000, optimizer_switch_epoch: 2000}
     split_icbc: {max_interface_derivative_order: null, interface_term_normalization: true}
   base_architecture: [2, 60, 60, 60, 60, 1]
   epochs: 42000
   experts_architecture: [2, 20, 20, 20, 1]
-  kdv:
-    loss_weights: {ic: 100.0}
-    pretrained_base_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-4-60-roots_ic_100_tol14/full_domain_single_root/best_model_root.pt
+  ks:
+    loss_weights: {ic: 1000.0}
+    pretrained_base_checkpoint: null
     pretrained_local_expert_checkpoint: null
-    time_marching: {debug_windows: null, enabled: false, last_window_checkpoint: null}
-  name: kdv_plain_M12_ifnorm
+    time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
+      m_distribution: quadratic, num_windows: 3, only_for_tree_structure: true}
+  name: ks_root_phase3_M18_W3quad_ifnorm
   optimizer_1: adam
   optimizer_2: ssbroyden
   optimizer_switch_epoch: 2000
   patience_evals: 5
-  problem: kdv
+  problem: ks
   ssbroyden: {tolerance_grad: 1.0e-14}
-# ---- run 1 (windowed tree M=18 W=3 linear; uncomment to run) ----
+# ---- runs 2-6 (kdv ft ablation; uncomment to run) ----
 # - adaptive_pinn:
-#     M_experts_num: 18
-#     fine_tune: {epochs: 0}
+#     fine_tune: {collar_data_ratio: 0.3, epochs: 40000, sigma_fraction: 0.05}
 #     split_icbc: {max_interface_derivative_order: null, interface_term_normalization: true}
 #   base_architecture: [2, 60, 60, 60, 60, 1]
 #   epochs: 42000
 #   experts_architecture: [2, 20, 20, 20, 1]
 #   kdv:
 #     loss_weights: {ic: 100.0}
-#     pretrained_base_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-4-60-roots_ic_100_tol14/full_domain_single_root/best_model_root.pt
-#     pretrained_local_expert_checkpoint: null
-#     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
-#       m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
-#   name: kdv_wtree_M18_W3lin_ifnorm
-#   optimizer_1: adam
-#   optimizer_2: ssbroyden
-#   optimizer_switch_epoch: 2000
-#   patience_evals: 5
+#     pretrained_base_checkpoint: null
+#     pretrained_local_expert_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-4-60-roots_ic_100_tol14/full_domain_phase_W3_M18_linear/best_model_phase3.pt
+#     time_marching: {debug_windows: null, enabled: false, last_window_checkpoint: null}
+#   name: kdv_ft_sig005_col03
+#   patience_evals: 10
+#   problem: kdv
+#   ssbroyden: {tolerance_grad: 1.0e-14}
+# - adaptive_pinn:
+#     fine_tune: {collar_data_ratio: 0.3, epochs: 40000, sigma_fraction: 0.1}
+#     split_icbc: {max_interface_derivative_order: null, interface_term_normalization: true}
+#   base_architecture: [2, 60, 60, 60, 60, 1]
+#   epochs: 42000
+#   experts_architecture: [2, 20, 20, 20, 1]
+#   kdv:
+#     loss_weights: {ic: 100.0}
+#     pretrained_base_checkpoint: null
+#     pretrained_local_expert_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-4-60-roots_ic_100_tol14/full_domain_phase_W3_M18_linear/best_model_phase3.pt
+#     time_marching: {debug_windows: null, enabled: false, last_window_checkpoint: null}
+#   name: kdv_ft_sig010_col03
+#   patience_evals: 10
+#   problem: kdv
+#   ssbroyden: {tolerance_grad: 1.0e-14}
+# - adaptive_pinn:
+#     fine_tune: {collar_data_ratio: 0.3, epochs: 40000, sigma_fraction: 0.2}
+#     split_icbc: {max_interface_derivative_order: null, interface_term_normalization: true}
+#   base_architecture: [2, 60, 60, 60, 60, 1]
+#   epochs: 42000
+#   experts_architecture: [2, 20, 20, 20, 1]
+#   kdv:
+#     loss_weights: {ic: 100.0}
+#     pretrained_base_checkpoint: null
+#     pretrained_local_expert_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-4-60-roots_ic_100_tol14/full_domain_phase_W3_M18_linear/best_model_phase3.pt
+#     time_marching: {debug_windows: null, enabled: false, last_window_checkpoint: null}
+#   name: kdv_ft_sig020_col03
+#   patience_evals: 10
+#   problem: kdv
+#   ssbroyden: {tolerance_grad: 1.0e-14}
+# - adaptive_pinn:
+#     fine_tune: {collar_data_ratio: 0.0, epochs: 40000, sigma_fraction: 0.05}
+#     split_icbc: {max_interface_derivative_order: null, interface_term_normalization: true}
+#   base_architecture: [2, 60, 60, 60, 60, 1]
+#   epochs: 42000
+#   experts_architecture: [2, 20, 20, 20, 1]
+#   kdv:
+#     loss_weights: {ic: 100.0}
+#     pretrained_base_checkpoint: null
+#     pretrained_local_expert_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-4-60-roots_ic_100_tol14/full_domain_phase_W3_M18_linear/best_model_phase3.pt
+#     time_marching: {debug_windows: null, enabled: false, last_window_checkpoint: null}
+#   name: kdv_ft_sig005_col00
+#   patience_evals: 10
+#   problem: kdv
+#   ssbroyden: {tolerance_grad: 1.0e-14}
+# - adaptive_pinn:
+#     fine_tune: {collar_data_ratio: 0.5, epochs: 40000, sigma_fraction: 0.1}
+#     split_icbc: {max_interface_derivative_order: null, interface_term_normalization: true}
+#   base_architecture: [2, 60, 60, 60, 60, 1]
+#   epochs: 42000
+#   experts_architecture: [2, 20, 20, 20, 1]
+#   kdv:
+#     loss_weights: {ic: 100.0}
+#     pretrained_base_checkpoint: null
+#     pretrained_local_expert_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-4-60-roots_ic_100_tol14/full_domain_phase_W3_M18_linear/best_model_phase3.pt
+#     time_marching: {debug_windows: null, enabled: false, last_window_checkpoint: null}
+#   name: kdv_ft_sig010_col05
+#   patience_evals: 10
 #   problem: kdv
 #   ssbroyden: {tolerance_grad: 1.0e-14}
