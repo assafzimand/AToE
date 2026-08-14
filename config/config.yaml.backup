@@ -1,4 +1,3 @@
-_experiment_live_dir: outputs\experiments\smoke_wtree_qzero_20260814_084314\kdv-2-3-3-1-tanh
 activation: tanh
 adam:
   betas:
@@ -7,35 +6,37 @@ adam:
   eps: 1.0e-08
 adaptive_pinn:
   AToE_threshold_capacity: null
-  M_experts_num: 6
+  M_experts_num: 8
   blending_mode: soft
   enable_gradient_diagnostics: false
   enable_timing: false
   enabled: true
   expert_type: mlp
   fine_tune:
-    adaptive_collar_grid: 257
-    adaptive_collar_quantile: 0.9
-    adaptive_collar_sigma_max: 0.5
-    adaptive_collar_sigma_min: 0.05
-    adaptive_collar_size: false
-    collar_data_ratio: 0.0
     corrector_architecture: null
+    corrector_collar_ratio: 1.0
     corrector_init: zero
-    epochs: 3
+    epochs: 5000
+    freeze_experts: false
     lr: 0.0001
     lr_schedule: none
     min_epochs: 1
     optimizer_1: ssbroyden
     optimizer_2: null
-    optimizer_switch_epoch: 99999
-    sigma_fraction: 0.1
-    single_corrector: false
-    ssbroyden:
-      lr: 1.0
-      tolerance_grad: 1.0e-14
+    optimizer_switch_epoch: 5000
+    single_corrector: true
+    # Collar half-width: delta_j = sigma_fraction * (b_j - a_j).
+    sigma_fraction: 0.2
+    # Size each face from the root's gradient field instead of the fixed
+    # fraction above. sigma_min/sigma_max are in the SAME unit as
+    # sigma_fraction and clamp the result.
+    adaptive_collar_size: false
+    adaptive_collar_quantile: 0.85
+    adaptive_collar_sigma_min: 0.02
+    adaptive_collar_sigma_max: 0.5
+    adaptive_collar_grid: 257
   initial_train:
-    epochs: 3
+    epochs: 45000
     lr: 0.001
     lr_decay_rate: 0.98
     lr_decay_steps: 1000
@@ -43,11 +44,10 @@ adaptive_pinn:
     lr_warmup_steps: 0
     optimizer_1: adam
     optimizer_2: ssbroyden
-    optimizer_switch_epoch: 2
+    optimizer_switch_epoch: 5000
   max_experts: 150
   split_icbc:
     enabled: true
-    max_interface_derivative_order: 1
   tree_max_depth: 15
   tree_min_samples_leaf: 50
   variable_for_expert_size: norm
@@ -55,7 +55,7 @@ adaptive_pinn:
 allen_cahn:
   D: 0.0001
   adaptive_sampling:
-    adaptive_ratio: 0.5
+    adaptive_ratio: 0.3
     enabled: false
     phi: quadratic
     phi_epsilon: 1.0
@@ -93,7 +93,7 @@ allen_cahn:
   new_norm_threshold: 0.04
   output_dim: 1
   pretrained_base_checkpoint: null
-  pretrained_local_expert_checkpoint: null
+  pretrained_local_expert_checkpoint: roots_checkpoints/allen_cahn_experts.pt
   rwf:
     enabled: false
     mean: 1.0
@@ -116,8 +116,10 @@ allen_cahn:
   window_type: smoothstep
 base_architecture:
 - 2
-- 3
-- 3
+- 60
+- 60
+- 60
+- 60
 - 1
 batch_size: 99999
 burgers1d:
@@ -182,17 +184,17 @@ burgers1d:
   wavelet_threshold: 0.001
   window_smoothness_order: 2
   window_type: smoothstep
-cuda: false
-epochs: 3
-eval_every: 1
+cuda: true
+epochs: 45000
+eval_every: 250
 eval_only: false
-experiment_tag: smoke_wtree_qzero_full_flow
+experiment_tag: ac_corr_unfrozen_sig0p20
 experts_architecture:
 - 2
-- 3
-- 3
+- 20
+- 20
+- 20
 - 1
-freeze_stop_epochs: 5
 kdv:
   adaptive_sampling:
     adaptive_ratio: 0.3
@@ -220,7 +222,7 @@ kdv:
   loss_weights:
     bc: 1.0
     continuity: 0.0
-    ic: 100.0
+    ic: 1.0
     residual: 1.0
   lra:
     alpha: 0.1
@@ -245,13 +247,10 @@ kdv:
   - 0.0
   - 1.0
   time_marching:
-    debug_windows: null
     enabled: true
     freeze_previous_windows: true
-    last_window_checkpoint: null
-    m_distribution: quadratic_zero
+    m_distribution: quadratic
     num_windows: 3
-    only_for_tree_structure: true
   tree_smoothness_threshold: 0.4
   wavelet_threshold: 0.0025
   window_smoothness_order: 3
@@ -312,10 +311,8 @@ ks:
   - 0.0
   - 1.0
   time_marching:
-    debug_windows: null
     enabled: true
     freeze_previous_windows: true
-    last_window_checkpoint: null
     m_distribution: quadratic
     num_windows: 5
   tree_smoothness_threshold: 0.3
@@ -337,37 +334,42 @@ lr_warmup_start_factor: 0.01
 lr_warmup_steps: 0
 min_epochs: 1
 model: AToELeaves
-multi_optimizers: false
-name: smoke_wtree_qzero_full_flow
+name: ac_corr_unfrozen_sig0p20
 optimizer_1: adam
 optimizer_2: ssbroyden
-optimizer_switch_epoch: 2
-patience_evals: 50
+optimizer_switch_epoch: 5000
+patience_evals: 5
 patience_rel_delta: 0.01
 precision: float64
-print_every: 1
-problem: kdv
-profiling:
-  enabled: false
+print_every: 1000
+problem: allen_cahn
+# N>0: stop the segment after N bit-identical epoch losses under a 2nd-order
+# optimizer (the deterministic line-search freeze) instead of waiting out the
+# rel-L2 patience. 0 = disabled. Takes precedence over refresh when both set.
+freeze_stop_epochs: 0
+# NOTE: <problem>.time_marching also accepts only_for_tree_structure (default
+# false): windows/M-distribution shape the TREE ONLY (per-time-slice trees on
+# the root's prediction, leaves unioned); training runs once, full domain.
+# m_distribution options: equal | linear | quadratic (each window gets >= 1)
+# and linear_zero | quadratic_zero (zero-based weights i^p, no floor: window
+# 0 always gets M=0 = ONE expert spanning the whole slice, no tree fit —
+# intended for only_for_tree_structure; in real marching M=0 = root-only).
 refresh_2nd_order_optimizer: false
 resume_from: null
 sampling:
   collar_data_ratio: 0.0
   collar_margin: 1.0
   eval_train_ratio: 0.25
-  min_points_per_expert: 256
-  n_boundary_train: 64
-  n_initial_train: 64
-  n_residual_train: 2000
+  n_boundary_train: 256
+  n_initial_train: 256
+  n_residual_train: 10000
   plot_samples_every: 1000
-  rad_pool_chunk: 5000
-  rad_pool_size: 100000
-  resample_every_epochs: 99999
+  resample_every_epochs: 1000
   sample_volume_ratio: 35
 save_every: 999999
 schrodinger:
   adaptive_sampling:
-    adaptive_ratio: 0.5
+    adaptive_ratio: 0.3
     enabled: false
     phi: quadratic
     phi_epsilon: 1.0

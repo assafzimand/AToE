@@ -321,6 +321,21 @@ def _train_segment(
 
     total_steps_estimate = max(1, epoch_budget) * batches_per_epoch
 
+    # Release the PREVIOUS segment's optimizer before allocating this one:
+    # a full-batch 2nd-order optimizer holds a dense n x n Hk (2.05 GiB at
+    # 18 leaves, float64). ctx.optimizer has no readers — it only keeps that
+    # matrix alive across the boundary, adding a full extra copy to the new
+    # segment's first-step peak (measured OOM: fine-tune after phase 3,
+    # 18 leaves, A10G, 2026-08-14).
+    if getattr(ctx, 'optimizer', None) is not None:
+        ctx.optimizer = None
+        import gc as _gc
+        _gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            logger.info("  [Segment] Released previous segment's optimizer "
+                        "state and emptied the CUDA cache.")
+
     full_batch_opt1 = optimizer_1_name in ('lbfgs', 'ssbroyden')
     # Re-establish the default-device context at the segment boundary
     # (see _set_default_torch_device for why this is needed).
