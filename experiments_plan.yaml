@@ -1,33 +1,17 @@
 # ==========================================================================
-# KDV FULL-DOMAIN M=20, PLAIN vs WINDOWED-TREE: 2 runs, each phase 3
-# (2k Adam + 40k SSBroyden) -> chained FINE-TUNE (40k pure SSBroyden,
-# sigma_fraction 0.05, collar_data_ratio 0.3). STATIC everywhere: no
-# resampling, no adaptive sampling. max_interface_derivative_order NULL
-# (native N-1: KdV transmits u, u_x, u_xx).
+# KDV FULL-DOMAIN M=20, FINE-TUNE ONLY: the missing half of the AWS run
+# kdv_experts_fulldomain_M20 (phase 3 finished at rel-L2 3.417e-5, 18
+# leaves; its fine-tune OOMed on the A10G at the segment boundary - now
+# fixed by releasing the previous segment's optimizer, and this run has
+# no prior segment at all, so ft peak ~= the phase-3 peak that already
+# fit). Loads the saved phase-3 experts and runs ONLY the fine-tune:
+# 40k PURE SSBroyden, sigma_fraction 0.05, collar_data_ratio 0.3,
+# tolerance_grad 1e-14, iface order NULL (u, u_x, u_xx), STATIC (no
+# resampling, no adaptive sampling), patience 5 + freeze_stop 5.
 #
-#   1. kdv_experts_fulldomain_M20:  no time marching at all - one M=20
-#      tree on the full-domain root's prediction (GT reference: 18
-#      leaves, hot-leaf 27% of root-error mass). A10G-safe.
-#   2. kdv_wtree_fulldomain_M20_q3: only_for_tree_structure, W=3
-#      quadratic -> [2, 3, 5] slices; per-slice trees, leaves clipped
-#      and unioned, ONE full-domain training (GT reference: 20 leaves,
-#      hot-leaf 23%; quadratic chosen over linear - linear's late window
-#      leaves 44% of root-error mass in one leaf). ~18-19GB peak on A10G.
-#
-# Base: full_domain_single_root/best_model_root.pt (rel-L2 1.618e-6 -
-# the baseline to beat). Failed predecessors for reference: plain M=8 =
-# 5.19e-5, wtree M=10 quadratic = 6.42e-5 - both budget-cut with ~90% of
-# loss in ONE soliton-corridor expert (921 params on the hardest box);
-# M=20 splits that corridor across more experts.
-# Analysis notes (2026-08-13): root error mass concentrates LATE
-# (top-1% cells all in t>0.72); trainability (steep soliton segment) is
-# a separate axis - an e6-style laggard can still appear in slice 1;
-# the fine-tune stage is the counter to it.
-#
-# Recipe: tolerance_grad 1e-14, ic=100, float64, 20k residual + 256
-# IC/BC, seed 42, patience 5 (eval 1000, >1%) + freeze_stop 5. Watch
-# [FullTree] Spawning complete: if leaves > 22 on the A10G, kill before
-# the epoch-2000 switch (Hk allocation).
+# Experts: pahse3_full_domain_M20/best_model_phase3.pt (folder name typo
+# kept verbatim). Base: full_domain_single_root/best_model_root.pt
+# (rel-L2 1.618e-6 - the bar). Start = 3.417e-5.
 # ==========================================================================
 base_config:
   activation: tanh
@@ -257,42 +241,20 @@ base_config:
     precondition_frequency: 10
     weight_decay: 0.0
   ssbroyden: {lr: 1.0, tolerance_grad: 1.0e-10}
-experiment_name: kdv_fulldomain_M20_plain_vs_wtree
+experiment_name: kdv_fulldomain_M20_ft_only
 experiments:
 - adaptive_pinn:
     M_experts_num: 20
     fine_tune: {collar_data_ratio: 0.3, epochs: 40000, sigma_fraction: 0.05}
     split_icbc: {max_interface_derivative_order: null}
   base_architecture: [2, 60, 60, 60, 60, 1]
-  epochs: 42000
   experts_architecture: [2, 20, 20, 20, 1]
   kdv:
     loss_weights: {ic: 100.0}
     pretrained_base_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-4-60-roots_ic_100_tol14/full_domain_single_root/best_model_root.pt
-    pretrained_local_expert_checkpoint: null
-    time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null, m_distribution: quadratic,
-      num_windows: 3, only_for_tree_structure: true}
-  name: kdv_wtree_fulldomain_M20_q3
-  optimizer_switch_epoch: 2000
+    pretrained_local_expert_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-4-60-roots_ic_100_tol14/pahse3_full_domain_M20/best_model_phase3.pt
+    time_marching: {debug_windows: null, enabled: false, last_window_checkpoint: null}
+  name: kdv_fulldomain_M20_ft_sig005_collar03
   patience_evals: 5
   problem: kdv
   ssbroyden: {tolerance_grad: 1.0e-14}
-
-# ---- run 1 (plain full-domain M20; running on AWS) - uncomment by removing the leading "# " ----
-# - adaptive_pinn:
-#     M_experts_num: 20
-#     fine_tune: {collar_data_ratio: 0.3, epochs: 40000, sigma_fraction: 0.05}
-#     split_icbc: {max_interface_derivative_order: null}
-#   base_architecture: [2, 60, 60, 60, 60, 1]
-#   epochs: 42000
-#   experts_architecture: [2, 20, 20, 20, 1]
-#   kdv:
-#     loss_weights: {ic: 100.0}
-#     pretrained_base_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-4-60-roots_ic_100_tol14/full_domain_single_root/best_model_root.pt
-#     pretrained_local_expert_checkpoint: null
-#     time_marching: {debug_windows: null, enabled: false, last_window_checkpoint: null}
-#   name: kdv_experts_fulldomain_M20
-#   optimizer_switch_epoch: 2000
-#   patience_evals: 5
-#   problem: kdv
-#   ssbroyden: {tolerance_grad: 1.0e-14}
