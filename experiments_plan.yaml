@@ -271,8 +271,8 @@ experiments:
     pretrained_base_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-4-60-roots_ic_100_tol14/full_domain_single_root/best_model_root.pt
     pretrained_local_expert_checkpoint: null
     time_marching: {debug_windows: null, enabled: false, last_window_checkpoint: null}
-  lr: 0.0001
-  name: kdv_M8_adam500_lr1e4
+  lr: 0.0005
+  name: kdv_M8_adam500_lr5e4
   optimizer_1: adam
   optimizer_2: ssbroyden
   optimizer_switch_epoch: 500
