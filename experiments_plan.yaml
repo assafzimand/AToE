@@ -1,33 +1,33 @@
 # ==========================================================================
-# KDV FULL-DOMAIN M=20, PLAIN vs WINDOWED-TREE: 2 runs, each phase 3
-# (2k Adam + 40k SSBroyden) -> chained FINE-TUNE (40k pure SSBroyden,
-# sigma_fraction 0.05, collar_data_ratio 0.3). STATIC everywhere: no
-# resampling, no adaptive sampling. max_interface_derivative_order NULL
-# (native N-1: KdV transmits u, u_x, u_xx).
+# KDV M=8 FULL-DOMAIN, ADAM ABLATION: 2 runs, PHASE 3 ONLY (fine_tune
+# epochs 0), identical structure/tree — the ONLY variable is the Adam
+# warm-up. Third comparison point already exists: the 20260813 M=8 run
+# (drive, kdv_experts_fulldomain_M8) = same M=8 / iface order 1 / 42k
+# with 2k Adam @ lr 1e-3 -> phase-3 rel-L2 5.19e-5.
 #
-#   1. kdv_experts_fulldomain_M20:  no time marching at all - one M=20
-#      tree on the full-domain root's prediction (GT reference: 18
-#      leaves, hot-leaf 27% of root-error mass). A10G-safe.
-#   2. kdv_wtree_fulldomain_M20_q3: only_for_tree_structure, W=3
-#      quadratic -> [2, 3, 5] slices; per-slice trees, leaves clipped
-#      and unioned, ONE full-domain training (GT reference: 20 leaves,
-#      hot-leaf 23%; quadratic chosen over linear - linear's late window
-#      leaves 44% of root-error mass in one leaf). ~18-19GB peak on A10G.
+#   1. kdv_M8_adam0_pure_ssb:  SSBroyden from epoch 1 (optimizer_2 null,
+#      switch never fires). iface order 1 keeps spawn totals <= ~1.8e3 —
+#      inside SSB's proven start regime (experts that entered SSB at
+#      ~1e4 converged fine). Watch the first ~1-2k epochs: totals should
+#      drop decades; if the line search thrashes, kill early.
+#   2. kdv_M8_adam500_lr1e4:  500 Adam epochs @ lr 1e-4, then SSBroyden.
+#      Captures most of the interface demolition, caps residual damage.
 #
-# Base: full_domain_single_root/best_model_root.pt (rel-L2 1.618e-6 -
-# the baseline to beat). Failed predecessors for reference: plain M=8 =
-# 5.19e-5, wtree M=10 quadratic = 6.42e-5 - both budget-cut with ~90% of
-# loss in ONE soliton-corridor expert (921 params on the hardest box);
-# M=20 splits that corridor across more experts.
-# Analysis notes (2026-08-13): root error mass concentrates LATE
-# (top-1% cells all in t>0.72); trainability (steep soliton segment) is
-# a separate axis - an e6-style laggard can still appear in slice 1;
-# the fine-tune stage is the counter to it.
+# Why M=8 full domain (not M=10 W=3): identical-structure 2k-Adam
+# baseline exists; simplest tree path (one tree, no windowed union);
+# 11 leaves = cheap epochs + OOM-safe; and the loss floor is ONE expert
+# (E2 pre-shock box: 1.9e-7 vs ~1e-9 for the other ten) — a clean
+# single readout for the Adam effect.
+# Measured basis (per-expert traces, 2026-08-14): Adam inflates expert
+# residual x1e4-1e7 within its first 200 epochs; laggards spend 9-21k
+# epochs recovering; median 84% of Adam's total log-drop is done by
+# epoch 1000 and laggard curves are flat 1000->2000. Root shows the
+# same mechanism benignly (residual x520, ~1.4% wall-clock) — root
+# recipe unchanged.
 #
+# Root: full_domain_single_root/best_model_root.pt (rel-L2 1.618e-6).
 # Recipe: tolerance_grad 1e-14, ic=100, float64, 20k residual + 256
-# IC/BC, seed 42, patience 5 (eval 1000, >1%) + freeze_stop 5. Watch
-# [FullTree] Spawning complete: if leaves > 22 on the A10G, kill before
-# the epoch-2000 switch (Hk allocation).
+# IC/BC, seed 42, patience 5 (eval 1000, >1%). Phase 3 only.
 # ==========================================================================
 base_config:
   activation: tanh
@@ -257,12 +257,12 @@ base_config:
     precondition_frequency: 10
     weight_decay: 0.0
   ssbroyden: {lr: 1.0, tolerance_grad: 1.0e-10}
-experiment_name: kdv_fulldomain_M20_plain_vs_wtree
+experiment_name: kdv_M8_fulldomain_adam_ablation
 experiments:
 - adaptive_pinn:
-    M_experts_num: 20
-    fine_tune: {collar_data_ratio: 0.3, epochs: 40000, sigma_fraction: 0.05}
-    split_icbc: {max_interface_derivative_order: null}
+    M_experts_num: 8
+    fine_tune: {epochs: 0}
+    split_icbc: {max_interface_derivative_order: 1}
   base_architecture: [2, 60, 60, 60, 60, 1]
   epochs: 42000
   experts_architecture: [2, 20, 20, 20, 1]
@@ -270,19 +270,19 @@ experiments:
     loss_weights: {ic: 100.0}
     pretrained_base_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-4-60-roots_ic_100_tol14/full_domain_single_root/best_model_root.pt
     pretrained_local_expert_checkpoint: null
-    time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null, m_distribution: quadratic,
-      num_windows: 3, only_for_tree_structure: true}
-  name: kdv_wtree_fulldomain_M20_q3
-  optimizer_switch_epoch: 2000
+    time_marching: {debug_windows: null, enabled: false, last_window_checkpoint: null}
+  name: kdv_M8_adam0_pure_ssb
+  optimizer_1: ssbroyden
+  optimizer_2: null
+  optimizer_switch_epoch: 99999
   patience_evals: 5
   problem: kdv
   ssbroyden: {tolerance_grad: 1.0e-14}
-
-# ---- run 1 (plain full-domain M20; running on AWS) - uncomment by removing the leading "# " ----
+# ---- run 2 (500 Adam @ lr 1e-4; uncomment to run) ----
 # - adaptive_pinn:
-#     M_experts_num: 20
-#     fine_tune: {collar_data_ratio: 0.3, epochs: 40000, sigma_fraction: 0.05}
-#     split_icbc: {max_interface_derivative_order: null}
+#     M_experts_num: 8
+#     fine_tune: {epochs: 0}
+#     split_icbc: {max_interface_derivative_order: 1}
 #   base_architecture: [2, 60, 60, 60, 60, 1]
 #   epochs: 42000
 #   experts_architecture: [2, 20, 20, 20, 1]
@@ -291,8 +291,11 @@ experiments:
 #     pretrained_base_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-4-60-roots_ic_100_tol14/full_domain_single_root/best_model_root.pt
 #     pretrained_local_expert_checkpoint: null
 #     time_marching: {debug_windows: null, enabled: false, last_window_checkpoint: null}
-#   name: kdv_experts_fulldomain_M20
-#   optimizer_switch_epoch: 2000
+#   lr: 0.0001
+#   name: kdv_M8_adam500_lr1e4
+#   optimizer_1: adam
+#   optimizer_2: ssbroyden
+#   optimizer_switch_epoch: 500
 #   patience_evals: 5
 #   problem: kdv
 #   ssbroyden: {tolerance_grad: 1.0e-14}

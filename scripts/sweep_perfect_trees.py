@@ -35,16 +35,22 @@ os.chdir(REPO_ROOT)  # ensure_eval_data uses paths relative to the repo root
 
 from perfect_tree_examples import create_prefect_trees as cpt  # noqa: E402
 
-# Per-problem sweep specs. Omit 'num_windows'/'m_distribution' for
-# non-time-marching problems ([None] placeholder keeps the product loop
-# uniform and leaves the yaml config untouched).
+# Per-problem sweep specs: each problem maps to a LIST of specs so
+# full-domain and windowed combos can be swept in one run. Omit
+# 'num_windows'/'m_distribution' in a spec to run on the full domain
+# ([None] placeholder keeps the product loop uniform and forces
+# time_marching.enabled = False for that combo).
 SWEEPS = {
-    'kdv': {
-        'M': [20, 25, 30],
-        'num_windows': [5],
-        'm_distribution': ['linear', 'quadratic'],
-        'eps': [0.0],
-    },
+    'kdv': [
+        {  # full domain, no time-marching windows
+            'M': [8, 10, 12, 15, 18, 20],
+        },
+        {  # windowed trees
+            'M': [10, 12, 15, 18, 20],
+            'num_windows': [3, 5],
+            'm_distribution': ['quadratic', 'linear'],
+        },
+    ],
 }
 
 OUTPUT_ROOT = REPO_ROOT / 'perfect_tree_examples' / 'sweep'
@@ -127,22 +133,25 @@ def main():
         * len(spec.get('num_windows', [None]))
         * len(spec.get('m_distribution', [None]))
         * len(spec.get('eps', [None]))
-        for spec in SWEEPS.values()
+        for specs in SWEEPS.values()
+        for spec in specs
     )
     print(f"Sweep problems: {list(SWEEPS)} ({n_combos} combos total)")
 
     summary = {}
     t0 = time.time()
-    for problem, spec in SWEEPS.items():
+    for problem, specs in SWEEPS.items():
         if problem not in base_cfg:
             print(f"Skipping {problem}: not in experiments_plan.yaml")
             continue
-        summary[problem] = {}
-        for M, W, dist, eps in itertools.product(
-                spec['M'],
-                spec.get('num_windows', [None]),
-                spec.get('m_distribution', [None]),
-                spec.get('eps', [None])):
+        summary.setdefault(problem, {})
+        for M, W, dist, eps in (
+                combo for s in specs
+                for combo in itertools.product(
+                    s['M'],
+                    s.get('num_windows', [None]),
+                    s.get('m_distribution', [None]),
+                    s.get('eps', [None]))):
             combo = _combo_name(M, W, dist, eps)
             out_dir = OUTPUT_ROOT / problem / combo
             out_dir.mkdir(parents=True, exist_ok=True)

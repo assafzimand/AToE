@@ -542,28 +542,30 @@ def process_problem_with_time_marching(
     print(f"  Full data: X={X_full.shape}, y={y_full.shape if hasattr(y_full, 'shape') else '?'}, "
           f"min_samples_leaf={min_samples_leaf}")
 
-    # Compute window boundaries
+    # Compute window boundaries — same edges AND slice masks as the
+    # pipeline's windowed tree (trainer.orchestrator._build_tree_once):
+    # np.linspace edges, boundary rows included in BOTH adjacent slices.
+    # A half-open mask differs by one grid row per edge, which shifts
+    # sklearn's midpoint split candidates and can flip near-tie M-term
+    # selections relative to an actual run.
     t_min, t_max = problem_cfg['temporal_domain']
-    dt = (t_max - t_min) / num_windows
-    
+    edges = np.linspace(float(t_min), float(t_max), num_windows + 1)
+
     # Collect nodes from all windows
     all_window_nodes = []  # All raw tree nodes from all windows
     all_accepted_nodes = []  # All accepted nodes from all windows
     all_bfs_accepted = []  # For JSON output
-    
+
     for win_idx in range(num_windows):
-        win_t_start = t_min + win_idx * dt
-        win_t_end = t_min + (win_idx + 1) * dt
+        win_t_start = float(edges[win_idx])
+        win_t_end = float(edges[win_idx + 1])
         win_M = m_per_window[win_idx]
-        
+
         print(f"\n  Window {win_idx}: t in [{win_t_start:.4f}, {win_t_end:.4f}], M={win_M}")
-        
+
         # Filter data to this window's temporal range
         t_col = X_full[:, -1]  # Last column is t
-        mask = (t_col >= win_t_start) & (t_col < win_t_end)
-        # Include endpoint for last window
-        if win_idx == num_windows - 1:
-            mask = (t_col >= win_t_start) & (t_col <= win_t_end)
+        mask = (t_col >= win_t_start - 1e-12) & (t_col <= win_t_end + 1e-12)
         
         X_win = X_full[mask]
         y_win = y_full[mask] if y_full.ndim == 1 else y_full[mask]
@@ -573,27 +575,32 @@ def process_problem_with_time_marching(
             continue
         
         print(f"    Window data: {len(X_win)} samples")
-        
-        # Fit tree for this window: the root box IS the exact window box
-        # (domain in space, [win_t_start, win_t_end] in time) — bounds are
-        # never derived from the sampled points.
-        win_bounds = {
-            'lower': list(domain_bounds['lower'][:-1]) + [win_t_start],
-            'upper': list(domain_bounds['upper'][:-1]) + [win_t_end],
-        }
+
+        # Fit tree for this window with the FULL-DOMAIN box, then clip node
+        # boxes to the window's t-range AFTER acceptance — exactly what the
+        # pipeline does (trainer.orchestrator._build_tree_once). This matters
+        # for the M-term ranking: wavelet norm² = ||ψ||² × box volume, and a
+        # node that never splits on t keeps the full-domain t-extent until
+        # the post-acceptance clip, so ranking with window-box bounds selects
+        # a DIFFERENT accepted set than an actual run.
         try:
             (node_dicts, accepted_ids,
              bfs_accepted, children_left) = fit_and_get_all_nodes(
                 X_win, y_win, max_depth, min_samples_leaf, win_M, variable_for_node_accept,
-                domain_bounds=win_bounds,
+                domain_bounds=domain_bounds,
                 epsilon_node_acceptance=epsilon_node_acceptance,
             )
 
-            # Tag nodes with window index for later reference
-            for nd in node_dicts:
+            # Tag nodes with window index; clip boxes to the window t-range
+            # (post-acceptance, like the pipeline).
+            for nd in node_dicts + bfs_accepted:
                 nd['window_idx'] = win_idx
-            for nd in bfs_accepted:
-                nd['window_idx'] = win_idx
+                bl = list(nd['bounds_lower'])
+                bu = list(nd['bounds_upper'])
+                bl[-1] = max(float(bl[-1]), win_t_start)
+                bu[-1] = min(float(bu[-1]), win_t_end)
+                nd['bounds_lower'] = bl
+                nd['bounds_upper'] = bu
             
             all_window_nodes.extend(node_dicts)
             all_accepted_nodes.extend([n for n in node_dicts if n['accepted']])
