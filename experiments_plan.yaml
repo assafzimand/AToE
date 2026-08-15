@@ -1,31 +1,21 @@
 # ==========================================================================
-# OVERNIGHT PLAN 2026-08-15: 4 runs.
+# KDV WTREE M15 W3-LINEAR PHASE 3 (2026-08-15): single run, exact mimic of
+# kdv_wtree_M18_W3lin_ifnorm (20260814_102454: phase-3 best 5.19e-6 hard,
+# 17 leaves) with ONE change: M_experts_num 18 -> 15. No order decay.
 #
-# RUN 1 - KDV WTREE M18 W3-LINEAR + INTERFACE ORDER-DECAY 0.1: identical
-# to kdv_wtree_M18_W3lin_ifnorm (20260814_102454, phase-3 best 5.19e-6,
-# 17 leaves) except split_icbc.interface_order_decay: 0.1 (order-k
-# interface derivative term x 0.1^k on top of normalization; value term
-# untouched). Measured basis: t>0.67 laggards spend 40-77% of loss
-# matching root derivs 7-20x TIGHTER than the root's derivs match truth
-# (root u_xx rel err 2.9e-4-8.3e-4 on those faces vs expert mismatch
-# 4.3e-5) while the value term (tracks rel-L2, needs ~x100 more) gets
-# 4-13%. Phase 3 only, direct A/B vs 20260814_102454.
+# Motivation: the ft ablation (20260814_201306, all 5 cells) showed joint
+# leaf fine-tune with 17 leaves = n=15,657 params OOMs SSBroyden on A10G
+# at ~epoch 2000/40k (each n x n float64 = 1.83 GiB, ~10 alive at the
+# update peak). Re-estimated A10G ceiling for a full 40k ft: ~14-15
+# leaves. M15 W3-linear should land ~14-15 leaves, giving a phase-3
+# checkpoint that a joint fine-tune can actually train to completion.
 #
-# RUNS 2-4 - KS ROOT-ONLY TRIO (M_experts_num 0: nothing spawns, root
-# saved as drop-in best_model_root.pt). The simple 60x4 KS root was stuck
-# (rel 0.76 at the switch, residual 95% of loss). Each arm adds ONE
-# mechanism; all: base [2,64,64,64,64,64,1], ic=1000, 2k Adam @1e-3 +
-# 40k SSBroyden (initial_train 42000/sw2000), patience 5, tol 1e-14,
-# float64, seed 42. Causal/fourier/RAD flags live ONLY in these entries
-# (base_config stays clean).
-#   2. ks_root_64x5_rad05:        RAD 0.5 + resample every 500 SSB epochs
-#   3. ks_root_64x5_causal:       causal training (32 chunks, tol
-#      [0.01,0.1,1]), STATIC sampling, no RAD (causal papers use uniform
-#      draws; RAD would concentrate points where causal down-weights)
-#   4. ks_root_64x5_periodic_rad05: exact periodic Fourier embedding
-#      (jaxpi 2-step, L=2pi, dim 10, scale 1.0; BC terms ~0 by
-#      construction - smoke-verified 2026-08-14: periodicity 4e-17,
-#      u_xxxx autograd clean) + RAD 0.5/resample 500
+# Recipe otherwise identical to 102454: full-domain root loaded (rel-L2
+# 1.618e-6), phase 3 only (fine_tune epochs 0), 2k Adam @1e-3 + 40k
+# SSBroyden (epochs 42000), split interface loss with max_interface_
+# derivative_order null (u, u_x, u_xx) + interface_term_normalization
+# true, ic=100, float64, tol 1e-14, seed 42, 20k residual + 256 IC/BC,
+# static sampling, patience 5, windowed tree W3 linear structure-only.
 # ==========================================================================
 base_config:
   activation: tanh
@@ -255,13 +245,12 @@ base_config:
     precondition_frequency: 10
     weight_decay: 0.0
   ssbroyden: {lr: 1.0, tolerance_grad: 1.0e-10}
-experiment_name: kdv_decay01_and_ks_root_trio
+experiment_name: kdv_wtree_M15_W3lin_ifnorm
 experiments:
 - adaptive_pinn:
-    M_experts_num: 18
+    M_experts_num: 15
     fine_tune: {epochs: 0}
-    split_icbc: {max_interface_derivative_order: null, interface_term_normalization: true,
-      interface_order_decay: 0.1}
+    split_icbc: {max_interface_derivative_order: null, interface_term_normalization: true}
   base_architecture: [2, 60, 60, 60, 60, 1]
   epochs: 42000
   experts_architecture: [2, 20, 20, 20, 1]
@@ -271,67 +260,10 @@ experiments:
     pretrained_local_expert_checkpoint: null
     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
       m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
-  name: kdv_wtree_M18_W3lin_ifnorm_dec01
+  name: kdv_wtree_M15_W3lin_ifnorm
   optimizer_1: adam
   optimizer_2: ssbroyden
   optimizer_switch_epoch: 2000
   patience_evals: 5
   problem: kdv
   ssbroyden: {tolerance_grad: 1.0e-14}
-- name: ks_root_64x5_rad05
-  adaptive_pinn:
-    M_experts_num: 0
-    fine_tune: {epochs: 0}
-    initial_train: {epochs: 42000, optimizer_switch_epoch: 2000}
-  base_architecture: [2, 64, 64, 64, 64, 64, 1]
-  epochs: 42000
-  experts_architecture: [2, 20, 20, 20, 1]
-  optimizer_1: adam
-  optimizer_2: ssbroyden
-  optimizer_switch_epoch: 2000
-  patience_evals: 5
-  problem: ks
-  ssbroyden: {tolerance_grad: 1.0e-14}
-  ks:
-    loss_weights: {ic: 1000.0}
-    adaptive_sampling: {enabled: true, adaptive_ratio: 0.5}
-    time_marching: {debug_windows: null, enabled: false, last_window_checkpoint: null}
-  sampling: {resample_every_epochs: 500}
-- name: ks_root_64x5_causal
-  adaptive_pinn:
-    M_experts_num: 0
-    fine_tune: {epochs: 0}
-    initial_train: {epochs: 42000, optimizer_switch_epoch: 2000}
-  base_architecture: [2, 64, 64, 64, 64, 64, 1]
-  epochs: 42000
-  experts_architecture: [2, 20, 20, 20, 1]
-  optimizer_1: adam
-  optimizer_2: ssbroyden
-  optimizer_switch_epoch: 2000
-  patience_evals: 5
-  problem: ks
-  ssbroyden: {tolerance_grad: 1.0e-14}
-  ks:
-    loss_weights: {ic: 1000.0}
-    causal_training: {enabled: true}
-    time_marching: {debug_windows: null, enabled: false, last_window_checkpoint: null}
-- name: ks_root_64x5_periodic_rad05
-  adaptive_pinn:
-    M_experts_num: 0
-    fine_tune: {epochs: 0}
-    initial_train: {epochs: 42000, optimizer_switch_epoch: 2000}
-  base_architecture: [2, 64, 64, 64, 64, 64, 1]
-  epochs: 42000
-  experts_architecture: [2, 20, 20, 20, 1]
-  optimizer_1: adam
-  optimizer_2: ssbroyden
-  optimizer_switch_epoch: 2000
-  patience_evals: 5
-  problem: ks
-  ssbroyden: {tolerance_grad: 1.0e-14}
-  ks:
-    loss_weights: {ic: 1000.0}
-    fourier_features: {dim: 10, enabled: true, periodic: true, scale: 1.0}
-    adaptive_sampling: {enabled: true, adaptive_ratio: 0.5}
-    time_marching: {debug_windows: null, enabled: false, last_window_checkpoint: null}
-  sampling: {resample_every_epochs: 500}
