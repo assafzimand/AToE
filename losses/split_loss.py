@@ -124,6 +124,16 @@ def build_split_loss(
     # Periodic PDEs use cross-expert BC pairing, so skip Dirichlet-to-zero
     is_periodic = problem in PERIODIC_PROBLEMS
 
+    # Optional cap on the periodic-pairing derivative order (per-problem
+    # ``bc_max_derivative_order``, same knob as the global loss). None keeps
+    # the default m-1 pairing; 0 pairs the value only.
+    bc_pair_max_order = pc.get('bc_max_derivative_order')
+    if is_periodic and bc_pair_max_order is not None:
+        _full = pde_spatial_order(problem) - 1
+        logger.info(f"[SplitLoss] Periodic BC pairing capped at order "
+                    f"{int(bc_pair_max_order)} (default for {problem}: "
+                    f"{_full}).")
+
     pde_res_fn, deriv_fn = _import_pde_helpers(problem)
     pde_params = _get_pde_params(problem, pc)
 
@@ -202,6 +212,7 @@ def build_split_loss(
             bc_loss_contrib, bc_per_expert = _compute_periodic_bc_loss(
                 model, x, t, expert_ids, kinds,
                 bc_face_ids, device, problem,
+                max_order=bc_pair_max_order,
             )
             if bc_loss_contrib.item() > 0:
                 logger.debug(
@@ -457,6 +468,7 @@ def _compute_expert_loss(
 
 def _compute_periodic_bc_loss(
     model, x, t, expert_ids, kinds, bc_face_ids, device, problem,
+    max_order=None,
 ):
     """Compute periodic BC loss via cross-expert pairing.
 
@@ -465,6 +477,8 @@ def _compute_periodic_bc_loss(
     order m-1 (C^{m-1} periodicity, m = highest spatial order of the PDE),
     summed over all output components (e.g. real+imag for Schrodinger). For
     the 2nd-order PDEs this is value + u_x; KdV adds u_xx, KS adds u_xx + u_xxx.
+    ``max_order`` (the per-problem ``bc_max_derivative_order`` config key)
+    caps the pairing order; 0 pairs the value only.
 
     Returns:
         (loss, per_expert): total pairing loss (scalar tensor) and a dict
@@ -562,6 +576,8 @@ def _compute_periodic_bc_loss(
             # is the value mismatch, order_terms[k] the k-th derivative — kept
             # separate so each order is a recorded 'bc'/'bc_dx'/… line.
             n_deriv = pde_spatial_order(problem) - 1
+            if max_order is not None:
+                n_deriv = min(n_deriv, int(max_order))
             order_terms = [torch.tensor(0.0, device=device)
                            for _ in range(n_deriv + 1)]
             for c in range(u_l_full.shape[1]):
