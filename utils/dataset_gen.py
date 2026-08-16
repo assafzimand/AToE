@@ -123,6 +123,29 @@ def generate_and_save_datasets(config: Dict, force: bool = False) -> None:
     # Dynamically import the solver for the problem
     solver_module = importlib.import_module(f"solvers.{problem}_solver")
 
+    # Self-heal on config mismatch: a cached draw with a different dtype or
+    # point count would otherwise crash loudly at load time (the setup-time
+    # guard) — e.g. a multi-cell plan mixing float64 and float32 experiments.
+    # Regenerate here, loudly, instead of dying mid-plan.
+    if train_path.exists() and not force:
+        try:
+            cached = torch.load(train_path, map_location='cpu', weights_only=False)
+            want_dtype = (torch.float64 if str(config.get('precision', 'float32')) == 'float64'
+                          else torch.float32)
+            want_n = (sizes['n_residual_train'] + sizes['n_initial_train']
+                      + sizes['n_boundary_train'])
+            got_dtype = cached['x'].dtype
+            got_n = cached['x'].shape[0]
+            if got_dtype != want_dtype or got_n != want_n:
+                logger.info(
+                    f"  Cached dataset {train_path} mismatches config "
+                    f"(dtype {got_dtype} vs {want_dtype}, N {got_n} vs {want_n}) "
+                    f"— regenerating.")
+                force = True
+        except Exception as e:
+            logger.info(f"  Cached dataset {train_path} unreadable ({e}) — regenerating.")
+            force = True
+
     # Generate training data if missing (or forced, e.g. per time-marching window)
     if force and train_path.exists():
         logger.info(f"Regenerating training data for {problem} (force=True)...")
