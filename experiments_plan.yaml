@@ -280,7 +280,7 @@ experiments:
     fourier_features: {dim: 10, enabled: false, periodic: false, scale: 2.0}
     loss_weights: {bc: 1.0, ic: 100.0}
     pretrained_base_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-4-60-roots_ic_100_tol14/full_domain_single_root/best_model_root.pt
-    pretrained_local_expert_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-4-60-roots_ic_100_tol14/full_domain_phase_W3_M15_linear
+    pretrained_local_expert_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-4-60-roots_ic_100_tol14/full_domain_phase_W3_M15_linear/best_model_phase3.pt
     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
       m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
   name: kdv_ft_A1_ssb40k_sig010_collar07
@@ -303,7 +303,7 @@ experiments:
     fourier_features: {dim: 10, enabled: false, periodic: false, scale: 2.0}
     loss_weights: {bc: 1.0, ic: 100.0}
     pretrained_base_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-4-60-roots_ic_100_tol14/full_domain_single_root/best_model_root.pt
-    pretrained_local_expert_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-4-60-roots_ic_100_tol14/full_domain_phase_W3_M15_linear
+    pretrained_local_expert_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-4-60-roots_ic_100_tol14/full_domain_phase_W3_M15_linear/best_model_phase3.pt
     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
       m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
   name: kdv_ft_A2_ssb40k_sig005_collar04
