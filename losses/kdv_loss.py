@@ -123,7 +123,18 @@ def build_loss(**cfg) -> Callable:
 
     # Disable soft BC penalty when periodic Fourier embedding is used — BC is
     # enforced exactly by the embedding so the MSE term is redundant noise.
-    use_bc = not cfg['fourier_features']['periodic']
+    # 'root_only': only the base network is periodic — the BC term stays off
+    # while the bare root carries the prediction (num_experts == 0) but turns
+    # back ON once leaf experts carry the composition (fine-tune, composed
+    # eval), since the non-periodic experts don't hard-enforce periodicity.
+    _ff_periodic = cfg['fourier_features']['periodic']
+
+    def _bc_active(model: nn.Module) -> bool:
+        if not _ff_periodic:
+            return True
+        if _ff_periodic == 'root_only':
+            return getattr(model, 'num_experts', 0) > 0
+        return False
 
     # Highest spatial derivative matched by the periodic BC term. Default 2
     # matches u, u_x, u_xx (C² seam for the 3rd-order PDE); 0 matches u only.
@@ -156,6 +167,10 @@ def build_loss(**cfg) -> Callable:
         t = batch['t']  # (N, 1)
         h_gt = batch.get('h_gt', batch.get('u_gt'))  # (N, 1)
         masks = batch['mask']
+
+        # Per-call: under periodic == 'root_only' the guard depends on which
+        # model carries the prediction (bare root vs expert composition).
+        use_bc = _bc_active(model)
 
         N = x.shape[0]
         device = x.device

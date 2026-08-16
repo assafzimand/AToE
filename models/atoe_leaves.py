@@ -140,6 +140,30 @@ class AToELeaves(nn.Module):
 
         self._timer = None
 
+    def _expert_network_config(self):
+        """Config for expert/corrector network construction.
+
+        With ``fourier_features.periodic == 'root_only'`` only the base keeps
+        the periodic embedding (and the global losses keep skipping the BC
+        terms, since any truthy ``periodic`` disables them); experts and the
+        corrector get a scrubbed copy with ``periodic: false`` — plain random
+        Fourier features — so the split loss's cross-expert periodic pairing
+        remains the experts' BC enforcement.
+        """
+        ff = self.config.get('fourier_features', {}) or {}
+        if ff.get('periodic') != 'root_only':
+            return self.config
+        cfg = dict(self.config)
+        ff_plain = dict(ff)
+        ff_plain['periodic'] = False
+        cfg['fourier_features'] = ff_plain
+        problem = cfg.get('problem')
+        if problem and isinstance(cfg.get(problem), dict):
+            pc = dict(cfg[problem])
+            pc['fourier_features'] = ff_plain
+            cfg[problem] = pc
+        return cfg
+
     @property
     def num_experts(self) -> int:
         return len(self.experts)
@@ -365,14 +389,14 @@ class AToELeaves(nn.Module):
 
         if copy_from_idx is not None and self.atoe_threshold_capacity is None:
             expert = create_network(
-                architecture, self.activation, self.config,
+                architecture, self.activation, self._expert_network_config(),
                 is_base=True, expert_type=self.expert_type
             )
             expert = expert.to(device)
             # Weight copy handled by apply_parent_copy_init in trainer.py
         else:
             expert = create_network(
-                architecture, self.activation, self.config,
+                architecture, self.activation, self._expert_network_config(),
                 is_base=True, expert_type=self.expert_type
             )
             expert = expert.to(device)
@@ -413,7 +437,7 @@ class AToELeaves(nn.Module):
                 if self.corrector_architecture_cfg
                 else list(self.experts_architecture))
         corrector = create_network(
-            arch, self.activation, self.config,
+            arch, self.activation, self._expert_network_config(),
             is_base=True, expert_type=self.expert_type
         ).to(device=device, dtype=ref_param.dtype)
         if self.corrector_init == 'zero':
@@ -681,7 +705,7 @@ class AToELeaves(nn.Module):
                 expert_arch = self._infer_architecture_from_state_dict(expert_state)
 
             expert = create_network(
-                expert_arch, self.activation, self.config,
+                expert_arch, self.activation, self._expert_network_config(),
                 is_base=True, expert_type=saved_expert_type
             )
             expert.load_state_dict(expert_state)
@@ -703,7 +727,7 @@ class AToELeaves(nn.Module):
                 corr_arch = self._infer_architecture_from_state_dict(saved_corrector)
             ref_param = next(self.base_model.parameters())
             self.corrector = create_network(
-                corr_arch, self.activation, self.config,
+                corr_arch, self.activation, self._expert_network_config(),
                 is_base=True, expert_type=saved_expert_type
             ).to(device=ref_param.device, dtype=ref_param.dtype)
             self.corrector.load_state_dict(saved_corrector)
