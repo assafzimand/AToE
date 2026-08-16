@@ -201,12 +201,16 @@ def main():
         dataset_dir = Path("datasets") / problem
         train_data_path = dataset_dir / "training_data.pt"
 
+        # Always route through the generator: it skips when the cached file
+        # matches the config, regenerates when it is missing, and self-heals
+        # (loudly) when the cache mismatches the config's dtype or sizes.
         if not train_data_path.exists():
             logger.info("  Training dataset not found. Generating...")
-            from utils.dataset_gen import generate_and_save_datasets
-            generate_and_save_datasets(config)
         else:
-            logger.info(f"  Training dataset found: {train_data_path}")
+            logger.info(f"  Training dataset found: {train_data_path} "
+                        f"(verifying against config)...")
+        from utils.dataset_gen import generate_and_save_datasets
+        generate_and_save_datasets(config)
 
         # Time-marching: separate models trained per temporal window.
         # only_for_tree_structure: the window count / M distribution shape the

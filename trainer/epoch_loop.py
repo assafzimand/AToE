@@ -319,6 +319,36 @@ def _train_segment(
     else:
         switch_epoch = total_epochs + 1  # never switch
 
+    # ── Per-optimizer residual pool (ALWAYS on; global segments only) ──
+    # Fixed rule, no config flag: Adam/SOAP train on `batch_size` residual
+    # points per step, as ONE full batch that also carries ALL IC/BC points
+    # — 1 step = 1 epoch, and the every-epoch Adam resample keeps the draw
+    # fresh (when resampling is disabled the subsample simply stays fixed).
+    # LBFGS/SSBroyden train on the full sampling.n_residual_train pool,
+    # which is kept aside untouched here and swapped back in at the
+    # optimizer switch. So: `batch_size` = points per Adam/SOAP step;
+    # `n_residual_train` = the full-batch pool (and the on-disk dataset).
+    # If batch_size >= the pool, the subsample is the whole pool and this
+    # is a no-op. Split phase 3 has its own per-expert data path.
+    _full_train_data = train_data
+    if (optimizer_1_name in ('adam', 'soap')
+            and getattr(ctx, '_split_context', None) is None):
+        from utils.dataset_gen import subsample_residual_rows
+        _n_full = int(_full_train_data['mask']['residual'].sum())
+        if int(cfg['batch_size']) < _n_full:
+            train_data = subsample_residual_rows(
+                train_data, int(cfg['batch_size']), seed=int(cfg.get('seed', 0)))
+        train_loader = _create_dataloader(train_data, 10 ** 9, shuffle=True)
+        batches_per_epoch = 1
+        ctx.train_data = train_data
+        ctx.train_loader = train_loader
+        logger.info(
+            f"  [Sampling] {optimizer_1_name} phase: "
+            f"{int(train_data['mask']['residual'].sum())} residual points "
+            f"(min(batch_size, pool)) + all IC/BC as one full batch per "
+            f"step; full pool ({_n_full} residual) reserved for a "
+            f"full-batch optimizer phase.")
+
     total_steps_estimate = max(1, epoch_budget) * batches_per_epoch
 
     # Release the PREVIOUS segment's optimizer before allocating this one:
@@ -1047,6 +1077,23 @@ def _train_segment(
                 'from': _prev_opt,
                 'to': current_optimizer_name,
             })
+            # Per-optimizer pool rule: the full-batch optimizer takes over —
+            # swap the untouched full residual pool back in (static from here:
+            # the Adam-only every-epoch resample no longer applies).
+            if (train_data is not _full_train_data
+                    and current_optimizer_name in ('LBFGS', 'SSBroyden')):
+                _set_default_torch_device(device, full_batch=False)
+                train_data = _full_train_data
+                train_loader = _create_dataloader(train_data, 10 ** 9,
+                                                  shuffle=True)
+                _set_default_torch_device(device, full_batch=True)
+                ctx.train_data = train_data
+                ctx.train_loader = train_loader
+                logger.info(
+                    f"  [Sampling] {current_optimizer_name} phase: switched "
+                    f"to the full pool "
+                    f"({int(train_data['mask']['residual'].sum())} residual "
+                    f"points, static).")
         
         # Store train loss every epoch
         metrics['train_loss_epochs'].append(epoch)

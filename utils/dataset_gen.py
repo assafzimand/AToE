@@ -982,6 +982,33 @@ def resample_residual_inplace(
     return train_data
 
 
+def subsample_residual_rows(train_data: Dict, n_keep: int, seed: int = 0) -> Dict:
+    """Return a NEW train_data dict keeping a random ``n_keep`` of the
+    residual rows and ALL IC/BC rows.
+
+    Backs the fixed per-optimizer pool rule (see _train_segment): Adam/SOAP
+    always train on a batch_size residual pool (refreshed in place each epoch
+    as one full batch, so every step sees all IC/BC points), while the caller
+    keeps the untouched full pool aside for the full-batch optimizer phase.
+    The returned tensors are indexed copies — in-place resampling of the
+    small dict never mutates the original.
+    """
+    res_mask = train_data['mask']['residual']
+    res_idx = torch.nonzero(res_mask, as_tuple=False).squeeze(1)
+    other_idx = torch.nonzero(~res_mask, as_tuple=False).squeeze(1)
+    n_keep = min(int(n_keep), res_idx.numel())
+    g = torch.Generator()
+    g.manual_seed(int(seed))
+    perm = torch.randperm(res_idx.numel(), generator=g)[:n_keep].to(res_idx.device)
+    idx = torch.cat([res_idx[perm], other_idx])
+    return {
+        'x': train_data['x'][idx],
+        't': train_data['t'][idx],
+        'h_gt': train_data['h_gt'][idx],
+        'mask': {k: v[idx] for k, v in train_data['mask'].items()},
+    }
+
+
 def load_dataset(
     path: str,
     device: torch.device = None
