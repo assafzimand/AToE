@@ -1,27 +1,30 @@
 # ==========================================================================
-# KDV ROOT-ONLY 128x6 PERIODIC, ADAM 30K + LBFGS 15K (2026-08-16): fresh
-# root, no phase 3 (top-level epochs 0), no fine-tune. Root MLP 6x128
-# with PERIODIC Fourier embedding, root_only mode (dim auto -> 64 freqs
-# -> 128-dim embedding; scale 2.0): BC hard-enforced by the embedding,
-# so the global-loss bc terms are OFF during root training (num_experts
-# == 0 branch of the kdv-loss guard).
+# KDV ROOT-ONLY 128x6 PERIODIC, ADAM 100K + LBFGS 15K (2026-08-16 v2):
+# fresh root, no phase 3 (top-level epochs 0), no fine-tune. Root MLP
+# 6x128 with PERIODIC Fourier embedding, root_only mode (dim auto -> 64
+# freqs -> 128-dim embedding; scale 2.0, L=2 from the [-1,1] domain —
+# checkpoint-verified exact: |u(-1)-u(+1)| ~ 3e-16): BC hard-enforced,
+# global-loss bc terms OFF during root training.
 #
-# Optimization: fixed 20k residual pool drawn ONCE (sampling.resample_
-# every_epochs: 0 — the ONLY value that stays static under Adam; any
-# positive cadence is overridden to every-epoch by the Adam branch).
-# Adam phase: the loader batches residual+IC+BC together (20000+256+256
-# = 20512 points) -> ceil(20512/4096) = 6 minibatches = 6 Adam steps/
-# epoch (last batch 32 pts); 5000 epochs = 30k Adam steps. lr 1e-3,
-# 2k-step linear warmup (start factor 0.01), then exp decay x0.9/5k.
-# LBFGS phase: full-batch (loader ignored, closure on all 20512 points),
-# 1 step/epoch, max_iter 1, history 100, strong Wolfe; 15000 epochs =
-# 15k LBFGS steps; scheduler inactive under LBFGS.
-# initial_train epochs 20000 total, switch at 5000.
+# v2 changes after the 30k run froze at the LBFGS handoff: (a) Adam now
+# runs 100k steps — the successful bcu run's own trajectory sat at
+# rel-L2 0.65-0.70 until ~20k steps and only broke out by 30-50k, so
+# the 30k handoff was mid-plateau; (b) resample_every_epochs 99999 ->
+# under Adam the 20k pool is REDRAWN EVERY EPOCH (mimics the winning
+# fresh-sampling recipe), while the LBFGS phase keeps it static;
+# (c) freeze_stop_epochs 100 (was 5) — fp32 strong-Wolfe can freeze
+# (bit-identical loss); give it 100 epochs before stopping the segment.
 #
-# float32 (user's call; fp32 strong-Wolfe may take tiny steps late),
-# seed 42, 256 IC/BC, ic weight 1000 (bc weight inert under periodic).
-# Patience disabled (999999). DELETE datasets/kdv/training_data.pt
-# before running (pool 4096 -> 20000; cache guard only checks dtype).
+# Adam phase: loader batches residual+IC+BC (20512 pts) -> 6 minibatch
+# steps/epoch; 16667 epochs = ~100k Adam steps. lr 1e-3, 2k-step linear
+# warmup (start factor 0.01), exp decay x0.9/5k steps (~1.3e-4 at the
+# handoff). LBFGS phase: full-batch closure on all 20512 points, 1
+# step/epoch, max_iter 1, history 100, strong Wolfe; 15000 epochs = 15k
+# steps; scheduler inactive. initial_train epochs 31667, switch 16667.
+#
+# float32, seed 42, 256 IC/BC, ic weight 1000 (bc weight inert).
+# Patience disabled (999999). Dataset cache already regenerated at
+# 20k/float32 — no delete needed.
 # Carried for later phases (inert here): bc_max_derivative_order 2,
 # split_icbc max_interface_derivative_order null (= full order, u_xx
 # for kdv) + interface_term_
@@ -256,14 +259,14 @@ base_config:
     precondition_frequency: 10
     weight_decay: 0.0
   ssbroyden: {lr: 1.0, tolerance_grad: 1.0e-10}
-experiment_name: kdv_root128x6_periodic_adam30k_lbfgs15k
+experiment_name: kdv_root128x6_periodic_adam100k_lbfgs15k
 experiments:
 - adaptive_pinn:
     M_experts_num: 18
     fine_tune: {epochs: 0}
-    initial_train: {epochs: 20000, lr: 0.001, lr_decay_rate: 0.9, lr_decay_steps: 5000,
+    initial_train: {epochs: 31667, lr: 0.001, lr_decay_rate: 0.9, lr_decay_steps: 5000,
       lr_schedule: exponential, lr_warmup_steps: 2000, optimizer_1: adam, optimizer_2: lbfgs,
-      optimizer_switch_epoch: 5000}
+      optimizer_switch_epoch: 16667}
     split_icbc: {max_interface_derivative_order: null, interface_term_normalization: true}
   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
   batch_size: 4096
@@ -277,8 +280,9 @@ experiments:
     pretrained_local_expert_checkpoint: null
     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
       m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
-  name: kdv_root128x6_periodic_adam30k_lbfgs15k
+  freeze_stop_epochs: 100
+  name: kdv_root128x6_periodic_adam100k_lbfgs15k
   patience_evals: 999999
   precision: float32
   problem: kdv
-  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 0}
+  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
