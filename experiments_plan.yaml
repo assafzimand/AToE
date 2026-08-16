@@ -194,7 +194,12 @@ base_config:
     wavelet_threshold: 0.04
     window_smoothness_order: 4
     window_type: smoothstep
-  lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 1.0, max_iter: 1, tolerance_change: 0.0, tolerance_grad: 0.0}
+  # lbfgs lr 0.1 (not 1.0): torch's strong-Wolfe first trial is
+  # t0 = lr*min(1, 1/|g|_1) ~ 1e-3 at this loss scale, which lands ON the
+  # loss cliff (f blows up ~6x); whether the zoom recovers or collapses to
+  # t=0 (permanent freeze — both colab runs) is draw-dependent. lr 0.1
+  # puts t0 ~ 1e-4 inside the descent valley (probe-verified 2026-08-17).
+  lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.1, max_iter: 1, tolerance_change: 1.0e-14, tolerance_grad: 1.0e-14}
   lr: 0.001
   lr_decay_rate: 0.98
   lr_decay_steps: 1000
