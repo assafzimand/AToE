@@ -75,6 +75,12 @@ class FCNet(nn.Module):
         effective_input_dim = layers[0]
         if use_ff:
             ff_dim = ff_cfg['dim']
+            if ff_dim in ('auto', None):
+                # Per-network sizing: the [cos, sin] embedding (2*ff_dim)
+                # matches the first hidden width, so the root and the smaller
+                # experts each get an input layer that neither bottlenecks
+                # nor balloons relative to their own capacity.
+                ff_dim = max(1, layers[1] // 2)
             ff_scale = ff_cfg['scale']
             if use_periodic:
                 _lo, _hi = problem_config['spatial_domain'][0]
