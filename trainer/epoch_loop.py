@@ -1080,7 +1080,13 @@ def _train_segment(
             # Per-optimizer pool rule: the full-batch optimizer takes over —
             # swap the untouched full residual pool back in (static from here:
             # the Adam-only every-epoch resample no longer applies).
-            if (train_data is not _full_train_data
+            # GLOBAL segments only: split (phase-3) segments reassign
+            # train_data on every per-expert redraw, so the identity check
+            # alone would wrongly fire here and clobber the split data with
+            # a plain loader (measured: KeyError 'mask' at the switch,
+            # 2026-08-17 phase-3 ablation run).
+            if (getattr(ctx, '_split_context', None) is None
+                    and train_data is not _full_train_data
                     and current_optimizer_name in ('LBFGS', 'SSBroyden')):
                 _set_default_torch_device(device, full_batch=False)
                 train_data = _full_train_data

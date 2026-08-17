@@ -509,4 +509,4 @@ experiments:
     n_initial_train: 64
     n_residual_train: 1000
     plot_samples_every: 0
-    resample_every_epochs: 0
+    resample_every_epochs: 99999

@@ -1,6 +1,6 @@
 # ==========================================================================
 # KDV PHASE 3 FROM THE 30K+30K PERIODIC ROOT — IFACE x BC ORDER
-# ABLATION, 5 CELLS (2026-08-17): root LOADED from roots_checkpoints/
+# ABLATION, 4+4 CELLS (2026-08-17): root LOADED from roots_checkpoints/
 # single_precision/kdv_adam30-lbfgs30_full_batch_root_periodic_128x6.pt
 # (the adam30k-fullbatch -> lbfgs30k periodic run, best root rel-L2
 # 5.32e-3; lbfgs FreezeStopped at its fp32 floor after 20.3k healthy
@@ -23,12 +23,13 @@
 #   kdv.bc_max_derivative_order (cross-expert periodic pairing — the
 #     non-periodic experts' only physical-BC enforcement): 2 | 0
 # iface 0 excluded: proven underdetermined (iface0 run, 2026-08-15).
-# Cell 5 (ifacefull_bc2_nonorm): baseline with interface_term_
-# normalization FALSE — ablates the per-order interface normalization
-# (phase-3 interface derivative terms only; value term and BC pairing
-# are never normalized either way).
-# Order: ifacefull_bc2 (baseline), ifacefull_bc0, iface1_bc2,
-# iface1_bc0, ifacefull_bc2_nonorm. ~6-7h/cell, ~33h total.
+# ACTIVE (4 cells, all interface_term_normalization TRUE):
+#   ifacefull_bc2 (baseline), ifacefull_bc0, iface1_bc2, iface1_bc0
+# COMMENTED OUT at the bottom of the file: the same 4 cells as _nonorm
+# twins (interface_term_normalization false — the per-order interface-
+# derivative normalization off; value term and BC pairing are never
+# normalized either way). Uncomment to run them. ~6-7h/cell,
+# ~26h for the active four.
 # ==========================================================================
 base_config:
   activation: tanh
@@ -385,33 +386,125 @@ experiments:
   precision: float32
   problem: kdv
   sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
-- adaptive_pinn:
-    M_experts_num: 18
-    fine_tune: {epochs: 0}
-    split_icbc: {max_interface_derivative_order: null, interface_term_normalization: false}
-  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
-  batch_size: 99999
-  epochs: 60000
-  experts_architecture: [2, 30, 30, 30, 1]
-  freeze_stop_epochs: 100
-  kdv:
-    bc_max_derivative_order: 2
-    fourier_features: {dim: auto, enabled: true, periodic: root_only, scale: 2.0}
-    loss_weights: {bc: 1000.0, ic: 1000.0}
-    pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_periodic_128x6.pt
-    pretrained_local_expert_checkpoint: null
-    time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
-      m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
-  lr: 0.001
-  lr_decay_rate: 0.9
-  lr_decay_steps: 2000
-  lr_schedule: exponential
-  lr_warmup_steps: 2000
-  name: kdv_p3_from30k30kroot_ifacefull_bc2_nonorm
-  optimizer_1: adam
-  optimizer_2: lbfgs
-  optimizer_switch_epoch: 30000
-  patience_evals: 999999
-  precision: float32
-  problem: kdv
-  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+# ── nonorm twins (interface_term_normalization false) — COMMENTED OUT:
+# uncomment to run; identical grid otherwise ──
+# - adaptive_pinn:
+#     M_experts_num: 18
+#     fine_tune: {epochs: 0}
+#     split_icbc: {max_interface_derivative_order: null, interface_term_normalization: false}
+#   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+#   batch_size: 99999
+#   epochs: 60000
+#   experts_architecture: [2, 30, 30, 30, 1]
+#   freeze_stop_epochs: 100
+#   kdv:
+#     bc_max_derivative_order: 2
+#     fourier_features: {dim: auto, enabled: true, periodic: root_only, scale: 2.0}
+#     loss_weights: {bc: 1000.0, ic: 1000.0}
+#     pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_periodic_128x6.pt
+#     pretrained_local_expert_checkpoint: null
+#     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
+#       m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
+#   lr: 0.001
+#   lr_decay_rate: 0.9
+#   lr_decay_steps: 2000
+#   lr_schedule: exponential
+#   lr_warmup_steps: 2000
+#   name: kdv_p3_from30k30kroot_ifacefull_bc2_nonorm
+#   optimizer_1: adam
+#   optimizer_2: lbfgs
+#   optimizer_switch_epoch: 30000
+#   patience_evals: 999999
+#   precision: float32
+#   problem: kdv
+#   sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+# - adaptive_pinn:
+#     M_experts_num: 18
+#     fine_tune: {epochs: 0}
+#     split_icbc: {max_interface_derivative_order: null, interface_term_normalization: false}
+#   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+#   batch_size: 99999
+#   epochs: 60000
+#   experts_architecture: [2, 30, 30, 30, 1]
+#   freeze_stop_epochs: 100
+#   kdv:
+#     bc_max_derivative_order: 0
+#     fourier_features: {dim: auto, enabled: true, periodic: root_only, scale: 2.0}
+#     loss_weights: {bc: 1000.0, ic: 1000.0}
+#     pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_periodic_128x6.pt
+#     pretrained_local_expert_checkpoint: null
+#     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
+#       m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
+#   lr: 0.001
+#   lr_decay_rate: 0.9
+#   lr_decay_steps: 2000
+#   lr_schedule: exponential
+#   lr_warmup_steps: 2000
+#   name: kdv_p3_from30k30kroot_ifacefull_bc0_nonorm
+#   optimizer_1: adam
+#   optimizer_2: lbfgs
+#   optimizer_switch_epoch: 30000
+#   patience_evals: 999999
+#   precision: float32
+#   problem: kdv
+#   sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+# - adaptive_pinn:
+#     M_experts_num: 18
+#     fine_tune: {epochs: 0}
+#     split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: false}
+#   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+#   batch_size: 99999
+#   epochs: 60000
+#   experts_architecture: [2, 30, 30, 30, 1]
+#   freeze_stop_epochs: 100
+#   kdv:
+#     bc_max_derivative_order: 2
+#     fourier_features: {dim: auto, enabled: true, periodic: root_only, scale: 2.0}
+#     loss_weights: {bc: 1000.0, ic: 1000.0}
+#     pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_periodic_128x6.pt
+#     pretrained_local_expert_checkpoint: null
+#     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
+#       m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
+#   lr: 0.001
+#   lr_decay_rate: 0.9
+#   lr_decay_steps: 2000
+#   lr_schedule: exponential
+#   lr_warmup_steps: 2000
+#   name: kdv_p3_from30k30kroot_iface1_bc2_nonorm
+#   optimizer_1: adam
+#   optimizer_2: lbfgs
+#   optimizer_switch_epoch: 30000
+#   patience_evals: 999999
+#   precision: float32
+#   problem: kdv
+#   sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+# - adaptive_pinn:
+#     M_experts_num: 18
+#     fine_tune: {epochs: 0}
+#     split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: false}
+#   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+#   batch_size: 99999
+#   epochs: 60000
+#   experts_architecture: [2, 30, 30, 30, 1]
+#   freeze_stop_epochs: 100
+#   kdv:
+#     bc_max_derivative_order: 0
+#     fourier_features: {dim: auto, enabled: true, periodic: root_only, scale: 2.0}
+#     loss_weights: {bc: 1000.0, ic: 1000.0}
+#     pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_periodic_128x6.pt
+#     pretrained_local_expert_checkpoint: null
+#     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
+#       m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
+#   lr: 0.001
+#   lr_decay_rate: 0.9
+#   lr_decay_steps: 2000
+#   lr_schedule: exponential
+#   lr_warmup_steps: 2000
+#   name: kdv_p3_from30k30kroot_iface1_bc0_nonorm
+#   optimizer_1: adam
+#   optimizer_2: lbfgs
+#   optimizer_switch_epoch: 30000
+#   patience_evals: 999999
+#   precision: float32
+#   problem: kdv
+#   sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
