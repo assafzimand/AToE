@@ -1,24 +1,24 @@
 # ==========================================================================
-# KDV ROOT-ONLY 128x6, ADAM 30K -> LBFGS 30K, PERIODIC VS PLAIN FF
-# (2026-08-17 v5): two runs. The 1k-Adam handoff was probe-diagnosed as
-# too early (directional derivatives collapse to ~1e-5 one LBFGS step in
-# — f64 crawls, fp32 freezes at ANY lr); the v3 sweep's best cell was
-# the 50k-Adam handoff. 30k Adam is the middle; LBFGS gets 30k steps.
+# KDV ROOT-ONLY 128x6, ADAM 50K -> LBFGS 30K, PERIODIC VS PLAIN FF
+# (2026-08-17 v7): two runs, an exact mimic of the v3 sweep's BEST cell
+# (run 20260817_003011: 50k Adam -> 15k LBFGS, periodic) with ONE
+# change — the LBFGS tail doubled to 30k steps (it was improving but
+# unconverged at 15k) — plus a plain-FF twin.
 #   run 1 (periodic):   fourier periodic root_only — BC hard-enforced,
-#     global-loss bc terms OFF (as in v2-v4).
+#     global-loss bc terms OFF (identical to the mimicked run).
 #   run 2 (noperiodic): plain RFF (periodic false) — soft BC active:
 #     FULL-order pairing u, u_x, u_xx (bc_max_derivative_order 2) at
 #     weight 1000. (null is NOT safe in the global kdv loss — it reads
 #     .get(key, 2), so an explicit null becomes None and crashes; 2 is
 #     the equivalent explicit value.)
 # Both: Adam lr 1e-3, 2k-step warmup (start factor 0.01), exp decay
-# x0.9/2k steps (handoff LR ~2.3e-4); initial_train epochs 60000,
-# switch 30000. LBFGS lr 0.1 (see lbfgs block comment), history 100,
+# x0.9/2k steps (handoff LR ~8e-5); initial_train epochs 80000,
+# switch 50000. LBFGS lr 0.1 (see lbfgs block comment), history 100,
 # strong Wolfe, max_iter 1, freeze_stop 100.
 #
-# Sampling: batch_size 99999 >= pool -> Adam runs FULL-BATCH (all 20512
-# points: 20k residual + 256 IC + 256 BC) with a FRESH draw every step
-# (dp-recipe Adam regime), 1 step = 1 epoch; LBFGS = full static 20k
+# Sampling (as in the mimicked run): Adam = batch_size (4096) FRESH
+# residual points per step as ONE full batch carrying ALL 256 IC + 256
+# BC points, 1 step = 1 epoch; LBFGS = full static 20k
 # pool swapped in at the switch. Root MLP 6x128, FF dim auto -> 64
 # freqs -> 128-dim, scale 2.0. float32, seed 42, ic weight 1000, no
 # phase 3 (epochs 0), no fine-tune, patience disabled. Dataset
@@ -259,17 +259,17 @@ base_config:
     precondition_frequency: 10
     weight_decay: 0.0
   ssbroyden: {lr: 1.0, tolerance_grad: 1.0e-10}
-experiment_name: kdv_root128x6_adam30k_fullbatch_lbfgs30k_periodic_vs_plain
+experiment_name: kdv_root128x6_adam50k_lbfgs30k_periodic_vs_plain
 experiments:
 - adaptive_pinn:
     M_experts_num: 18
     fine_tune: {epochs: 0}
-    initial_train: {epochs: 60000, lr: 0.001, lr_decay_rate: 0.9, lr_decay_steps: 2000,
+    initial_train: {epochs: 80000, lr: 0.001, lr_decay_rate: 0.9, lr_decay_steps: 2000,
       lr_schedule: exponential, lr_warmup_steps: 2000, optimizer_1: adam, optimizer_2: lbfgs,
-      optimizer_switch_epoch: 30000}
+      optimizer_switch_epoch: 50000}
     split_icbc: {max_interface_derivative_order: null, interface_term_normalization: true}
   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
-  batch_size: 99999
+  batch_size: 4096
   epochs: 0
   experts_architecture: [2, 30, 30, 30, 1]
   kdv:
@@ -281,7 +281,7 @@ experiments:
     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
       m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
   freeze_stop_epochs: 100
-  name: kdv_root128x6_periodic_adam30k_fullbatch_lbfgs30k
+  name: kdv_root128x6_periodic_adam50k_lbfgs30k
   patience_evals: 999999
   precision: float32
   problem: kdv
@@ -289,12 +289,12 @@ experiments:
 - adaptive_pinn:
     M_experts_num: 18
     fine_tune: {epochs: 0}
-    initial_train: {epochs: 60000, lr: 0.001, lr_decay_rate: 0.9, lr_decay_steps: 2000,
+    initial_train: {epochs: 80000, lr: 0.001, lr_decay_rate: 0.9, lr_decay_steps: 2000,
       lr_schedule: exponential, lr_warmup_steps: 2000, optimizer_1: adam, optimizer_2: lbfgs,
-      optimizer_switch_epoch: 30000}
+      optimizer_switch_epoch: 50000}
     split_icbc: {max_interface_derivative_order: null, interface_term_normalization: true}
   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
-  batch_size: 99999
+  batch_size: 4096
   epochs: 0
   experts_architecture: [2, 30, 30, 30, 1]
   kdv:
@@ -306,7 +306,7 @@ experiments:
     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
       m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
   freeze_stop_epochs: 100
-  name: kdv_root128x6_noperiodic_adam30k_fullbatch_lbfgs30k
+  name: kdv_root128x6_noperiodic_adam50k_lbfgs30k
   patience_evals: 999999
   precision: float32
   problem: kdv
