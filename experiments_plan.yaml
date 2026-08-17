@@ -23,13 +23,14 @@
 #   kdv.bc_max_derivative_order (cross-expert periodic pairing — the
 #     non-periodic experts' only physical-BC enforcement): 2 | 0
 # iface 0 excluded: proven underdetermined (iface0 run, 2026-08-15).
-# ACTIVE (4 cells, all interface_term_normalization TRUE):
-#   ifacefull_bc2 (baseline), ifacefull_bc0, iface1_bc2, iface1_bc0
-# COMMENTED OUT at the bottom of the file: the same 4 cells as _nonorm
-# twins (interface_term_normalization false — the per-order interface-
-# derivative normalization off; value term and BC pairing are never
-# normalized either way). Uncomment to run them. ~6-7h/cell,
-# ~26h for the active four.
+# ACTIVE (4 cells, all interface_term_normalization FALSE — per-order
+# interface-derivative normalization OFF; value term and BC pairing are
+# never normalized either way):
+#   ifacefull_bc2_nonorm, ifacefull_bc0_nonorm, iface1_bc2_nonorm,
+#   iface1_bc0_nonorm
+# COMMENTED OUT at the bottom of the file: the same 4 cells with
+# normalization TRUE. Uncomment to run them. ~6-7h/cell, ~26h for the
+# active four.
 # ==========================================================================
 base_config:
   activation: tanh
@@ -269,7 +270,7 @@ experiments:
 - adaptive_pinn:
     M_experts_num: 18
     fine_tune: {epochs: 0}
-    split_icbc: {max_interface_derivative_order: null, interface_term_normalization: true}
+    split_icbc: {max_interface_derivative_order: null, interface_term_normalization: false}
   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
   batch_size: 99999
   epochs: 60000
@@ -288,7 +289,7 @@ experiments:
   lr_decay_steps: 2000
   lr_schedule: exponential
   lr_warmup_steps: 2000
-  name: kdv_p3_from30k30kroot_ifacefull_bc2
+  name: kdv_p3_from30k30kroot_ifacefull_bc2_nonorm
   optimizer_1: adam
   optimizer_2: lbfgs
   optimizer_switch_epoch: 30000
@@ -299,7 +300,7 @@ experiments:
 - adaptive_pinn:
     M_experts_num: 18
     fine_tune: {epochs: 0}
-    split_icbc: {max_interface_derivative_order: null, interface_term_normalization: true}
+    split_icbc: {max_interface_derivative_order: null, interface_term_normalization: false}
   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
   batch_size: 99999
   epochs: 60000
@@ -318,7 +319,7 @@ experiments:
   lr_decay_steps: 2000
   lr_schedule: exponential
   lr_warmup_steps: 2000
-  name: kdv_p3_from30k30kroot_ifacefull_bc0
+  name: kdv_p3_from30k30kroot_ifacefull_bc0_nonorm
   optimizer_1: adam
   optimizer_2: lbfgs
   optimizer_switch_epoch: 30000
@@ -329,7 +330,7 @@ experiments:
 - adaptive_pinn:
     M_experts_num: 18
     fine_tune: {epochs: 0}
-    split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true}
+    split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: false}
   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
   batch_size: 99999
   epochs: 60000
@@ -348,7 +349,7 @@ experiments:
   lr_decay_steps: 2000
   lr_schedule: exponential
   lr_warmup_steps: 2000
-  name: kdv_p3_from30k30kroot_iface1_bc2
+  name: kdv_p3_from30k30kroot_iface1_bc2_nonorm
   optimizer_1: adam
   optimizer_2: lbfgs
   optimizer_switch_epoch: 30000
@@ -359,7 +360,7 @@ experiments:
 - adaptive_pinn:
     M_experts_num: 18
     fine_tune: {epochs: 0}
-    split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true}
+    split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: false}
   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
   batch_size: 99999
   epochs: 60000
@@ -378,7 +379,7 @@ experiments:
   lr_decay_steps: 2000
   lr_schedule: exponential
   lr_warmup_steps: 2000
-  name: kdv_p3_from30k30kroot_iface1_bc0
+  name: kdv_p3_from30k30kroot_iface1_bc0_nonorm
   optimizer_1: adam
   optimizer_2: lbfgs
   optimizer_switch_epoch: 30000
@@ -386,12 +387,12 @@ experiments:
   precision: float32
   problem: kdv
   sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
-# ── nonorm twins (interface_term_normalization false) — COMMENTED OUT:
-# uncomment to run; identical grid otherwise ──
+# ── NORMALIZED originals (interface_term_normalization true) — COMMENTED
+# OUT; uncomment to run ──
 # - adaptive_pinn:
 #     M_experts_num: 18
 #     fine_tune: {epochs: 0}
-#     split_icbc: {max_interface_derivative_order: null, interface_term_normalization: false}
+#     split_icbc: {max_interface_derivative_order: null, interface_term_normalization: true}
 #   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
 #   batch_size: 99999
 #   epochs: 60000
@@ -410,7 +411,7 @@ experiments:
 #   lr_decay_steps: 2000
 #   lr_schedule: exponential
 #   lr_warmup_steps: 2000
-#   name: kdv_p3_from30k30kroot_ifacefull_bc2_nonorm
+#   name: kdv_p3_from30k30kroot_ifacefull_bc2
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 30000
@@ -421,7 +422,7 @@ experiments:
 # - adaptive_pinn:
 #     M_experts_num: 18
 #     fine_tune: {epochs: 0}
-#     split_icbc: {max_interface_derivative_order: null, interface_term_normalization: false}
+#     split_icbc: {max_interface_derivative_order: null, interface_term_normalization: true}
 #   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
 #   batch_size: 99999
 #   epochs: 60000
@@ -440,7 +441,7 @@ experiments:
 #   lr_decay_steps: 2000
 #   lr_schedule: exponential
 #   lr_warmup_steps: 2000
-#   name: kdv_p3_from30k30kroot_ifacefull_bc0_nonorm
+#   name: kdv_p3_from30k30kroot_ifacefull_bc0
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 30000
@@ -451,7 +452,7 @@ experiments:
 # - adaptive_pinn:
 #     M_experts_num: 18
 #     fine_tune: {epochs: 0}
-#     split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: false}
+#     split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true}
 #   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
 #   batch_size: 99999
 #   epochs: 60000
@@ -470,7 +471,7 @@ experiments:
 #   lr_decay_steps: 2000
 #   lr_schedule: exponential
 #   lr_warmup_steps: 2000
-#   name: kdv_p3_from30k30kroot_iface1_bc2_nonorm
+#   name: kdv_p3_from30k30kroot_iface1_bc2
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 30000
@@ -481,7 +482,7 @@ experiments:
 # - adaptive_pinn:
 #     M_experts_num: 18
 #     fine_tune: {epochs: 0}
-#     split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: false}
+#     split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true}
 #   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
 #   batch_size: 99999
 #   epochs: 60000
@@ -500,7 +501,7 @@ experiments:
 #   lr_decay_steps: 2000
 #   lr_schedule: exponential
 #   lr_warmup_steps: 2000
-#   name: kdv_p3_from30k30kroot_iface1_bc0_nonorm
+#   name: kdv_p3_from30k30kroot_iface1_bc0
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 30000
