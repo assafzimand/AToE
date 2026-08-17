@@ -1,9 +1,12 @@
 # ==========================================================================
-# KDV ROOT-ONLY 128x6 PERIODIC, ADAM->LBFGS SWEEP, 3 RUNS (2026-08-17
-# v3): Adam budget ablation — run 1: 200k Adam (decay x0.9/5k); run 2:
-# 50k Adam (decay x0.9/2k); run 3: 100k Adam (decay x0.9/2k); each
-# followed by 15k LBFGS (lr 0.1 — see lbfgs block comment). Rerun of
-# the v2 periodic root with the NEW per-optimizer sampling rule
+# KDV ROOT-ONLY 128x6 PERIODIC, ADAM 1K + LBFGS 40K (2026-08-17 v4):
+# the dp-recipe shape (1k Adam warm-start @ flat 1e-3, no warmup/decay,
+# then a LONG 2nd-order phase — like the 1k Adam + 40k SSBroyden
+# double-precision recipe, but LBFGS since SSBroyden's dense Hessian is
+# impossible at 99k params). Motivated by the v3 sweep: adam50k+lbfgs15k
+# was the best cell but not fully converged. LBFGS lr 0.1 (see lbfgs
+# block comment). Single run, everything else identical to v3:
+# per-optimizer sampling rule
 # (hard-coded in epoch_loop, no flag): Adam trains on batch_size (4096)
 # FRESH residual points per step as ONE full batch that carries ALL 256
 # IC + 256 BC points — 1 step = 1 epoch — while LBFGS gets the full
@@ -260,14 +263,14 @@ base_config:
     precondition_frequency: 10
     weight_decay: 0.0
   ssbroyden: {lr: 1.0, tolerance_grad: 1.0e-10}
-experiment_name: kdv_root128x6_periodic_adam200k_lbfgs15k
+experiment_name: kdv_root128x6_periodic_adam1k_lbfgs40k
 experiments:
 - adaptive_pinn:
     M_experts_num: 18
     fine_tune: {epochs: 0}
-    initial_train: {epochs: 215000, lr: 0.001, lr_decay_rate: 0.9, lr_decay_steps: 5000,
-      lr_schedule: exponential, lr_warmup_steps: 2000, optimizer_1: adam, optimizer_2: lbfgs,
-      optimizer_switch_epoch: 200000}
+    initial_train: {epochs: 41000, lr: 0.001, lr_decay_rate: 0.9, lr_decay_steps: 5000,
+      lr_schedule: none, lr_warmup_steps: 0, optimizer_1: adam, optimizer_2: lbfgs,
+      optimizer_switch_epoch: 1000}
     split_icbc: {max_interface_derivative_order: null, interface_term_normalization: true}
   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
   batch_size: 4096
@@ -282,57 +285,7 @@ experiments:
     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
       m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
   freeze_stop_epochs: 100
-  name: kdv_root128x6_periodic_adam200k_lbfgs15k
-  patience_evals: 999999
-  precision: float32
-  problem: kdv
-  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
-- adaptive_pinn:
-    M_experts_num: 18
-    fine_tune: {epochs: 0}
-    initial_train: {epochs: 65000, lr: 0.001, lr_decay_rate: 0.9, lr_decay_steps: 2000,
-      lr_schedule: exponential, lr_warmup_steps: 2000, optimizer_1: adam, optimizer_2: lbfgs,
-      optimizer_switch_epoch: 50000}
-    split_icbc: {max_interface_derivative_order: null, interface_term_normalization: true}
-  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
-  batch_size: 4096
-  epochs: 0
-  experts_architecture: [2, 30, 30, 30, 1]
-  kdv:
-    bc_max_derivative_order: 2
-    fourier_features: {dim: auto, enabled: true, periodic: root_only, scale: 2.0}
-    loss_weights: {bc: 1000.0, ic: 1000.0}
-    pretrained_base_checkpoint: null
-    pretrained_local_expert_checkpoint: null
-    time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
-      m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
-  freeze_stop_epochs: 100
-  name: kdv_root128x6_periodic_adam50k_lbfgs15k
-  patience_evals: 999999
-  precision: float32
-  problem: kdv
-  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
-- adaptive_pinn:
-    M_experts_num: 18
-    fine_tune: {epochs: 0}
-    initial_train: {epochs: 115000, lr: 0.001, lr_decay_rate: 0.9, lr_decay_steps: 2000,
-      lr_schedule: exponential, lr_warmup_steps: 2000, optimizer_1: adam, optimizer_2: lbfgs,
-      optimizer_switch_epoch: 100000}
-    split_icbc: {max_interface_derivative_order: null, interface_term_normalization: true}
-  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
-  batch_size: 4096
-  epochs: 0
-  experts_architecture: [2, 30, 30, 30, 1]
-  kdv:
-    bc_max_derivative_order: 2
-    fourier_features: {dim: auto, enabled: true, periodic: root_only, scale: 2.0}
-    loss_weights: {bc: 1000.0, ic: 1000.0}
-    pretrained_base_checkpoint: null
-    pretrained_local_expert_checkpoint: null
-    time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
-      m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
-  freeze_stop_epochs: 100
-  name: kdv_root128x6_periodic_adam100k_lbfgs15k_v3
+  name: kdv_root128x6_periodic_adam1k_lbfgs40k
   patience_evals: 999999
   precision: float32
   problem: kdv
