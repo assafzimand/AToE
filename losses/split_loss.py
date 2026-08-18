@@ -74,6 +74,25 @@ def build_split_loss(
     w_bc = loss_weights['bc']
     w_cont = loss_weights.get('continuity', 1.0)
 
+    # Decoupled interface weights (``loss_weights.interface_ic`` /
+    # ``loss_weights.interface_bc``): the root-sourced interface terms no
+    # longer have to inherit the TRUE IC/BC weights. These are ABSOLUTE
+    # weights — the term enters the total as interface_ic * L, exactly like
+    # every other loss_weights entry; they are NOT multipliers on ic/bc
+    # (e.g. interface_ic: 1.0 applies weight 1 regardless of ic: 1000).
+    # Fallback when the key is absent = inherit ic/bc (backward compatible
+    # with every existing plan). Rationale (measured 2026-08-18, winner
+    # phase-3 cell): 12/17 experts converged EXACTLY to the root's regional
+    # error — interfaces at weight 1000 pin experts to root errors ~100x
+    # below the root's own accuracy.
+    w_iface_ic = loss_weights.get('interface_ic', w_ic)
+    w_iface_bc = loss_weights.get('interface_bc', w_bc)
+    if w_iface_ic != w_ic or w_iface_bc != w_bc:
+        logger.info(f"[SplitLoss] Interface weights decoupled: "
+                    f"interface_ic={w_iface_ic}, interface_bc={w_iface_bc} "
+                    f"(true ic={w_ic}, bc={w_bc} unchanged; periodic pairing "
+                    f"stays on bc).")
+
     # Optional cap on the interface derivative-matching order (see
     # _compute_expert_loss). None = default N-1.
     _split_icbc_cfg = (cfg.get('adaptive_pinn', {})
@@ -133,6 +152,20 @@ def build_split_loss(
         logger.info(f"[SplitLoss] Periodic BC pairing capped at order "
                     f"{int(bc_pair_max_order)} (default for {problem}: "
                     f"{_full}).")
+
+    # Optional per-order normalization of the pairing's DERIVATIVE terms
+    # (``split_icbc.bc_term_normalization``): divide the order-k pairing
+    # term by (1 + mean|∂^k u0|²) from the frozen root at the boundary
+    # points — the same medicine as interface_term_normalization. Measured
+    # (2026-08-18, phase-3 ablation): raw pairing scales are dx/value
+    # ~40-100x and dxx/value ~500-1100x early in training. Value term
+    # never scaled; default false keeps all past runs' semantics.
+    bc_norm = bool(_split_icbc_cfg.get('bc_term_normalization', False))
+    if is_periodic and bc_norm:
+        logger.info("[SplitLoss] Periodic BC pairing per-order normalization "
+                    "ENABLED: order-k pairing term divided by "
+                    "(1 + mean|d^k u0|^2) at the boundary points; value term "
+                    "unscaled.")
 
     pde_res_fn, deriv_fn = _import_pde_helpers(problem)
     pde_params = _get_pde_params(problem, pc)
@@ -201,6 +234,8 @@ def build_split_loss(
                 max_iface_order=max_iface_order,
                 iface_norm=iface_norm,
                 iface_decay=iface_decay,
+                w_iface_ic=w_iface_ic,
+                w_iface_bc=w_iface_bc,
             )
             total_loss = total_loss + comps['total']
             _record(per_expert_history, eidx, comps)
@@ -213,6 +248,8 @@ def build_split_loss(
                 model, x, t, expert_ids, kinds,
                 bc_face_ids, device, problem,
                 max_order=bc_pair_max_order,
+                interface_model=iface_src,
+                norm=bc_norm,
             )
             if bc_loss_contrib.item() > 0:
                 logger.debug(
@@ -339,6 +376,8 @@ def _compute_expert_loss(
     max_iface_order=None,
     iface_norm=False,
     iface_decay=1.0,
+    w_iface_ic=None,
+    w_iface_bc=None,
 ):
     """Per-expert local loss (no PoU). Residual is supplied precomputed.
 
@@ -379,7 +418,13 @@ def _compute_expert_loss(
     # fills the 'bc_*' entries afterwards for edge experts).
     for s in _DERIV_SUFFIX[:n_deriv]:
         comps['interface_bc' + s] = z.clone()
-        if is_periodic:
+    # The pairing's order is capped by bc_max_derivative_order, NOT by the
+    # interface cap — initialize its keys for the full PDE order so a
+    # pairing order above the interface cap still gets recorded (bug found
+    # 2026-08-18: iface1_bc2 trained the dxx pairing but its share was
+    # silently dropped from the history because 'bc_dxx' was never created).
+    if is_periodic:
+        for s in _DERIV_SUFFIX[:pde_spatial_order(problem) - 1]:
             comps['bc' + s] = z.clone()
 
     # ── IC true (real t=0) ──
@@ -458,17 +503,23 @@ def _compute_expert_loss(
             (u_bc - h_gt[bc_mask]) ** 2
         )
 
+    # Interface terms use their own (decoupled) weights when provided;
+    # fallback = inherit the true IC/BC weights (the historical behavior).
+    _w_iic = w_ic if w_iface_ic is None else w_iface_ic
+    _w_ibc = w_bc if w_iface_bc is None else w_iface_bc
     comps['total'] = (
         w_res * comps['residual']
-        + w_ic * (comps['ic'] + comps['interface_ic'])
-        + w_bc * (comps['interface_bc'] + comps['bc'])
+        + w_ic * comps['ic']
+        + _w_iic * comps['interface_ic']
+        + _w_ibc * comps['interface_bc']
+        + w_bc * comps['bc']
     )
     return comps
 
 
 def _compute_periodic_bc_loss(
     model, x, t, expert_ids, kinds, bc_face_ids, device, problem,
-    max_order=None,
+    max_order=None, interface_model=None, norm=False,
 ):
     """Compute periodic BC loss via cross-expert pairing.
 
@@ -479,6 +530,9 @@ def _compute_periodic_bc_loss(
     the 2nd-order PDEs this is value + u_x; KdV adds u_xx, KS adds u_xx + u_xxx.
     ``max_order`` (the per-problem ``bc_max_derivative_order`` config key)
     caps the pairing order; 0 pairs the value only.
+    ``norm`` (the ``split_icbc.bc_term_normalization`` config key) divides
+    the order-k pairing term by (1 + mean|∂^k u0|²) computed from the frozen
+    ``interface_model`` (root) at the boundary points; value term unscaled.
 
     Returns:
         (loss, per_expert): total pairing loss (scalar tensor) and a dict
@@ -578,6 +632,23 @@ def _compute_periodic_bc_loss(
             n_deriv = pde_spatial_order(problem) - 1
             if max_order is not None:
                 n_deriv = min(n_deriv, int(max_order))
+            # Per-order scales from the frozen root at the (left) boundary
+            # points — u0 is periodic so both edges share the same scale.
+            # Static draw + frozen root => constants of the segment.
+            _scales = None
+            if norm and n_deriv >= 1 and interface_model is not None:
+                x_ref = x_l_batch.detach().clone().requires_grad_(True)
+                u_ref = interface_model(torch.cat([x_ref, t_l_batch], dim=1))
+                _acc = [0.0] * n_deriv
+                for c_ref in range(u_ref.shape[1]):
+                    cur = u_ref[:, c_ref]
+                    for o in range(1, n_deriv + 1):
+                        cur = torch.autograd.grad(
+                            cur, x_ref, grad_outputs=torch.ones_like(cur),
+                            create_graph=True, retain_graph=True,
+                        )[0][:, d]
+                        _acc[o - 1] += float((cur.detach() ** 2).mean())
+                _scales = [1.0 + a / u_ref.shape[1] for a in _acc]
             order_terms = [torch.tensor(0.0, device=device)
                            for _ in range(n_deriv + 1)]
             for c in range(u_l_full.shape[1]):
@@ -598,6 +669,9 @@ def _compute_periodic_bc_loss(
                     order_terms[o] = order_terms[o] + torch.sum(
                         (cur_l - cur_r) ** 2)
 
+            if _scales is not None:
+                for o in range(1, n_deriv + 1):
+                    order_terms[o] = order_terms[o] / _scales[o - 1]
             pair_loss = order_terms[0]
             for term in order_terms[1:]:
                 pair_loss = pair_loss + term
