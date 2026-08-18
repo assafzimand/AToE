@@ -23,9 +23,9 @@
 #     stay 1000 and the periodic pairing stays on bc. Rationale: 12/17
 #     winner-cell experts converged EXACTLY to the root's regional error
 #     — weight-1000 interfaces pin them to root errors.
-# ACTIVE: cells 1-4 (inherit-weight grid). COMMENTED OUT at the bottom
-# of the file: cells 5-8 (_ifw1, applied weight 1) — uncomment to run.
-# ~6-7h/cell, ~26h for the active four.
+# ACTIVE: cells 5-8 (_ifw1, applied interface weight 1). COMMENTED OUT
+# at the bottom of the file: cells 1-4 (inherit-weight grid, interfaces
+# at 1000) — uncomment to run. ~6-7h/cell, ~26h for the active four.
 # ==========================================================================
 base_config:
   activation: tanh
@@ -275,7 +275,7 @@ experiments:
   kdv:
     bc_max_derivative_order: 1
     fourier_features: {dim: auto, enabled: true, periodic: root_only, scale: 2.0}
-    loss_weights: {bc: 1000.0, ic: 1000.0}
+    loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1.0, interface_ic: 1.0}
     pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_periodic_128x6.pt
     pretrained_local_expert_checkpoint: null
     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
@@ -285,7 +285,7 @@ experiments:
   lr_decay_steps: 2000
   lr_schedule: exponential
   lr_warmup_steps: 2000
-  name: kdv_p3_bothnorm_iface1_bc1
+  name: kdv_p3_bothnorm_iface1_bc1_ifw1
   optimizer_1: adam
   optimizer_2: lbfgs
   optimizer_switch_epoch: 30000
@@ -306,7 +306,7 @@ experiments:
   kdv:
     bc_max_derivative_order: 2
     fourier_features: {dim: auto, enabled: true, periodic: root_only, scale: 2.0}
-    loss_weights: {bc: 1000.0, ic: 1000.0}
+    loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1.0, interface_ic: 1.0}
     pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_periodic_128x6.pt
     pretrained_local_expert_checkpoint: null
     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
@@ -316,7 +316,7 @@ experiments:
   lr_decay_steps: 2000
   lr_schedule: exponential
   lr_warmup_steps: 2000
-  name: kdv_p3_bothnorm_iface1_bc2
+  name: kdv_p3_bothnorm_iface1_bc2_ifw1
   optimizer_1: adam
   optimizer_2: lbfgs
   optimizer_switch_epoch: 30000
@@ -337,7 +337,7 @@ experiments:
   kdv:
     bc_max_derivative_order: 1
     fourier_features: {dim: auto, enabled: true, periodic: root_only, scale: 2.0}
-    loss_weights: {bc: 1000.0, ic: 1000.0}
+    loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1.0, interface_ic: 1.0}
     pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_periodic_128x6.pt
     pretrained_local_expert_checkpoint: null
     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
@@ -347,7 +347,7 @@ experiments:
   lr_decay_steps: 2000
   lr_schedule: exponential
   lr_warmup_steps: 2000
-  name: kdv_p3_bothnorm_iface2_bc1
+  name: kdv_p3_bothnorm_iface2_bc1_ifw1
   optimizer_1: adam
   optimizer_2: lbfgs
   optimizer_switch_epoch: 30000
@@ -368,7 +368,7 @@ experiments:
   kdv:
     bc_max_derivative_order: 2
     fourier_features: {dim: auto, enabled: true, periodic: root_only, scale: 2.0}
-    loss_weights: {bc: 1000.0, ic: 1000.0}
+    loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1.0, interface_ic: 1.0}
     pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_periodic_128x6.pt
     pretrained_local_expert_checkpoint: null
     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
@@ -378,7 +378,7 @@ experiments:
   lr_decay_steps: 2000
   lr_schedule: exponential
   lr_warmup_steps: 2000
-  name: kdv_p3_bothnorm_iface2_bc2
+  name: kdv_p3_bothnorm_iface2_bc2_ifw1
   optimizer_1: adam
   optimizer_2: lbfgs
   optimizer_switch_epoch: 30000
@@ -386,8 +386,8 @@ experiments:
   precision: float32
   problem: kdv
   sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
-# ── _ifw1 cells (interface weights = 1.0 absolute) — COMMENTED OUT;
-# uncomment to run — identical grid otherwise ──
+# ── inherit-weight cells (interface weights = ic/bc = 1000) — COMMENTED
+# OUT; uncomment to run ──
 # - adaptive_pinn:
 #     M_experts_num: 18
 #     fine_tune: {epochs: 0}
@@ -401,7 +401,7 @@ experiments:
 #   kdv:
 #     bc_max_derivative_order: 1
 #     fourier_features: {dim: auto, enabled: true, periodic: root_only, scale: 2.0}
-#     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1.0, interface_ic: 1.0}
+#     loss_weights: {bc: 1000.0, ic: 1000.0}
 #     pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_periodic_128x6.pt
 #     pretrained_local_expert_checkpoint: null
 #     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
@@ -411,7 +411,7 @@ experiments:
 #   lr_decay_steps: 2000
 #   lr_schedule: exponential
 #   lr_warmup_steps: 2000
-#   name: kdv_p3_bothnorm_iface1_bc1_ifw1
+#   name: kdv_p3_bothnorm_iface1_bc1
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 30000
@@ -432,7 +432,7 @@ experiments:
 #   kdv:
 #     bc_max_derivative_order: 2
 #     fourier_features: {dim: auto, enabled: true, periodic: root_only, scale: 2.0}
-#     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1.0, interface_ic: 1.0}
+#     loss_weights: {bc: 1000.0, ic: 1000.0}
 #     pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_periodic_128x6.pt
 #     pretrained_local_expert_checkpoint: null
 #     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
@@ -442,7 +442,7 @@ experiments:
 #   lr_decay_steps: 2000
 #   lr_schedule: exponential
 #   lr_warmup_steps: 2000
-#   name: kdv_p3_bothnorm_iface1_bc2_ifw1
+#   name: kdv_p3_bothnorm_iface1_bc2
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 30000
@@ -463,7 +463,7 @@ experiments:
 #   kdv:
 #     bc_max_derivative_order: 1
 #     fourier_features: {dim: auto, enabled: true, periodic: root_only, scale: 2.0}
-#     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1.0, interface_ic: 1.0}
+#     loss_weights: {bc: 1000.0, ic: 1000.0}
 #     pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_periodic_128x6.pt
 #     pretrained_local_expert_checkpoint: null
 #     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
@@ -473,7 +473,7 @@ experiments:
 #   lr_decay_steps: 2000
 #   lr_schedule: exponential
 #   lr_warmup_steps: 2000
-#   name: kdv_p3_bothnorm_iface2_bc1_ifw1
+#   name: kdv_p3_bothnorm_iface2_bc1
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 30000
@@ -494,7 +494,7 @@ experiments:
 #   kdv:
 #     bc_max_derivative_order: 2
 #     fourier_features: {dim: auto, enabled: true, periodic: root_only, scale: 2.0}
-#     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1.0, interface_ic: 1.0}
+#     loss_weights: {bc: 1000.0, ic: 1000.0}
 #     pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_periodic_128x6.pt
 #     pretrained_local_expert_checkpoint: null
 #     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
@@ -504,7 +504,7 @@ experiments:
 #   lr_decay_steps: 2000
 #   lr_schedule: exponential
 #   lr_warmup_steps: 2000
-#   name: kdv_p3_bothnorm_iface2_bc2_ifw1
+#   name: kdv_p3_bothnorm_iface2_bc2
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 30000
