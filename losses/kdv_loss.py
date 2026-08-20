@@ -140,6 +140,17 @@ def build_loss(**cfg) -> Callable:
     # matches u, u_x, u_xx (C² seam for the 3rd-order PDE); 0 matches u only.
     bc_max_order = problem_config.get('bc_max_derivative_order', 2)
 
+    # Per-order normalization of the BC derivative terms — the SAME flag as
+    # the split-loss pairing (split_icbc.bc_term_normalization), so one
+    # switch governs root, phase-3, and fine-tune. Unlike phase 3 (frozen
+    # root scales = constants), the global loss has no frozen reference, so
+    # the order-k term is divided by (1 + mean|∂ᵏu|²) computed from the
+    # MODEL'S OWN boundary derivatives, DETACHED (adaptive scale, no
+    # gradient through it). Value term never scaled. Default false keeps
+    # all past runs' semantics.
+    _bc_norm = bool(cfg.get('adaptive_pinn', {}).get('split_icbc', {})
+                    .get('bc_term_normalization', False))
+
     causal_state = create_causal_state(problem_config)
 
     def loss_fn(model: nn.Module, batch: Dict[str, torch.Tensor],
@@ -331,11 +342,21 @@ def build_loss(**cfg) -> Callable:
                     h_x_left_sorted = h_x_stacked[:n_left][sort_left[:n_pairs]]
                     h_x_right_sorted = h_x_stacked[n_left:][sort_right[:n_pairs]]
                     bc_deriv_diff = (h_x_left_sorted - h_x_right_sorted) ** 2
+                    if _bc_norm:
+                        _s1 = 1.0 + 0.5 * float(
+                            (h_x_left_sorted.detach() ** 2).mean()
+                            + (h_x_right_sorted.detach() ** 2).mean())
+                        bc_deriv_diff = bc_deriv_diff / _s1
                     bc_paired_loss = bc_paired_loss + bc_deriv_diff
                 if bc_max_order >= 2:
                     h_xx_left_sorted = h_xx_stacked[:n_left][sort_left[:n_pairs]]
                     h_xx_right_sorted = h_xx_stacked[n_left:][sort_right[:n_pairs]]
                     bc_deriv2_diff = (h_xx_left_sorted - h_xx_right_sorted) ** 2
+                    if _bc_norm:
+                        _s2 = 1.0 + 0.5 * float(
+                            (h_xx_left_sorted.detach() ** 2).mean()
+                            + (h_xx_right_sorted.detach() ** 2).mean())
+                        bc_deriv2_diff = bc_deriv2_diff / _s2
                     bc_paired_loss = bc_paired_loss + bc_deriv2_diff
 
                 if for_tree_spawning:
