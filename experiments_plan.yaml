@@ -1,26 +1,26 @@
 # ==========================================================================
-# KDV ADAM-ONLY PIPELINE: ROOT 6x128 PERIODIC 200K -> PHASE 3 3x32
-# 200K, SINGLE RUN, NO FINE-TUNE (2026-08-19). Modernized rerun of the
-# successful Adam-only pair (root bcu 4.03e-2 -> phase3 3.97e-2 =
-# root-ceiling, 2026-08-15/16) with the upgrades that won since:
-#   - root: 6x128 with PERIODIC Fourier root_only (dim auto -> 64
-#     freqs -> 128-dim, scale 2.0; BC hard-enforced, bc loss OFF during
-#     root training) — first test of periodic + pure-Adam at 200k with
-#     correct fresh sampling.
-#   - phase 3: experts 3x32 plain RFF (root_only scrub; dim auto -> 16
-#     freqs -> 32-dim), interfaces order 1 + per-order normalization,
-#     BC pairing order 1 + per-order normalization (the LBFGS-era
-#     winning orders), interface weights inherit ic/bc.
-# Optimization identical in both segments (the successful recipe):
-# Adam-only 200k steps, lr 1e-3, 5000-step linear warmup (start factor
-# 0.01), exp decay x0.9/5000 steps (~1.5e-5 at the end). batch
-# 99999999 -> 1 full fresh batch = 1 step = 1 epoch: root = 4096
-# residual + all 256 IC + 256 BC per step; phase 3 = 4096 split by
-# leaf volume + 512 floor (~9.2k pts over ~17 leaves) redrawn per
-# step. initial_train epochs 200000 (root), top-level epochs 200000
-# (phase 3), fine_tune 0. Weights ic/bc 1000 (typo-checked: 1e3).
-# Tree M18 W3-linear structure-only. float32, seed 42, patience 30
-# evals x 1000. Root ~6h + phase 3 ~11h ≈ 17h total on A100.
+# KDV PHASE 3 — WINNING RECIPE WITH 4x64 EXPERTS, SINGLE RUN
+# (2026-08-19): exact clone of the best phase-3 cell so far —
+# kdv_p3_bothnorm_iface1_bc1 (best rel-L2 1.058e-2, the only cell of
+# the bothnorm grid whose LBFGS never froze; ran the full 30k+30k) —
+# with ONE change: experts 3x30 -> 4x64 (~16.6k params/expert with the
+# auto 64-dim RFF; ~283k joint params, fine for limited-memory LBFGS).
+# Motivation (measured): the winner's laggards E4/E6/E2/E3 are the
+# BIGGEST boxes, residual-dominated with interfaces crushed to 1e-7 —
+# a capacity/trainability gap; the other 12 experts already sit at the
+# root's regional accuracy (ceiling), so capacity is the lever left.
+#
+# Root LOADED from roots_checkpoints/single_precision/
+# kdv_adam30-lbfgs30_full_batch_root_periodic_128x6.pt (rel 5.32e-3).
+# Recipe: 30k Adam (lr 1e-3, 2k warmup, x0.9/2k decay) -> 30k LBFGS
+# (lr 0.1), batch 99999 full-batch over all per-expert draws, fresh
+# redraw per Adam epoch, static under LBFGS; epochs 60000, switch
+# 30000; fine_tune 0. Interfaces: max order 1 (u, u_x) + per-order
+# normalization; BC pairing: order 1 (u, u_x) + per-order
+# normalization (bc_term_normalization). Weights ic/bc 1000,
+# interfaces inherit. Experts plain RFF (root_only scrub), tree M18
+# W3-linear structure-only, n_res 20000 / floor 512, float32,
+# freeze_stop 100, patience off. ~7-9h.
 # ==========================================================================
 base_config:
   activation: tanh
@@ -255,38 +255,36 @@ base_config:
     precondition_frequency: 10
     weight_decay: 0.0
   ssbroyden: {lr: 1.0, tolerance_grad: 1.0e-10}
-experiment_name: kdv_adamonly_root6x128_periodic_200k_p3_3x32_200k
+experiment_name: kdv_p3_bothnorm_iface1_bc1_experts4x64
 experiments:
 - adaptive_pinn:
     M_experts_num: 18
     fine_tune: {epochs: 0}
-    initial_train: {epochs: 200000, lr: 0.001, lr_decay_rate: 0.9, lr_decay_steps: 5000,
-      lr_schedule: exponential, lr_warmup_steps: 5000, optimizer_1: adam, optimizer_2: null,
-      optimizer_switch_epoch: 999999}
     split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
       bc_term_normalization: true}
   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
-  batch_size: 99999999
-  epochs: 200000
-  experts_architecture: [2, 32, 32, 32, 1]
+  batch_size: 99999
+  epochs: 60000
+  experts_architecture: [2, 64, 64, 64, 64, 1]
+  freeze_stop_epochs: 100
   kdv:
     bc_max_derivative_order: 1
     fourier_features: {dim: auto, enabled: true, periodic: root_only, scale: 2.0}
     loss_weights: {bc: 1000.0, ic: 1000.0}
-    pretrained_base_checkpoint: null
+    pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_periodic_128x6.pt
     pretrained_local_expert_checkpoint: null
     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
       m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
   lr: 0.001
   lr_decay_rate: 0.9
-  lr_decay_steps: 5000
+  lr_decay_steps: 2000
   lr_schedule: exponential
-  lr_warmup_steps: 5000
-  name: kdv_adamonly_root6x128_periodic_200k_p3_3x32_200k
+  lr_warmup_steps: 2000
+  name: kdv_p3_bothnorm_iface1_bc1_experts4x64
   optimizer_1: adam
-  optimizer_2: null
-  optimizer_switch_epoch: 999999
-  patience_evals: 30
+  optimizer_2: lbfgs
+  optimizer_switch_epoch: 30000
+  patience_evals: 999999
   precision: float32
   problem: kdv
-  sampling: {min_points_per_expert: 512, n_residual_train: 4096, resample_every_epochs: 99999}
+  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
