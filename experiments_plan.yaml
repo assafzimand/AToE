@@ -12,9 +12,12 @@
 # roots: 6x128, Fourier dim auto (-> 64 freqs -> 128-dim), PLAIN RFF
 # (periodic: false — NO hard periodicity): the SOFT BC loss is active
 # during root training, pairing u AND u_x (bc_max_derivative_order 1)
-# at weight 1000; note the global-loss bc terms have no per-order
-# normalization (bc_term_normalization is split/phase-3 only). Fresh
-# draw every Adam step per family sampling, phase3 epochs 0.
+# at weight 1000 WITH per-order normalization — the shared
+# split_icbc.bc_term_normalization flag now also normalizes the global
+# loss (root/fine-tune) bc derivative terms, scaled by the model's own
+# DETACHED boundary derivatives (2026-08-20 kdv_loss change; phase 3
+# keeps its frozen-root scales). Fresh draw every Adam step per family
+# sampling, phase3 epochs 0.
 #
 # COMMENTED OUT (uncomment after A0/B0 finish; fill the TODO
 # checkpoint placeholder paths with the saved best_model_root.pt):
@@ -270,7 +273,7 @@ experiments:
   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
   batch_size: 99999
   epochs: 0
-  experts_architecture: [2, 60, 60, 60, 1]
+  experts_architecture: [2, 30, 30, 30, 1]
   freeze_stop_epochs: 100
   kdv:
     bc_max_derivative_order: 1
@@ -305,7 +308,7 @@ experiments:
 #   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
 #   batch_size: 99999999
 #   epochs: 0
-#   experts_architecture: [2, 60, 60, 60, 1]
+#   experts_architecture: [2, 30, 30, 30, 1]
 #   freeze_stop_epochs: 100
 #   kdv:
 #     bc_max_derivative_order: 1
