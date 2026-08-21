@@ -7,12 +7,12 @@
 #   B = Adam-only 200k, fresh-4096: batch 99999999, n_res 4096 (+ all
 #       256 IC/BC per step), warmup 5000, decay x0.9/5k, patience 30.
 #
-# ACTIVE: B1 ONLY — phase 3 (experts 3x30) from the B0 root:
+# ACTIVE: A1 ONLY — phase 3 (experts 3x30) from the finished A0 root:
 # roots_checkpoints/single_precision/
-# kdv_adam200k_4096_batch_root_bc_max_order_1_norm_128x6.pt
-# (checkpoint expected from the B0 run — place it there before launch).
-# B-family scheme: Adam-only 200k, fresh-4096 sampling. A1 (done),
-# A2/B2 (root paths filled), and the A0/B0 roots are COMMENTED OUT.
+# kdv_adam30-lbfgs30_full_batch_root_bc_max_order_1_norm_128x6.pt.
+# A-family scheme: 30k Adam -> 30k LBFGS, full-batch. B1 and the
+# A0/B0 roots and A2/B2 are COMMENTED OUT below (A2/B2 carry their
+# family root paths).
 # Roots: 6x128, Fourier dim auto (-> 64 freqs -> 128-dim), PLAIN RFF
 # (periodic: false — NO hard periodicity): the SOFT BC loss is active
 # during root training, pairing u AND u_x (bc_max_derivative_order 1)
@@ -269,73 +269,73 @@ experiments:
 - adaptive_pinn:
     M_experts_num: 18
     fine_tune: {epochs: 0}
-    initial_train: {epochs: 200000, lr: 0.001, lr_decay_rate: 0.9, lr_decay_steps: 5000,
-      lr_schedule: exponential, lr_warmup_steps: 5000, optimizer_1: adam, optimizer_2: null,
-      optimizer_switch_epoch: 999999}
+    initial_train: {epochs: 60000, lr: 0.001, lr_decay_rate: 0.9, lr_decay_steps: 2000,
+      lr_schedule: exponential, lr_warmup_steps: 2000, optimizer_1: adam, optimizer_2: lbfgs,
+      optimizer_switch_epoch: 30000}
     split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
       bc_term_normalization: true}
   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
-  batch_size: 99999999
-  epochs: 200000
+  batch_size: 99999
+  epochs: 60000
   experts_architecture: [2, 30, 30, 30, 1]
   freeze_stop_epochs: 100
   kdv:
     bc_max_derivative_order: 1
     fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
     loss_weights: {bc: 1000.0, ic: 1000.0}
-    pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam200k_4096_batch_root_bc_max_order_1_norm_128x6.pt
+    pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_bc_max_order_1_norm_128x6.pt
     pretrained_local_expert_checkpoint: null
     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
       m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
   lr: 0.001
   lr_decay_rate: 0.9
-  lr_decay_steps: 5000
+  lr_decay_steps: 2000
   lr_schedule: exponential
-  lr_warmup_steps: 5000
+  lr_warmup_steps: 2000
   optimizer_1: adam
-  optimizer_2: null
-  optimizer_switch_epoch: 999999
-  name: kdv_B1_p3_experts3x30
-  patience_evals: 30
+  optimizer_2: lbfgs
+  optimizer_switch_epoch: 30000
+  name: kdv_A1_p3_experts3x30
+  patience_evals: 999999
   precision: float32
   problem: kdv
-  sampling: {min_points_per_expert: 512, n_residual_train: 4096, resample_every_epochs: 99999}
-# ── ALL OTHER CELLS — COMMENTED OUT (A1 done, A2 has the A-root path,
-# B2 has the B-root path, A0/B0 are the root runs) ──
+  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+# ── ALL OTHER CELLS — COMMENTED OUT (B1 first below, then roots and
+# remaining expert cells; A2/B2 carry their family root paths) ──
 # - adaptive_pinn:
 #     M_experts_num: 18
 #     fine_tune: {epochs: 0}
-#     initial_train: {epochs: 60000, lr: 0.001, lr_decay_rate: 0.9, lr_decay_steps: 2000,
-#       lr_schedule: exponential, lr_warmup_steps: 2000, optimizer_1: adam, optimizer_2: lbfgs,
-#       optimizer_switch_epoch: 30000}
+#     initial_train: {epochs: 200000, lr: 0.001, lr_decay_rate: 0.9, lr_decay_steps: 5000,
+#       lr_schedule: exponential, lr_warmup_steps: 5000, optimizer_1: adam, optimizer_2: null,
+#       optimizer_switch_epoch: 999999}
 #     split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
 #       bc_term_normalization: true}
 #   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
-#   batch_size: 99999
-#   epochs: 60000
+#   batch_size: 99999999
+#   epochs: 200000
 #   experts_architecture: [2, 30, 30, 30, 1]
 #   freeze_stop_epochs: 100
 #   kdv:
 #     bc_max_derivative_order: 1
 #     fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
 #     loss_weights: {bc: 1000.0, ic: 1000.0}
-#     pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_bc_max_order_1_norm_128x6.pt
+#     pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam200k_4096_batch_root_bc_max_order_1_norm_128x6.pt
 #     pretrained_local_expert_checkpoint: null
 #     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
 #       m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
 #   lr: 0.001
 #   lr_decay_rate: 0.9
-#   lr_decay_steps: 2000
+#   lr_decay_steps: 5000
 #   lr_schedule: exponential
-#   lr_warmup_steps: 2000
+#   lr_warmup_steps: 5000
 #   optimizer_1: adam
-#   optimizer_2: lbfgs
-#   optimizer_switch_epoch: 30000
-#   name: kdv_A1_p3_experts3x30
-#   patience_evals: 999999
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
+#   name: kdv_B1_p3_experts3x30
+#   patience_evals: 30
 #   precision: float32
 #   problem: kdv
-#   sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+#   sampling: {min_points_per_expert: 512, n_residual_train: 4096, resample_every_epochs: 99999}
 # - adaptive_pinn:
 #     M_experts_num: 18
 #     fine_tune: {epochs: 0}
