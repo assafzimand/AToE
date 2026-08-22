@@ -279,7 +279,7 @@ experiments:
     pretrained_local_expert_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_bc_max_order_1_norm_30x3-experts.pt
     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
       m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
-  lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 1e-05, max_iter: 1,
+  lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 1.0e-05, max_iter: 1,
     tolerance_change: 1.0e-14, tolerance_grad: 1.0e-14}
   name: kdv_ft2_lbfgs30k_lr1em5
   patience_evals: 10
