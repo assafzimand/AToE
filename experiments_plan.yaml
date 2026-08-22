@@ -1,44 +1,28 @@
 # ==========================================================================
-# KDV A/B FAMILIES — 6x128 PLAIN-RFF ROOTS + EXPERT-SIZE PHASE-3 GRIDS
-# (2026-08-20). Two optimization families, each with its own sampling:
-#   A = 30k Adam -> 30k LBFGS (lr 0.1), FULL-BATCH: batch 99999,
-#       n_res 20000, warmup 2000, decay x0.9/2k, patience off,
-#       freeze_stop 100.
-#   B = Adam-only 200k, fresh-4096: batch 99999999, n_res 4096 (+ all
-#       256 IC/BC per step), warmup 5000, decay x0.9/5k, patience 30.
-#
-# ACTIVE: FINE-TUNE ABLATION FROM THE A1 EXPERTS — FULL 3x2x3 GRID,
-# 18 CELLS (2026-08-22). Root + experts LOADED (root/tree/phase3
-# skipped, straight to the joint PoU fine-tune):
+# KDV LBFGS FINE-TUNES — OPTIMIZER RESCUE GRID AT sigma 0.1 / collar 0
+# (2026-08-22). Root + A1 experts LOADED (root/tree/phase3 skipped):
 #   root    = ..._root_bc_max_order_1_norm_128x6.pt
 #   experts = ..._bc_max_order_1_norm_30x3-experts.pt (A1 phase-3).
-# Fine-tune = 30k PURE LBFGS full-batch on a static 20k draw
-# (A-family sampling; collar_data_ratio governs the draw,
-# sigma_fraction the blend overlaps; collar 0 = plain uniform draw).
-# Global loss with bc max order 1 + per-order normalization (shared
-# bcnorm flag, model-own detached scales in ft). patience 10 (known
-# ft dips), freeze_stop 100, float32.
-# GRID: lbfgs lr {0.1, 1.0, 0.01} x sigma {0.05, 0.1} x collar
-# {0, 0.3, 0.5} — ordered lr-block first (0.1 block leads).
-# B2 (adam-only 3x40 phase 3), A1/B1, the A0/B0 roots, and A2 are
-# COMMENTED OUT below.
-# Roots: 6x128, Fourier dim auto (-> 64 freqs -> 128-dim), PLAIN RFF
-# (periodic: false — NO hard periodicity): the SOFT BC loss is active
-# during root training, pairing u AND u_x (bc_max_derivative_order 1)
-# at weight 1000 WITH per-order normalization — the shared
-# split_icbc.bc_term_normalization flag now also normalizes the global
-# loss (root/fine-tune) bc derivative terms, scaled by the model's own
-# DETACHED boundary derivatives (2026-08-20 kdv_loss change; phase 3
-# keeps its frozen-root scales). Fresh draw every Adam step per family
-# sampling, phase3 epochs 0.
-#
-# COMMENTED OUT (uncomment after A0/B0 finish; fill the TODO
-# checkpoint placeholder paths with the saved best_model_root.pt):
-#   A1/A2 and B1/B2 — phase 3 from the family root, same training
-#   scheme as the family root; experts 3x30 / 3x40,
-#   Fourier dim auto; interfaces order 1 + normalization; BC pairing
-#   order 1 + normalization; interface weights inherit ic/bc 1000;
-#   tree M18 W3-linear structure-only; fine_tune 0; float32; seed 42.
+# CONTEXT: the full 3x2x3 ft grid (commented below) froze 18/18 at
+# epoch 1 — pure-LBFGS strong-Wolfe never accepted a single step on the
+# composed-loss seam cliff (epoch-1 residual 3e2..3e4, ic/bc ~1e-8);
+# identical at lr 0.01/0.1/1.0. This grid holds sigma 0.1 / collar 0
+# (gentlest seams: epoch-1 loss 1.45e3) and ablates the OPTIMIZER:
+#   A: pure LBFGS 30k, strong Wolfe, lr decades {1e-5, 1e-4, 1e-3,
+#      3, 10, 100, 1000} (frozen range was 0.01..1.0) — cheap probes.
+#   C1: pure LBFGS 30k, NO line search (fixed step), lr {0.01, 0.001}
+#      — bypasses the Wolfe t=0 collapse entirely.
+#   B: Adam warmup -> LBFGS(lr 0.1, strong Wolfe), 30k total.
+#      switch at {1k, 5k, 10k} x adam lr {1e-3, 1e-4} (constant, no
+#      schedule). Per-optimizer sampling: fresh 20k+IC/BC each Adam
+#      step, full static pool swapped in at the switch (A-family rule).
+#   C2: Adam-only 30k, lr 1e-4 — control.
+# All cells: ft 30k total, sigma_fraction 0.1, collar_data_ratio 0,
+# batch 99999 full-batch, n_res 20000, bc max order 1 + normalization
+# (interface + bc flags on), patience 10, freeze_stop 100, float32.
+# The 18 frozen sigma x collar x lr cells are COMMENTED below as
+# history; old A0-A2/B0-B2 root+phase3 runs deleted (checkpoints keep
+# the recipes).
 # ==========================================================================
 base_config:
   activation: tanh
@@ -273,13 +257,13 @@ base_config:
     precondition_frequency: 10
     weight_decay: 0.0
   ssbroyden: {lr: 1.0, tolerance_grad: 1.0e-10}
-experiment_name: kdv_AB_root6x128_then_expertsize
+experiment_name: kdv_lbfgs_fine_tunes
 experiments:
 - adaptive_pinn:
     M_experts_num: 18
     fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0, epochs: 30000,
       lr: 0.0001, lr_schedule: none, min_epochs: 1, optimizer_1: lbfgs, optimizer_2: null,
-      optimizer_switch_epoch: 99999, sigma_fraction: 0.05, single_corrector: false}
+      optimizer_switch_epoch: 99999, sigma_fraction: 0.1, single_corrector: false}
     split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
       bc_term_normalization: true}
   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
@@ -295,63 +279,9 @@ experiments:
     pretrained_local_expert_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_bc_max_order_1_norm_30x3-experts.pt
     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
       m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
-  lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
+  lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 1e-05, max_iter: 1,
     tolerance_change: 1.0e-14, tolerance_grad: 1.0e-14}
-  name: kdv_ft_A1_sig005_col0_lr01
-  patience_evals: 10
-  precision: float32
-  problem: kdv
-  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
-- adaptive_pinn:
-    M_experts_num: 18
-    fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0.3, epochs: 30000,
-      lr: 0.0001, lr_schedule: none, min_epochs: 1, optimizer_1: lbfgs, optimizer_2: null,
-      optimizer_switch_epoch: 99999, sigma_fraction: 0.05, single_corrector: false}
-    split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
-      bc_term_normalization: true}
-  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
-  batch_size: 99999
-  epochs: 0
-  experts_architecture: [2, 30, 30, 30, 1]
-  freeze_stop_epochs: 100
-  kdv:
-    bc_max_derivative_order: 1
-    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
-    loss_weights: {bc: 1000.0, ic: 1000.0}
-    pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_bc_max_order_1_norm_128x6.pt
-    pretrained_local_expert_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_bc_max_order_1_norm_30x3-experts.pt
-    time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
-      m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
-  lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
-    tolerance_change: 1.0e-14, tolerance_grad: 1.0e-14}
-  name: kdv_ft_A1_sig005_col03_lr01
-  patience_evals: 10
-  precision: float32
-  problem: kdv
-  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
-- adaptive_pinn:
-    M_experts_num: 18
-    fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0.5, epochs: 30000,
-      lr: 0.0001, lr_schedule: none, min_epochs: 1, optimizer_1: lbfgs, optimizer_2: null,
-      optimizer_switch_epoch: 99999, sigma_fraction: 0.05, single_corrector: false}
-    split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
-      bc_term_normalization: true}
-  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
-  batch_size: 99999
-  epochs: 0
-  experts_architecture: [2, 30, 30, 30, 1]
-  freeze_stop_epochs: 100
-  kdv:
-    bc_max_derivative_order: 1
-    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
-    loss_weights: {bc: 1000.0, ic: 1000.0}
-    pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_bc_max_order_1_norm_128x6.pt
-    pretrained_local_expert_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_bc_max_order_1_norm_30x3-experts.pt
-    time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
-      m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
-  lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
-    tolerance_change: 1.0e-14, tolerance_grad: 1.0e-14}
-  name: kdv_ft_A1_sig005_col05_lr01
+  name: kdv_ft2_lbfgs30k_lr1em5
   patience_evals: 10
   precision: float32
   problem: kdv
@@ -376,17 +306,368 @@ experiments:
     pretrained_local_expert_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_bc_max_order_1_norm_30x3-experts.pt
     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
       m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
+  lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.0001, max_iter: 1,
+    tolerance_change: 1.0e-14, tolerance_grad: 1.0e-14}
+  name: kdv_ft2_lbfgs30k_lr1em4
+  patience_evals: 10
+  precision: float32
+  problem: kdv
+  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+- adaptive_pinn:
+    M_experts_num: 18
+    fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0, epochs: 30000,
+      lr: 0.0001, lr_schedule: none, min_epochs: 1, optimizer_1: lbfgs, optimizer_2: null,
+      optimizer_switch_epoch: 99999, sigma_fraction: 0.1, single_corrector: false}
+    split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
+      bc_term_normalization: true}
+  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+  batch_size: 99999
+  epochs: 0
+  experts_architecture: [2, 30, 30, 30, 1]
+  freeze_stop_epochs: 100
+  kdv:
+    bc_max_derivative_order: 1
+    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+    loss_weights: {bc: 1000.0, ic: 1000.0}
+    pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_bc_max_order_1_norm_128x6.pt
+    pretrained_local_expert_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_bc_max_order_1_norm_30x3-experts.pt
+    time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
+      m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
+  lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.001, max_iter: 1,
+    tolerance_change: 1.0e-14, tolerance_grad: 1.0e-14}
+  name: kdv_ft2_lbfgs30k_lr1em3
+  patience_evals: 10
+  precision: float32
+  problem: kdv
+  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+- adaptive_pinn:
+    M_experts_num: 18
+    fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0, epochs: 30000,
+      lr: 0.0001, lr_schedule: none, min_epochs: 1, optimizer_1: lbfgs, optimizer_2: null,
+      optimizer_switch_epoch: 99999, sigma_fraction: 0.1, single_corrector: false}
+    split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
+      bc_term_normalization: true}
+  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+  batch_size: 99999
+  epochs: 0
+  experts_architecture: [2, 30, 30, 30, 1]
+  freeze_stop_epochs: 100
+  kdv:
+    bc_max_derivative_order: 1
+    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+    loss_weights: {bc: 1000.0, ic: 1000.0}
+    pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_bc_max_order_1_norm_128x6.pt
+    pretrained_local_expert_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_bc_max_order_1_norm_30x3-experts.pt
+    time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
+      m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
+  lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 3.0, max_iter: 1,
+    tolerance_change: 1.0e-14, tolerance_grad: 1.0e-14}
+  name: kdv_ft2_lbfgs30k_lr3
+  patience_evals: 10
+  precision: float32
+  problem: kdv
+  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+- adaptive_pinn:
+    M_experts_num: 18
+    fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0, epochs: 30000,
+      lr: 0.0001, lr_schedule: none, min_epochs: 1, optimizer_1: lbfgs, optimizer_2: null,
+      optimizer_switch_epoch: 99999, sigma_fraction: 0.1, single_corrector: false}
+    split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
+      bc_term_normalization: true}
+  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+  batch_size: 99999
+  epochs: 0
+  experts_architecture: [2, 30, 30, 30, 1]
+  freeze_stop_epochs: 100
+  kdv:
+    bc_max_derivative_order: 1
+    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+    loss_weights: {bc: 1000.0, ic: 1000.0}
+    pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_bc_max_order_1_norm_128x6.pt
+    pretrained_local_expert_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_bc_max_order_1_norm_30x3-experts.pt
+    time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
+      m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
+  lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 10.0, max_iter: 1,
+    tolerance_change: 1.0e-14, tolerance_grad: 1.0e-14}
+  name: kdv_ft2_lbfgs30k_lr10
+  patience_evals: 10
+  precision: float32
+  problem: kdv
+  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+- adaptive_pinn:
+    M_experts_num: 18
+    fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0, epochs: 30000,
+      lr: 0.0001, lr_schedule: none, min_epochs: 1, optimizer_1: lbfgs, optimizer_2: null,
+      optimizer_switch_epoch: 99999, sigma_fraction: 0.1, single_corrector: false}
+    split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
+      bc_term_normalization: true}
+  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+  batch_size: 99999
+  epochs: 0
+  experts_architecture: [2, 30, 30, 30, 1]
+  freeze_stop_epochs: 100
+  kdv:
+    bc_max_derivative_order: 1
+    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+    loss_weights: {bc: 1000.0, ic: 1000.0}
+    pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_bc_max_order_1_norm_128x6.pt
+    pretrained_local_expert_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_bc_max_order_1_norm_30x3-experts.pt
+    time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
+      m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
+  lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 100.0, max_iter: 1,
+    tolerance_change: 1.0e-14, tolerance_grad: 1.0e-14}
+  name: kdv_ft2_lbfgs30k_lr100
+  patience_evals: 10
+  precision: float32
+  problem: kdv
+  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+- adaptive_pinn:
+    M_experts_num: 18
+    fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0, epochs: 30000,
+      lr: 0.0001, lr_schedule: none, min_epochs: 1, optimizer_1: lbfgs, optimizer_2: null,
+      optimizer_switch_epoch: 99999, sigma_fraction: 0.1, single_corrector: false}
+    split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
+      bc_term_normalization: true}
+  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+  batch_size: 99999
+  epochs: 0
+  experts_architecture: [2, 30, 30, 30, 1]
+  freeze_stop_epochs: 100
+  kdv:
+    bc_max_derivative_order: 1
+    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+    loss_weights: {bc: 1000.0, ic: 1000.0}
+    pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_bc_max_order_1_norm_128x6.pt
+    pretrained_local_expert_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_bc_max_order_1_norm_30x3-experts.pt
+    time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
+      m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
+  lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 1000.0, max_iter: 1,
+    tolerance_change: 1.0e-14, tolerance_grad: 1.0e-14}
+  name: kdv_ft2_lbfgs30k_lr1000
+  patience_evals: 10
+  precision: float32
+  problem: kdv
+  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+- adaptive_pinn:
+    M_experts_num: 18
+    fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0, epochs: 30000,
+      lr: 0.0001, lr_schedule: none, min_epochs: 1, optimizer_1: lbfgs, optimizer_2: null,
+      optimizer_switch_epoch: 99999, sigma_fraction: 0.1, single_corrector: false}
+    split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
+      bc_term_normalization: true}
+  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+  batch_size: 99999
+  epochs: 0
+  experts_architecture: [2, 30, 30, 30, 1]
+  freeze_stop_epochs: 100
+  kdv:
+    bc_max_derivative_order: 1
+    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+    loss_weights: {bc: 1000.0, ic: 1000.0}
+    pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_bc_max_order_1_norm_128x6.pt
+    pretrained_local_expert_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_bc_max_order_1_norm_30x3-experts.pt
+    time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
+      m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
+  lbfgs: {history_size: 100, line_search: null, lr: 0.01, max_iter: 1,
+    tolerance_change: 1.0e-14, tolerance_grad: 1.0e-14}
+  name: kdv_ft2_lbfgs30k_fixedstep_lr001
+  patience_evals: 10
+  precision: float32
+  problem: kdv
+  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+- adaptive_pinn:
+    M_experts_num: 18
+    fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0, epochs: 30000,
+      lr: 0.0001, lr_schedule: none, min_epochs: 1, optimizer_1: lbfgs, optimizer_2: null,
+      optimizer_switch_epoch: 99999, sigma_fraction: 0.1, single_corrector: false}
+    split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
+      bc_term_normalization: true}
+  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+  batch_size: 99999
+  epochs: 0
+  experts_architecture: [2, 30, 30, 30, 1]
+  freeze_stop_epochs: 100
+  kdv:
+    bc_max_derivative_order: 1
+    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+    loss_weights: {bc: 1000.0, ic: 1000.0}
+    pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_bc_max_order_1_norm_128x6.pt
+    pretrained_local_expert_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_bc_max_order_1_norm_30x3-experts.pt
+    time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
+      m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
+  lbfgs: {history_size: 100, line_search: null, lr: 0.001, max_iter: 1,
+    tolerance_change: 1.0e-14, tolerance_grad: 1.0e-14}
+  name: kdv_ft2_lbfgs30k_fixedstep_lr0001
+  patience_evals: 10
+  precision: float32
+  problem: kdv
+  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+- adaptive_pinn:
+    M_experts_num: 18
+    fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0, epochs: 30000,
+      lr: 0.001, lr_schedule: none, min_epochs: 1, optimizer_1: adam, optimizer_2: lbfgs,
+      optimizer_switch_epoch: 1000, sigma_fraction: 0.1, single_corrector: false}
+    split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
+      bc_term_normalization: true}
+  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+  batch_size: 99999
+  epochs: 0
+  experts_architecture: [2, 30, 30, 30, 1]
+  freeze_stop_epochs: 100
+  kdv:
+    bc_max_derivative_order: 1
+    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+    loss_weights: {bc: 1000.0, ic: 1000.0}
+    pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_bc_max_order_1_norm_128x6.pt
+    pretrained_local_expert_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_bc_max_order_1_norm_30x3-experts.pt
+    time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
+      m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
   lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
     tolerance_change: 1.0e-14, tolerance_grad: 1.0e-14}
-  name: kdv_ft_A1_sig010_col0_lr01
+  name: kdv_ft2_ad1k_alr001_lbfgs_lr01
   patience_evals: 10
   precision: float32
   problem: kdv
   sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
 - adaptive_pinn:
     M_experts_num: 18
-    fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0.3, epochs: 30000,
-      lr: 0.0001, lr_schedule: none, min_epochs: 1, optimizer_1: lbfgs, optimizer_2: null,
+    fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0, epochs: 30000,
+      lr: 0.0001, lr_schedule: none, min_epochs: 1, optimizer_1: adam, optimizer_2: lbfgs,
+      optimizer_switch_epoch: 1000, sigma_fraction: 0.1, single_corrector: false}
+    split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
+      bc_term_normalization: true}
+  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+  batch_size: 99999
+  epochs: 0
+  experts_architecture: [2, 30, 30, 30, 1]
+  freeze_stop_epochs: 100
+  kdv:
+    bc_max_derivative_order: 1
+    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+    loss_weights: {bc: 1000.0, ic: 1000.0}
+    pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_bc_max_order_1_norm_128x6.pt
+    pretrained_local_expert_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_bc_max_order_1_norm_30x3-experts.pt
+    time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
+      m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
+  lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
+    tolerance_change: 1.0e-14, tolerance_grad: 1.0e-14}
+  name: kdv_ft2_ad1k_alr0001_lbfgs_lr01
+  patience_evals: 10
+  precision: float32
+  problem: kdv
+  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+- adaptive_pinn:
+    M_experts_num: 18
+    fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0, epochs: 30000,
+      lr: 0.001, lr_schedule: none, min_epochs: 1, optimizer_1: adam, optimizer_2: lbfgs,
+      optimizer_switch_epoch: 5000, sigma_fraction: 0.1, single_corrector: false}
+    split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
+      bc_term_normalization: true}
+  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+  batch_size: 99999
+  epochs: 0
+  experts_architecture: [2, 30, 30, 30, 1]
+  freeze_stop_epochs: 100
+  kdv:
+    bc_max_derivative_order: 1
+    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+    loss_weights: {bc: 1000.0, ic: 1000.0}
+    pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_bc_max_order_1_norm_128x6.pt
+    pretrained_local_expert_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_bc_max_order_1_norm_30x3-experts.pt
+    time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
+      m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
+  lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
+    tolerance_change: 1.0e-14, tolerance_grad: 1.0e-14}
+  name: kdv_ft2_ad5k_alr001_lbfgs_lr01
+  patience_evals: 10
+  precision: float32
+  problem: kdv
+  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+- adaptive_pinn:
+    M_experts_num: 18
+    fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0, epochs: 30000,
+      lr: 0.0001, lr_schedule: none, min_epochs: 1, optimizer_1: adam, optimizer_2: lbfgs,
+      optimizer_switch_epoch: 5000, sigma_fraction: 0.1, single_corrector: false}
+    split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
+      bc_term_normalization: true}
+  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+  batch_size: 99999
+  epochs: 0
+  experts_architecture: [2, 30, 30, 30, 1]
+  freeze_stop_epochs: 100
+  kdv:
+    bc_max_derivative_order: 1
+    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+    loss_weights: {bc: 1000.0, ic: 1000.0}
+    pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_bc_max_order_1_norm_128x6.pt
+    pretrained_local_expert_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_bc_max_order_1_norm_30x3-experts.pt
+    time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
+      m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
+  lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
+    tolerance_change: 1.0e-14, tolerance_grad: 1.0e-14}
+  name: kdv_ft2_ad5k_alr0001_lbfgs_lr01
+  patience_evals: 10
+  precision: float32
+  problem: kdv
+  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+- adaptive_pinn:
+    M_experts_num: 18
+    fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0, epochs: 30000,
+      lr: 0.001, lr_schedule: none, min_epochs: 1, optimizer_1: adam, optimizer_2: lbfgs,
+      optimizer_switch_epoch: 10000, sigma_fraction: 0.1, single_corrector: false}
+    split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
+      bc_term_normalization: true}
+  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+  batch_size: 99999
+  epochs: 0
+  experts_architecture: [2, 30, 30, 30, 1]
+  freeze_stop_epochs: 100
+  kdv:
+    bc_max_derivative_order: 1
+    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+    loss_weights: {bc: 1000.0, ic: 1000.0}
+    pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_bc_max_order_1_norm_128x6.pt
+    pretrained_local_expert_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_bc_max_order_1_norm_30x3-experts.pt
+    time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
+      m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
+  lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
+    tolerance_change: 1.0e-14, tolerance_grad: 1.0e-14}
+  name: kdv_ft2_ad10k_alr001_lbfgs_lr01
+  patience_evals: 10
+  precision: float32
+  problem: kdv
+  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+- adaptive_pinn:
+    M_experts_num: 18
+    fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0, epochs: 30000,
+      lr: 0.0001, lr_schedule: none, min_epochs: 1, optimizer_1: adam, optimizer_2: lbfgs,
+      optimizer_switch_epoch: 10000, sigma_fraction: 0.1, single_corrector: false}
+    split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
+      bc_term_normalization: true}
+  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+  batch_size: 99999
+  epochs: 0
+  experts_architecture: [2, 30, 30, 30, 1]
+  freeze_stop_epochs: 100
+  kdv:
+    bc_max_derivative_order: 1
+    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+    loss_weights: {bc: 1000.0, ic: 1000.0}
+    pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_bc_max_order_1_norm_128x6.pt
+    pretrained_local_expert_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_bc_max_order_1_norm_30x3-experts.pt
+    time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
+      m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
+  lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
+    tolerance_change: 1.0e-14, tolerance_grad: 1.0e-14}
+  name: kdv_ft2_ad10k_alr0001_lbfgs_lr01
+  patience_evals: 10
+  precision: float32
+  problem: kdv
+  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+- adaptive_pinn:
+    M_experts_num: 18
+    fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0, epochs: 30000,
+      lr: 0.0001, lr_schedule: none, min_epochs: 1, optimizer_1: adam, optimizer_2: null,
       optimizer_switch_epoch: 99999, sigma_fraction: 0.1, single_corrector: false}
     split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
       bc_term_normalization: true}
@@ -405,507 +686,18 @@ experiments:
       m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
   lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
     tolerance_change: 1.0e-14, tolerance_grad: 1.0e-14}
-  name: kdv_ft_A1_sig010_col03_lr01
+  name: kdv_ft2_adamonly30k_alr0001
   patience_evals: 10
   precision: float32
   problem: kdv
   sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
-- adaptive_pinn:
-    M_experts_num: 18
-    fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0.5, epochs: 30000,
-      lr: 0.0001, lr_schedule: none, min_epochs: 1, optimizer_1: lbfgs, optimizer_2: null,
-      optimizer_switch_epoch: 99999, sigma_fraction: 0.1, single_corrector: false}
-    split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
-      bc_term_normalization: true}
-  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
-  batch_size: 99999
-  epochs: 0
-  experts_architecture: [2, 30, 30, 30, 1]
-  freeze_stop_epochs: 100
-  kdv:
-    bc_max_derivative_order: 1
-    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
-    loss_weights: {bc: 1000.0, ic: 1000.0}
-    pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_bc_max_order_1_norm_128x6.pt
-    pretrained_local_expert_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_bc_max_order_1_norm_30x3-experts.pt
-    time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
-      m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
-  lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
-    tolerance_change: 1.0e-14, tolerance_grad: 1.0e-14}
-  name: kdv_ft_A1_sig010_col05_lr01
-  patience_evals: 10
-  precision: float32
-  problem: kdv
-  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
-- adaptive_pinn:
-    M_experts_num: 18
-    fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0, epochs: 30000,
-      lr: 0.0001, lr_schedule: none, min_epochs: 1, optimizer_1: lbfgs, optimizer_2: null,
-      optimizer_switch_epoch: 99999, sigma_fraction: 0.05, single_corrector: false}
-    split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
-      bc_term_normalization: true}
-  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
-  batch_size: 99999
-  epochs: 0
-  experts_architecture: [2, 30, 30, 30, 1]
-  freeze_stop_epochs: 100
-  kdv:
-    bc_max_derivative_order: 1
-    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
-    loss_weights: {bc: 1000.0, ic: 1000.0}
-    pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_bc_max_order_1_norm_128x6.pt
-    pretrained_local_expert_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_bc_max_order_1_norm_30x3-experts.pt
-    time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
-      m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
-  lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 1.0, max_iter: 1,
-    tolerance_change: 1.0e-14, tolerance_grad: 1.0e-14}
-  name: kdv_ft_A1_sig005_col0_lr10
-  patience_evals: 10
-  precision: float32
-  problem: kdv
-  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
-- adaptive_pinn:
-    M_experts_num: 18
-    fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0.3, epochs: 30000,
-      lr: 0.0001, lr_schedule: none, min_epochs: 1, optimizer_1: lbfgs, optimizer_2: null,
-      optimizer_switch_epoch: 99999, sigma_fraction: 0.05, single_corrector: false}
-    split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
-      bc_term_normalization: true}
-  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
-  batch_size: 99999
-  epochs: 0
-  experts_architecture: [2, 30, 30, 30, 1]
-  freeze_stop_epochs: 100
-  kdv:
-    bc_max_derivative_order: 1
-    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
-    loss_weights: {bc: 1000.0, ic: 1000.0}
-    pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_bc_max_order_1_norm_128x6.pt
-    pretrained_local_expert_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_bc_max_order_1_norm_30x3-experts.pt
-    time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
-      m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
-  lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 1.0, max_iter: 1,
-    tolerance_change: 1.0e-14, tolerance_grad: 1.0e-14}
-  name: kdv_ft_A1_sig005_col03_lr10
-  patience_evals: 10
-  precision: float32
-  problem: kdv
-  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
-- adaptive_pinn:
-    M_experts_num: 18
-    fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0.5, epochs: 30000,
-      lr: 0.0001, lr_schedule: none, min_epochs: 1, optimizer_1: lbfgs, optimizer_2: null,
-      optimizer_switch_epoch: 99999, sigma_fraction: 0.05, single_corrector: false}
-    split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
-      bc_term_normalization: true}
-  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
-  batch_size: 99999
-  epochs: 0
-  experts_architecture: [2, 30, 30, 30, 1]
-  freeze_stop_epochs: 100
-  kdv:
-    bc_max_derivative_order: 1
-    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
-    loss_weights: {bc: 1000.0, ic: 1000.0}
-    pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_bc_max_order_1_norm_128x6.pt
-    pretrained_local_expert_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_bc_max_order_1_norm_30x3-experts.pt
-    time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
-      m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
-  lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 1.0, max_iter: 1,
-    tolerance_change: 1.0e-14, tolerance_grad: 1.0e-14}
-  name: kdv_ft_A1_sig005_col05_lr10
-  patience_evals: 10
-  precision: float32
-  problem: kdv
-  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
-- adaptive_pinn:
-    M_experts_num: 18
-    fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0, epochs: 30000,
-      lr: 0.0001, lr_schedule: none, min_epochs: 1, optimizer_1: lbfgs, optimizer_2: null,
-      optimizer_switch_epoch: 99999, sigma_fraction: 0.1, single_corrector: false}
-    split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
-      bc_term_normalization: true}
-  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
-  batch_size: 99999
-  epochs: 0
-  experts_architecture: [2, 30, 30, 30, 1]
-  freeze_stop_epochs: 100
-  kdv:
-    bc_max_derivative_order: 1
-    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
-    loss_weights: {bc: 1000.0, ic: 1000.0}
-    pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_bc_max_order_1_norm_128x6.pt
-    pretrained_local_expert_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_bc_max_order_1_norm_30x3-experts.pt
-    time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
-      m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
-  lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 1.0, max_iter: 1,
-    tolerance_change: 1.0e-14, tolerance_grad: 1.0e-14}
-  name: kdv_ft_A1_sig010_col0_lr10
-  patience_evals: 10
-  precision: float32
-  problem: kdv
-  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
-- adaptive_pinn:
-    M_experts_num: 18
-    fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0.3, epochs: 30000,
-      lr: 0.0001, lr_schedule: none, min_epochs: 1, optimizer_1: lbfgs, optimizer_2: null,
-      optimizer_switch_epoch: 99999, sigma_fraction: 0.1, single_corrector: false}
-    split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
-      bc_term_normalization: true}
-  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
-  batch_size: 99999
-  epochs: 0
-  experts_architecture: [2, 30, 30, 30, 1]
-  freeze_stop_epochs: 100
-  kdv:
-    bc_max_derivative_order: 1
-    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
-    loss_weights: {bc: 1000.0, ic: 1000.0}
-    pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_bc_max_order_1_norm_128x6.pt
-    pretrained_local_expert_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_bc_max_order_1_norm_30x3-experts.pt
-    time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
-      m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
-  lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 1.0, max_iter: 1,
-    tolerance_change: 1.0e-14, tolerance_grad: 1.0e-14}
-  name: kdv_ft_A1_sig010_col03_lr10
-  patience_evals: 10
-  precision: float32
-  problem: kdv
-  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
-- adaptive_pinn:
-    M_experts_num: 18
-    fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0.5, epochs: 30000,
-      lr: 0.0001, lr_schedule: none, min_epochs: 1, optimizer_1: lbfgs, optimizer_2: null,
-      optimizer_switch_epoch: 99999, sigma_fraction: 0.1, single_corrector: false}
-    split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
-      bc_term_normalization: true}
-  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
-  batch_size: 99999
-  epochs: 0
-  experts_architecture: [2, 30, 30, 30, 1]
-  freeze_stop_epochs: 100
-  kdv:
-    bc_max_derivative_order: 1
-    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
-    loss_weights: {bc: 1000.0, ic: 1000.0}
-    pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_bc_max_order_1_norm_128x6.pt
-    pretrained_local_expert_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_bc_max_order_1_norm_30x3-experts.pt
-    time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
-      m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
-  lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 1.0, max_iter: 1,
-    tolerance_change: 1.0e-14, tolerance_grad: 1.0e-14}
-  name: kdv_ft_A1_sig010_col05_lr10
-  patience_evals: 10
-  precision: float32
-  problem: kdv
-  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
-- adaptive_pinn:
-    M_experts_num: 18
-    fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0, epochs: 30000,
-      lr: 0.0001, lr_schedule: none, min_epochs: 1, optimizer_1: lbfgs, optimizer_2: null,
-      optimizer_switch_epoch: 99999, sigma_fraction: 0.05, single_corrector: false}
-    split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
-      bc_term_normalization: true}
-  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
-  batch_size: 99999
-  epochs: 0
-  experts_architecture: [2, 30, 30, 30, 1]
-  freeze_stop_epochs: 100
-  kdv:
-    bc_max_derivative_order: 1
-    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
-    loss_weights: {bc: 1000.0, ic: 1000.0}
-    pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_bc_max_order_1_norm_128x6.pt
-    pretrained_local_expert_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_bc_max_order_1_norm_30x3-experts.pt
-    time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
-      m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
-  lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.01, max_iter: 1,
-    tolerance_change: 1.0e-14, tolerance_grad: 1.0e-14}
-  name: kdv_ft_A1_sig005_col0_lr001
-  patience_evals: 10
-  precision: float32
-  problem: kdv
-  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
-- adaptive_pinn:
-    M_experts_num: 18
-    fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0.3, epochs: 30000,
-      lr: 0.0001, lr_schedule: none, min_epochs: 1, optimizer_1: lbfgs, optimizer_2: null,
-      optimizer_switch_epoch: 99999, sigma_fraction: 0.05, single_corrector: false}
-    split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
-      bc_term_normalization: true}
-  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
-  batch_size: 99999
-  epochs: 0
-  experts_architecture: [2, 30, 30, 30, 1]
-  freeze_stop_epochs: 100
-  kdv:
-    bc_max_derivative_order: 1
-    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
-    loss_weights: {bc: 1000.0, ic: 1000.0}
-    pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_bc_max_order_1_norm_128x6.pt
-    pretrained_local_expert_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_bc_max_order_1_norm_30x3-experts.pt
-    time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
-      m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
-  lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.01, max_iter: 1,
-    tolerance_change: 1.0e-14, tolerance_grad: 1.0e-14}
-  name: kdv_ft_A1_sig005_col03_lr001
-  patience_evals: 10
-  precision: float32
-  problem: kdv
-  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
-- adaptive_pinn:
-    M_experts_num: 18
-    fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0.5, epochs: 30000,
-      lr: 0.0001, lr_schedule: none, min_epochs: 1, optimizer_1: lbfgs, optimizer_2: null,
-      optimizer_switch_epoch: 99999, sigma_fraction: 0.05, single_corrector: false}
-    split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
-      bc_term_normalization: true}
-  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
-  batch_size: 99999
-  epochs: 0
-  experts_architecture: [2, 30, 30, 30, 1]
-  freeze_stop_epochs: 100
-  kdv:
-    bc_max_derivative_order: 1
-    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
-    loss_weights: {bc: 1000.0, ic: 1000.0}
-    pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_bc_max_order_1_norm_128x6.pt
-    pretrained_local_expert_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_bc_max_order_1_norm_30x3-experts.pt
-    time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
-      m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
-  lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.01, max_iter: 1,
-    tolerance_change: 1.0e-14, tolerance_grad: 1.0e-14}
-  name: kdv_ft_A1_sig005_col05_lr001
-  patience_evals: 10
-  precision: float32
-  problem: kdv
-  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
-- adaptive_pinn:
-    M_experts_num: 18
-    fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0, epochs: 30000,
-      lr: 0.0001, lr_schedule: none, min_epochs: 1, optimizer_1: lbfgs, optimizer_2: null,
-      optimizer_switch_epoch: 99999, sigma_fraction: 0.1, single_corrector: false}
-    split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
-      bc_term_normalization: true}
-  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
-  batch_size: 99999
-  epochs: 0
-  experts_architecture: [2, 30, 30, 30, 1]
-  freeze_stop_epochs: 100
-  kdv:
-    bc_max_derivative_order: 1
-    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
-    loss_weights: {bc: 1000.0, ic: 1000.0}
-    pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_bc_max_order_1_norm_128x6.pt
-    pretrained_local_expert_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_bc_max_order_1_norm_30x3-experts.pt
-    time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
-      m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
-  lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.01, max_iter: 1,
-    tolerance_change: 1.0e-14, tolerance_grad: 1.0e-14}
-  name: kdv_ft_A1_sig010_col0_lr001
-  patience_evals: 10
-  precision: float32
-  problem: kdv
-  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
-- adaptive_pinn:
-    M_experts_num: 18
-    fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0.3, epochs: 30000,
-      lr: 0.0001, lr_schedule: none, min_epochs: 1, optimizer_1: lbfgs, optimizer_2: null,
-      optimizer_switch_epoch: 99999, sigma_fraction: 0.1, single_corrector: false}
-    split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
-      bc_term_normalization: true}
-  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
-  batch_size: 99999
-  epochs: 0
-  experts_architecture: [2, 30, 30, 30, 1]
-  freeze_stop_epochs: 100
-  kdv:
-    bc_max_derivative_order: 1
-    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
-    loss_weights: {bc: 1000.0, ic: 1000.0}
-    pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_bc_max_order_1_norm_128x6.pt
-    pretrained_local_expert_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_bc_max_order_1_norm_30x3-experts.pt
-    time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
-      m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
-  lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.01, max_iter: 1,
-    tolerance_change: 1.0e-14, tolerance_grad: 1.0e-14}
-  name: kdv_ft_A1_sig010_col03_lr001
-  patience_evals: 10
-  precision: float32
-  problem: kdv
-  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
-- adaptive_pinn:
-    M_experts_num: 18
-    fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0.5, epochs: 30000,
-      lr: 0.0001, lr_schedule: none, min_epochs: 1, optimizer_1: lbfgs, optimizer_2: null,
-      optimizer_switch_epoch: 99999, sigma_fraction: 0.1, single_corrector: false}
-    split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
-      bc_term_normalization: true}
-  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
-  batch_size: 99999
-  epochs: 0
-  experts_architecture: [2, 30, 30, 30, 1]
-  freeze_stop_epochs: 100
-  kdv:
-    bc_max_derivative_order: 1
-    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
-    loss_weights: {bc: 1000.0, ic: 1000.0}
-    pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_bc_max_order_1_norm_128x6.pt
-    pretrained_local_expert_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_bc_max_order_1_norm_30x3-experts.pt
-    time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
-      m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
-  lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.01, max_iter: 1,
-    tolerance_change: 1.0e-14, tolerance_grad: 1.0e-14}
-  name: kdv_ft_A1_sig010_col05_lr001
-  patience_evals: 10
-  precision: float32
-  problem: kdv
-  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
-# ── B2 (adam-only, experts 3x40, B0 root) — COMMENTED OUT ──
+
+# ── FROZEN 3x2x3 FT GRID (2026-08-22) — all 18 froze at epoch 1, kept as history ──
 # - adaptive_pinn:
 #     M_experts_num: 18
-#     fine_tune: {epochs: 0}
-#     initial_train: {epochs: 200000, lr: 0.001, lr_decay_rate: 0.9, lr_decay_steps: 5000,
-#       lr_schedule: exponential, lr_warmup_steps: 5000, optimizer_1: adam, optimizer_2: null,
-#       optimizer_switch_epoch: 999999}
-#     split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
-#       bc_term_normalization: true}
-#   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
-#   batch_size: 99999999
-#   epochs: 200000
-#   experts_architecture: [2, 40, 40, 40, 1]
-#   freeze_stop_epochs: 100
-#   kdv:
-#     bc_max_derivative_order: 1
-#     fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
-#     loss_weights: {bc: 1000.0, ic: 1000.0}
-#     pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam200k_4096_batch_root_bc_max_order_1_norm_128x6.pt
-#     pretrained_local_expert_checkpoint: null
-#     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
-#       m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
-#   lr: 0.001
-#   lr_decay_rate: 0.9
-#   lr_decay_steps: 5000
-#   lr_schedule: exponential
-#   lr_warmup_steps: 5000
-#   optimizer_1: adam
-#   optimizer_2: null
-#   optimizer_switch_epoch: 999999
-#   name: kdv_B2_p3_experts3x40
-#   patience_evals: 30
-#   precision: float32
-#   problem: kdv
-#   sampling: {min_points_per_expert: 512, n_residual_train: 4096, resample_every_epochs: 99999}
-# ── ALL OTHER CELLS — COMMENTED OUT (A1 first below, then B1, roots,
-# and A2; A2/B1 carry their family root paths) ──
-# - adaptive_pinn:
-#     M_experts_num: 18
-#     fine_tune: {epochs: 0}
-#     initial_train: {epochs: 60000, lr: 0.001, lr_decay_rate: 0.9, lr_decay_steps: 2000,
-#       lr_schedule: exponential, lr_warmup_steps: 2000, optimizer_1: adam, optimizer_2: lbfgs,
-#       optimizer_switch_epoch: 30000}
-#     split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
-#       bc_term_normalization: true}
-#   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
-#   batch_size: 99999
-#   epochs: 60000
-#   experts_architecture: [2, 30, 30, 30, 1]
-#   freeze_stop_epochs: 100
-#   kdv:
-#     bc_max_derivative_order: 1
-#     fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
-#     loss_weights: {bc: 1000.0, ic: 1000.0}
-#     pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_bc_max_order_1_norm_128x6.pt
-#     pretrained_local_expert_checkpoint: null
-#     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
-#       m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
-#   lr: 0.001
-#   lr_decay_rate: 0.9
-#   lr_decay_steps: 2000
-#   lr_schedule: exponential
-#   lr_warmup_steps: 2000
-#   optimizer_1: adam
-#   optimizer_2: lbfgs
-#   optimizer_switch_epoch: 30000
-#   name: kdv_A1_p3_experts3x30
-#   patience_evals: 999999
-#   precision: float32
-#   problem: kdv
-#   sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
-# - adaptive_pinn:
-#     M_experts_num: 18
-#     fine_tune: {epochs: 0}
-#     initial_train: {epochs: 200000, lr: 0.001, lr_decay_rate: 0.9, lr_decay_steps: 5000,
-#       lr_schedule: exponential, lr_warmup_steps: 5000, optimizer_1: adam, optimizer_2: null,
-#       optimizer_switch_epoch: 999999}
-#     split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
-#       bc_term_normalization: true}
-#   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
-#   batch_size: 99999999
-#   epochs: 200000
-#   experts_architecture: [2, 30, 30, 30, 1]
-#   freeze_stop_epochs: 100
-#   kdv:
-#     bc_max_derivative_order: 1
-#     fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
-#     loss_weights: {bc: 1000.0, ic: 1000.0}
-#     pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam200k_4096_batch_root_bc_max_order_1_norm_128x6.pt
-#     pretrained_local_expert_checkpoint: null
-#     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
-#       m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
-#   lr: 0.001
-#   lr_decay_rate: 0.9
-#   lr_decay_steps: 5000
-#   lr_schedule: exponential
-#   lr_warmup_steps: 5000
-#   optimizer_1: adam
-#   optimizer_2: null
-#   optimizer_switch_epoch: 999999
-#   name: kdv_B1_p3_experts3x30
-#   patience_evals: 30
-#   precision: float32
-#   problem: kdv
-#   sampling: {min_points_per_expert: 512, n_residual_train: 4096, resample_every_epochs: 99999}
-# - adaptive_pinn:
-#     M_experts_num: 18
-#     fine_tune: {epochs: 0}
-#     initial_train: {epochs: 200000, lr: 0.001, lr_decay_rate: 0.9, lr_decay_steps: 5000,
-#       lr_schedule: exponential, lr_warmup_steps: 5000, optimizer_1: adam, optimizer_2: null,
-#       optimizer_switch_epoch: 999999}
-#     split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
-#       bc_term_normalization: true}
-#   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
-#   batch_size: 99999999
-#   epochs: 0
-#   experts_architecture: [2, 30, 30, 30, 1]
-#   freeze_stop_epochs: 100
-#   kdv:
-#     bc_max_derivative_order: 1
-#     fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
-#     loss_weights: {bc: 1000.0, ic: 1000.0}
-#     pretrained_base_checkpoint: null
-#     pretrained_local_expert_checkpoint: null
-#     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
-#       m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
-#   lr: 0.001
-#   lr_decay_rate: 0.9
-#   lr_decay_steps: 5000
-#   lr_schedule: exponential
-#   lr_warmup_steps: 5000
-#   optimizer_1: adam
-#   optimizer_2: null
-#   optimizer_switch_epoch: 999999
-#   name: kdv_B0_root6x128_plainff_adam200k
-#   patience_evals: 30
-#   precision: float32
-#   problem: kdv
-#   sampling: {min_points_per_expert: 512, n_residual_train: 4096, resample_every_epochs: 99999}
-# - adaptive_pinn:
-#     M_experts_num: 18
-#     fine_tune: {epochs: 0}
-#     initial_train: {epochs: 60000, lr: 0.001, lr_decay_rate: 0.9, lr_decay_steps: 2000,
-#       lr_schedule: exponential, lr_warmup_steps: 2000, optimizer_1: adam, optimizer_2: lbfgs,
-#       optimizer_switch_epoch: 30000}
+#     fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0, epochs: 30000,
+#       lr: 0.0001, lr_schedule: none, min_epochs: 1, optimizer_1: lbfgs, optimizer_2: null,
+#       optimizer_switch_epoch: 99999, sigma_fraction: 0.05, single_corrector: false}
 #     split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
 #       bc_term_normalization: true}
 #   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
@@ -917,55 +709,473 @@ experiments:
 #     bc_max_derivative_order: 1
 #     fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
 #     loss_weights: {bc: 1000.0, ic: 1000.0}
-#     pretrained_base_checkpoint: null
-#     pretrained_local_expert_checkpoint: null
+#     pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_bc_max_order_1_norm_128x6.pt
+#     pretrained_local_expert_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_bc_max_order_1_norm_30x3-experts.pt
 #     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
 #       m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
-#   lr: 0.001
-#   lr_decay_rate: 0.9
-#   lr_decay_steps: 2000
-#   lr_schedule: exponential
-#   lr_warmup_steps: 2000
-#   optimizer_1: adam
-#   optimizer_2: lbfgs
-#   optimizer_switch_epoch: 30000
-#   name: kdv_A0_root6x128_plainff_adam30k_lbfgs30k
-#   patience_evals: 999999
+#   lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
+#     tolerance_change: 1.0e-14, tolerance_grad: 1.0e-14}
+#   name: kdv_ft_A1_sig005_col0_lr01
+#   patience_evals: 10
 #   precision: float32
 #   problem: kdv
 #   sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
-# placeholders) — COMMENTED OUT ──
 # - adaptive_pinn:
 #     M_experts_num: 18
-#     fine_tune: {epochs: 0}
-#     initial_train: {epochs: 60000, lr: 0.001, lr_decay_rate: 0.9, lr_decay_steps: 2000,
-#       lr_schedule: exponential, lr_warmup_steps: 2000, optimizer_1: adam, optimizer_2: lbfgs,
-#       optimizer_switch_epoch: 30000}
+#     fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0.3, epochs: 30000,
+#       lr: 0.0001, lr_schedule: none, min_epochs: 1, optimizer_1: lbfgs, optimizer_2: null,
+#       optimizer_switch_epoch: 99999, sigma_fraction: 0.05, single_corrector: false}
 #     split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
 #       bc_term_normalization: true}
 #   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
 #   batch_size: 99999
-#   epochs: 60000
-#   experts_architecture: [2, 40, 40, 40, 1]
+#   epochs: 0
+#   experts_architecture: [2, 30, 30, 30, 1]
 #   freeze_stop_epochs: 100
 #   kdv:
 #     bc_max_derivative_order: 1
 #     fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
 #     loss_weights: {bc: 1000.0, ic: 1000.0}
 #     pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_bc_max_order_1_norm_128x6.pt
-#     pretrained_local_expert_checkpoint: null
+#     pretrained_local_expert_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_bc_max_order_1_norm_30x3-experts.pt
 #     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
 #       m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
-#   lr: 0.001
-#   lr_decay_rate: 0.9
-#   lr_decay_steps: 2000
-#   lr_schedule: exponential
-#   lr_warmup_steps: 2000
-#   optimizer_1: adam
-#   optimizer_2: lbfgs
-#   optimizer_switch_epoch: 30000
-#   name: kdv_A2_p3_experts3x40
-#   patience_evals: 999999
+#   lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
+#     tolerance_change: 1.0e-14, tolerance_grad: 1.0e-14}
+#   name: kdv_ft_A1_sig005_col03_lr01
+#   patience_evals: 10
+#   precision: float32
+#   problem: kdv
+#   sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+# - adaptive_pinn:
+#     M_experts_num: 18
+#     fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0.5, epochs: 30000,
+#       lr: 0.0001, lr_schedule: none, min_epochs: 1, optimizer_1: lbfgs, optimizer_2: null,
+#       optimizer_switch_epoch: 99999, sigma_fraction: 0.05, single_corrector: false}
+#     split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
+#       bc_term_normalization: true}
+#   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+#   batch_size: 99999
+#   epochs: 0
+#   experts_architecture: [2, 30, 30, 30, 1]
+#   freeze_stop_epochs: 100
+#   kdv:
+#     bc_max_derivative_order: 1
+#     fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+#     loss_weights: {bc: 1000.0, ic: 1000.0}
+#     pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_bc_max_order_1_norm_128x6.pt
+#     pretrained_local_expert_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_bc_max_order_1_norm_30x3-experts.pt
+#     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
+#       m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
+#   lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
+#     tolerance_change: 1.0e-14, tolerance_grad: 1.0e-14}
+#   name: kdv_ft_A1_sig005_col05_lr01
+#   patience_evals: 10
+#   precision: float32
+#   problem: kdv
+#   sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+# - adaptive_pinn:
+#     M_experts_num: 18
+#     fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0, epochs: 30000,
+#       lr: 0.0001, lr_schedule: none, min_epochs: 1, optimizer_1: lbfgs, optimizer_2: null,
+#       optimizer_switch_epoch: 99999, sigma_fraction: 0.1, single_corrector: false}
+#     split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
+#       bc_term_normalization: true}
+#   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+#   batch_size: 99999
+#   epochs: 0
+#   experts_architecture: [2, 30, 30, 30, 1]
+#   freeze_stop_epochs: 100
+#   kdv:
+#     bc_max_derivative_order: 1
+#     fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+#     loss_weights: {bc: 1000.0, ic: 1000.0}
+#     pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_bc_max_order_1_norm_128x6.pt
+#     pretrained_local_expert_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_bc_max_order_1_norm_30x3-experts.pt
+#     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
+#       m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
+#   lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
+#     tolerance_change: 1.0e-14, tolerance_grad: 1.0e-14}
+#   name: kdv_ft_A1_sig010_col0_lr01
+#   patience_evals: 10
+#   precision: float32
+#   problem: kdv
+#   sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+# - adaptive_pinn:
+#     M_experts_num: 18
+#     fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0.3, epochs: 30000,
+#       lr: 0.0001, lr_schedule: none, min_epochs: 1, optimizer_1: lbfgs, optimizer_2: null,
+#       optimizer_switch_epoch: 99999, sigma_fraction: 0.1, single_corrector: false}
+#     split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
+#       bc_term_normalization: true}
+#   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+#   batch_size: 99999
+#   epochs: 0
+#   experts_architecture: [2, 30, 30, 30, 1]
+#   freeze_stop_epochs: 100
+#   kdv:
+#     bc_max_derivative_order: 1
+#     fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+#     loss_weights: {bc: 1000.0, ic: 1000.0}
+#     pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_bc_max_order_1_norm_128x6.pt
+#     pretrained_local_expert_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_bc_max_order_1_norm_30x3-experts.pt
+#     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
+#       m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
+#   lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
+#     tolerance_change: 1.0e-14, tolerance_grad: 1.0e-14}
+#   name: kdv_ft_A1_sig010_col03_lr01
+#   patience_evals: 10
+#   precision: float32
+#   problem: kdv
+#   sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+# - adaptive_pinn:
+#     M_experts_num: 18
+#     fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0.5, epochs: 30000,
+#       lr: 0.0001, lr_schedule: none, min_epochs: 1, optimizer_1: lbfgs, optimizer_2: null,
+#       optimizer_switch_epoch: 99999, sigma_fraction: 0.1, single_corrector: false}
+#     split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
+#       bc_term_normalization: true}
+#   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+#   batch_size: 99999
+#   epochs: 0
+#   experts_architecture: [2, 30, 30, 30, 1]
+#   freeze_stop_epochs: 100
+#   kdv:
+#     bc_max_derivative_order: 1
+#     fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+#     loss_weights: {bc: 1000.0, ic: 1000.0}
+#     pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_bc_max_order_1_norm_128x6.pt
+#     pretrained_local_expert_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_bc_max_order_1_norm_30x3-experts.pt
+#     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
+#       m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
+#   lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
+#     tolerance_change: 1.0e-14, tolerance_grad: 1.0e-14}
+#   name: kdv_ft_A1_sig010_col05_lr01
+#   patience_evals: 10
+#   precision: float32
+#   problem: kdv
+#   sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+# - adaptive_pinn:
+#     M_experts_num: 18
+#     fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0, epochs: 30000,
+#       lr: 0.0001, lr_schedule: none, min_epochs: 1, optimizer_1: lbfgs, optimizer_2: null,
+#       optimizer_switch_epoch: 99999, sigma_fraction: 0.05, single_corrector: false}
+#     split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
+#       bc_term_normalization: true}
+#   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+#   batch_size: 99999
+#   epochs: 0
+#   experts_architecture: [2, 30, 30, 30, 1]
+#   freeze_stop_epochs: 100
+#   kdv:
+#     bc_max_derivative_order: 1
+#     fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+#     loss_weights: {bc: 1000.0, ic: 1000.0}
+#     pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_bc_max_order_1_norm_128x6.pt
+#     pretrained_local_expert_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_bc_max_order_1_norm_30x3-experts.pt
+#     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
+#       m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
+#   lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 1.0, max_iter: 1,
+#     tolerance_change: 1.0e-14, tolerance_grad: 1.0e-14}
+#   name: kdv_ft_A1_sig005_col0_lr10
+#   patience_evals: 10
+#   precision: float32
+#   problem: kdv
+#   sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+# - adaptive_pinn:
+#     M_experts_num: 18
+#     fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0.3, epochs: 30000,
+#       lr: 0.0001, lr_schedule: none, min_epochs: 1, optimizer_1: lbfgs, optimizer_2: null,
+#       optimizer_switch_epoch: 99999, sigma_fraction: 0.05, single_corrector: false}
+#     split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
+#       bc_term_normalization: true}
+#   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+#   batch_size: 99999
+#   epochs: 0
+#   experts_architecture: [2, 30, 30, 30, 1]
+#   freeze_stop_epochs: 100
+#   kdv:
+#     bc_max_derivative_order: 1
+#     fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+#     loss_weights: {bc: 1000.0, ic: 1000.0}
+#     pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_bc_max_order_1_norm_128x6.pt
+#     pretrained_local_expert_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_bc_max_order_1_norm_30x3-experts.pt
+#     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
+#       m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
+#   lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 1.0, max_iter: 1,
+#     tolerance_change: 1.0e-14, tolerance_grad: 1.0e-14}
+#   name: kdv_ft_A1_sig005_col03_lr10
+#   patience_evals: 10
+#   precision: float32
+#   problem: kdv
+#   sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+# - adaptive_pinn:
+#     M_experts_num: 18
+#     fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0.5, epochs: 30000,
+#       lr: 0.0001, lr_schedule: none, min_epochs: 1, optimizer_1: lbfgs, optimizer_2: null,
+#       optimizer_switch_epoch: 99999, sigma_fraction: 0.05, single_corrector: false}
+#     split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
+#       bc_term_normalization: true}
+#   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+#   batch_size: 99999
+#   epochs: 0
+#   experts_architecture: [2, 30, 30, 30, 1]
+#   freeze_stop_epochs: 100
+#   kdv:
+#     bc_max_derivative_order: 1
+#     fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+#     loss_weights: {bc: 1000.0, ic: 1000.0}
+#     pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_bc_max_order_1_norm_128x6.pt
+#     pretrained_local_expert_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_bc_max_order_1_norm_30x3-experts.pt
+#     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
+#       m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
+#   lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 1.0, max_iter: 1,
+#     tolerance_change: 1.0e-14, tolerance_grad: 1.0e-14}
+#   name: kdv_ft_A1_sig005_col05_lr10
+#   patience_evals: 10
+#   precision: float32
+#   problem: kdv
+#   sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+# - adaptive_pinn:
+#     M_experts_num: 18
+#     fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0, epochs: 30000,
+#       lr: 0.0001, lr_schedule: none, min_epochs: 1, optimizer_1: lbfgs, optimizer_2: null,
+#       optimizer_switch_epoch: 99999, sigma_fraction: 0.1, single_corrector: false}
+#     split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
+#       bc_term_normalization: true}
+#   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+#   batch_size: 99999
+#   epochs: 0
+#   experts_architecture: [2, 30, 30, 30, 1]
+#   freeze_stop_epochs: 100
+#   kdv:
+#     bc_max_derivative_order: 1
+#     fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+#     loss_weights: {bc: 1000.0, ic: 1000.0}
+#     pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_bc_max_order_1_norm_128x6.pt
+#     pretrained_local_expert_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_bc_max_order_1_norm_30x3-experts.pt
+#     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
+#       m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
+#   lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 1.0, max_iter: 1,
+#     tolerance_change: 1.0e-14, tolerance_grad: 1.0e-14}
+#   name: kdv_ft_A1_sig010_col0_lr10
+#   patience_evals: 10
+#   precision: float32
+#   problem: kdv
+#   sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+# - adaptive_pinn:
+#     M_experts_num: 18
+#     fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0.3, epochs: 30000,
+#       lr: 0.0001, lr_schedule: none, min_epochs: 1, optimizer_1: lbfgs, optimizer_2: null,
+#       optimizer_switch_epoch: 99999, sigma_fraction: 0.1, single_corrector: false}
+#     split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
+#       bc_term_normalization: true}
+#   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+#   batch_size: 99999
+#   epochs: 0
+#   experts_architecture: [2, 30, 30, 30, 1]
+#   freeze_stop_epochs: 100
+#   kdv:
+#     bc_max_derivative_order: 1
+#     fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+#     loss_weights: {bc: 1000.0, ic: 1000.0}
+#     pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_bc_max_order_1_norm_128x6.pt
+#     pretrained_local_expert_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_bc_max_order_1_norm_30x3-experts.pt
+#     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
+#       m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
+#   lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 1.0, max_iter: 1,
+#     tolerance_change: 1.0e-14, tolerance_grad: 1.0e-14}
+#   name: kdv_ft_A1_sig010_col03_lr10
+#   patience_evals: 10
+#   precision: float32
+#   problem: kdv
+#   sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+# - adaptive_pinn:
+#     M_experts_num: 18
+#     fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0.5, epochs: 30000,
+#       lr: 0.0001, lr_schedule: none, min_epochs: 1, optimizer_1: lbfgs, optimizer_2: null,
+#       optimizer_switch_epoch: 99999, sigma_fraction: 0.1, single_corrector: false}
+#     split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
+#       bc_term_normalization: true}
+#   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+#   batch_size: 99999
+#   epochs: 0
+#   experts_architecture: [2, 30, 30, 30, 1]
+#   freeze_stop_epochs: 100
+#   kdv:
+#     bc_max_derivative_order: 1
+#     fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+#     loss_weights: {bc: 1000.0, ic: 1000.0}
+#     pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_bc_max_order_1_norm_128x6.pt
+#     pretrained_local_expert_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_bc_max_order_1_norm_30x3-experts.pt
+#     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
+#       m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
+#   lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 1.0, max_iter: 1,
+#     tolerance_change: 1.0e-14, tolerance_grad: 1.0e-14}
+#   name: kdv_ft_A1_sig010_col05_lr10
+#   patience_evals: 10
+#   precision: float32
+#   problem: kdv
+#   sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+# - adaptive_pinn:
+#     M_experts_num: 18
+#     fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0, epochs: 30000,
+#       lr: 0.0001, lr_schedule: none, min_epochs: 1, optimizer_1: lbfgs, optimizer_2: null,
+#       optimizer_switch_epoch: 99999, sigma_fraction: 0.05, single_corrector: false}
+#     split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
+#       bc_term_normalization: true}
+#   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+#   batch_size: 99999
+#   epochs: 0
+#   experts_architecture: [2, 30, 30, 30, 1]
+#   freeze_stop_epochs: 100
+#   kdv:
+#     bc_max_derivative_order: 1
+#     fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+#     loss_weights: {bc: 1000.0, ic: 1000.0}
+#     pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_bc_max_order_1_norm_128x6.pt
+#     pretrained_local_expert_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_bc_max_order_1_norm_30x3-experts.pt
+#     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
+#       m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
+#   lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.01, max_iter: 1,
+#     tolerance_change: 1.0e-14, tolerance_grad: 1.0e-14}
+#   name: kdv_ft_A1_sig005_col0_lr001
+#   patience_evals: 10
+#   precision: float32
+#   problem: kdv
+#   sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+# - adaptive_pinn:
+#     M_experts_num: 18
+#     fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0.3, epochs: 30000,
+#       lr: 0.0001, lr_schedule: none, min_epochs: 1, optimizer_1: lbfgs, optimizer_2: null,
+#       optimizer_switch_epoch: 99999, sigma_fraction: 0.05, single_corrector: false}
+#     split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
+#       bc_term_normalization: true}
+#   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+#   batch_size: 99999
+#   epochs: 0
+#   experts_architecture: [2, 30, 30, 30, 1]
+#   freeze_stop_epochs: 100
+#   kdv:
+#     bc_max_derivative_order: 1
+#     fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+#     loss_weights: {bc: 1000.0, ic: 1000.0}
+#     pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_bc_max_order_1_norm_128x6.pt
+#     pretrained_local_expert_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_bc_max_order_1_norm_30x3-experts.pt
+#     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
+#       m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
+#   lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.01, max_iter: 1,
+#     tolerance_change: 1.0e-14, tolerance_grad: 1.0e-14}
+#   name: kdv_ft_A1_sig005_col03_lr001
+#   patience_evals: 10
+#   precision: float32
+#   problem: kdv
+#   sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+# - adaptive_pinn:
+#     M_experts_num: 18
+#     fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0.5, epochs: 30000,
+#       lr: 0.0001, lr_schedule: none, min_epochs: 1, optimizer_1: lbfgs, optimizer_2: null,
+#       optimizer_switch_epoch: 99999, sigma_fraction: 0.05, single_corrector: false}
+#     split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
+#       bc_term_normalization: true}
+#   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+#   batch_size: 99999
+#   epochs: 0
+#   experts_architecture: [2, 30, 30, 30, 1]
+#   freeze_stop_epochs: 100
+#   kdv:
+#     bc_max_derivative_order: 1
+#     fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+#     loss_weights: {bc: 1000.0, ic: 1000.0}
+#     pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_bc_max_order_1_norm_128x6.pt
+#     pretrained_local_expert_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_bc_max_order_1_norm_30x3-experts.pt
+#     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
+#       m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
+#   lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.01, max_iter: 1,
+#     tolerance_change: 1.0e-14, tolerance_grad: 1.0e-14}
+#   name: kdv_ft_A1_sig005_col05_lr001
+#   patience_evals: 10
+#   precision: float32
+#   problem: kdv
+#   sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+# - adaptive_pinn:
+#     M_experts_num: 18
+#     fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0, epochs: 30000,
+#       lr: 0.0001, lr_schedule: none, min_epochs: 1, optimizer_1: lbfgs, optimizer_2: null,
+#       optimizer_switch_epoch: 99999, sigma_fraction: 0.1, single_corrector: false}
+#     split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
+#       bc_term_normalization: true}
+#   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+#   batch_size: 99999
+#   epochs: 0
+#   experts_architecture: [2, 30, 30, 30, 1]
+#   freeze_stop_epochs: 100
+#   kdv:
+#     bc_max_derivative_order: 1
+#     fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+#     loss_weights: {bc: 1000.0, ic: 1000.0}
+#     pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_bc_max_order_1_norm_128x6.pt
+#     pretrained_local_expert_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_bc_max_order_1_norm_30x3-experts.pt
+#     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
+#       m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
+#   lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.01, max_iter: 1,
+#     tolerance_change: 1.0e-14, tolerance_grad: 1.0e-14}
+#   name: kdv_ft_A1_sig010_col0_lr001
+#   patience_evals: 10
+#   precision: float32
+#   problem: kdv
+#   sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+# - adaptive_pinn:
+#     M_experts_num: 18
+#     fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0.3, epochs: 30000,
+#       lr: 0.0001, lr_schedule: none, min_epochs: 1, optimizer_1: lbfgs, optimizer_2: null,
+#       optimizer_switch_epoch: 99999, sigma_fraction: 0.1, single_corrector: false}
+#     split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
+#       bc_term_normalization: true}
+#   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+#   batch_size: 99999
+#   epochs: 0
+#   experts_architecture: [2, 30, 30, 30, 1]
+#   freeze_stop_epochs: 100
+#   kdv:
+#     bc_max_derivative_order: 1
+#     fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+#     loss_weights: {bc: 1000.0, ic: 1000.0}
+#     pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_bc_max_order_1_norm_128x6.pt
+#     pretrained_local_expert_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_bc_max_order_1_norm_30x3-experts.pt
+#     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
+#       m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
+#   lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.01, max_iter: 1,
+#     tolerance_change: 1.0e-14, tolerance_grad: 1.0e-14}
+#   name: kdv_ft_A1_sig010_col03_lr001
+#   patience_evals: 10
+#   precision: float32
+#   problem: kdv
+#   sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+# - adaptive_pinn:
+#     M_experts_num: 18
+#     fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0.5, epochs: 30000,
+#       lr: 0.0001, lr_schedule: none, min_epochs: 1, optimizer_1: lbfgs, optimizer_2: null,
+#       optimizer_switch_epoch: 99999, sigma_fraction: 0.1, single_corrector: false}
+#     split_icbc: {max_interface_derivative_order: 1, interface_term_normalization: true,
+#       bc_term_normalization: true}
+#   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+#   batch_size: 99999
+#   epochs: 0
+#   experts_architecture: [2, 30, 30, 30, 1]
+#   freeze_stop_epochs: 100
+#   kdv:
+#     bc_max_derivative_order: 1
+#     fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+#     loss_weights: {bc: 1000.0, ic: 1000.0}
+#     pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_root_bc_max_order_1_norm_128x6.pt
+#     pretrained_local_expert_checkpoint: roots_checkpoints/single_precision/kdv_adam30-lbfgs30_full_batch_bc_max_order_1_norm_30x3-experts.pt
+#     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
+#       m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
+#   lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.01, max_iter: 1,
+#     tolerance_change: 1.0e-14, tolerance_grad: 1.0e-14}
+#   name: kdv_ft_A1_sig010_col05_lr001
+#   patience_evals: 10
 #   precision: float32
 #   problem: kdv
 #   sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
