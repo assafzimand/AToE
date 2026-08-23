@@ -41,9 +41,9 @@ Section~\ref{sec:background}. For the second order benchmarks we use an MLP with
 with learning rate $10^{-3}$, followed by 40k SSBroyden iterations, and all computations are performed in
 double precision, as suggested in~\cite{kiyani2025optimizer}.
 
-\noindent The higher order benchmarks require a more expressive netwroks, and we use an MLP with 6 hidden layers of 128 neurons, combined with a random Fourier feature embedding~\cite{tancik2020fourier} of the input, with scale $2$ and embedding dimension equal to the layer width. To keep a network of this size affordable we train it in single precision, and the reduced precision in turn calls for a longer first order stage: 30k Adam iterations governed by a scheduler with base learning rate $10^{-3}$, a warmup from $10^{-5}$ to $10^{-3}$ over the first 2k iterations, and an exponential decay by a factor of $0.9$ every 2k iterations thereafter, followed by 30k L-BFGS iterations.
+\noindent The higher order benchmarks require more expressive networks, and we use an MLP with 6 hidden layers of 128 neurons, combined with a random Fourier feature embedding~\cite{tancik2020fourier} of the input, with scale $2$ and embedding dimension equal to the layer width. To keep a network of this size affordable we train it in single precision, and the reduced precision in turn calls for a longer first order stage: 30k Adam iterations governed by a scheduler with base learning rate $10^{-3}$, a warmup from $10^{-5}$ to $10^{-3}$ over the first 2k iterations, and an exponential decay by a factor of $0.9$ every 2k iterations thereafter, followed by 30k L-BFGS iterations with learning rate $0.1$.
 
-\noindent In both regimes, all stages use full batch training with 20k residual points and 256 points each for the initial and boundary conditions.
+\noindent In both regimes, all stages use full batch training with 20k residual points and 256 points each for the initial and boundary conditions; the residual set is redrawn at every Adam iteration and held fixed during the quasi-Newton stages. The loss weights are $\lambda_r = \lambda_{ic} = \lambda_{bc} = 1$ for the second order benchmarks, while the higher order ones use $\lambda_{ic} = \lambda_{bc} = 1000$ with $\lambda_r = 1$; these weights are kept unchanged across all training phases.
 
 \vspace{0.5em}
 
@@ -170,7 +170,7 @@ where $\mathcal{L}^{\mathrm{res}}_j$ enforces the PDE residual on collocation
 points inside $\Omega_j$, and $\mathcal{L}^{\mathrm{ic}}_j$,
 $\mathcal{L}^{\mathrm{bc}}_j$ enforce the initial condition $f_0$ and given boundary conditions
 on the parts of $\partial\Omega_j$ that coincide with the boundary of
-$\Omega$. The region $\Omega_j$ generally borders a different neighbour along
+$\Omega$; for a region whose lower time face is interior, $\mathcal{L}^{\mathrm{ic}}_j$ instead ties the expert to the values of $u_0$ on that face, which acts as its local initial condition. The region $\Omega_j$ generally borders a different neighbour along
 each spatial dimension, so let $\mathcal{I}_j \subseteq \{1,\ldots,d\}$
 denote the dimensions along which $\Omega_j$ has an interior neighbour, as
 opposed to coinciding with the physical boundary of $\Omega$, and for
@@ -188,34 +188,40 @@ Section~\ref{sec:smoothstep_windows} that yields a globally smooth model. Since 
 
 \noindent Writing $X^{\Gamma}_j = \bigcup_{i\in\mathcal{I}_j} X^{\Gamma_j}_i$ for the
 union over all such faces, the loss ties $u_j$ and its derivatives, on every
-interior face, to the frozen initial prediction $u_0$:
+interior spatial face, to the frozen initial prediction $u_0$, as a sum of
+per-order mean square mismatches:
 \begin{equation}
 \mathcal{L}^{\Gamma}_j
-= \frac{1}{N\,|X^{\Gamma}_j|}
+= \sum_{m=0}^{N-1}
+\frac{1}{|X^{\Gamma}_j|}
 \sum_{i\in\mathcal{I}_j}
 \sum_{(x,t)\in X^{\Gamma_j}_i}
-\sum_{m=0}^{N-1}
-\left| \frac{\partial^m u_j}{\partial^m x_i}(x,t)
-- \frac{\partial^m u_0}{\partial^m x_i}(x,t) \right|^2 .
+\left| \frac{\partial^m u_j}{\partial x_i^m}(x,t)
+- \frac{\partial^m u_0}{\partial x_i^m}(x,t) \right|^2 .
 \label{eq:interface_loss}
 \end{equation}
-In this way every expert solves a localized problem whose interface data on
+Interior faces normal to the \emph{time} axis carry, as noted above, value-only
+matching through $\mathcal{L}^{\mathrm{ic}}_j$, since all benchmark PDEs are
+first order in time. In this way every expert solves a
+localized problem whose interface data on
 the interior interfaces is supplied by the root, so the leaves can be trained
 independently, and in parallel, while remaining mutually consistent.
 
-\noindent For the higher order benchmarks, two practical adjustments are made to the derivative matching in \eqref{eq:interface_loss}. In single precision, and with solutions whose derivative magnitudes grow steeply with order, the mismatch terms of orders $m \geq 2$ attain values that dominate the gradient budget and destabilize training. We therefore truncate the matching to the value and the first derivative, and normalize the first derivative term by the per-face scale
+\noindent For the higher order benchmarks, two practical adjustments are made to the derivative matching in \eqref{eq:interface_loss}. In single precision, and with solutions whose derivative magnitudes grow steeply with order, the mismatch terms of orders $m \geq 2$ attain values that dominate the gradient budget and destabilize training. We therefore truncate the matching to the value and the first derivative, and normalize the first derivative term of each expert by the scale
 \begin{equation}
-s_1 = 1 + \frac{1}{|X^{\Gamma_j}_i|}\sum_{(x,t)\in X^{\Gamma_j}_i} \left|\frac{\partial u_0}{\partial x_i}(x,t)\right|^2,
+s_1 = 1 + \frac{1}{|X^{\Gamma}_j|}\sum_{i\in\mathcal{I}_j}\sum_{(x,t)\in X^{\Gamma_j}_i} \left|\frac{\partial u_0}{\partial x_i}(x,t)\right|^2,
 \label{eq:derivative_scale}
 \end{equation}
-so that the derivative mismatch becomes a relative quantity of magnitude comparable to the value term. The $+1$ floor guarantees that normalization can only tame a large term, never amplify a small one, and since the scales are positive constants the minimizers are unchanged: a normalized term vanishes exactly when its unnormalized version does. The same truncation and normalization are applied to the global boundary terms of the root and fine tuning stages, there with the scale computed from the model's own boundary derivatives, detached from the gradient and updated at every step.
+computed over the expert's interior spatial faces, so that the derivative mismatch becomes a relative quantity of magnitude comparable to the value term. The $+1$ floor guarantees that normalization can only tame a large term, never amplify a small one, and since the scales are positive constants the minimizers are unchanged: a normalized term vanishes exactly when its unnormalized version does. The same truncation and normalization are applied to the periodic boundary pairing terms wherever they appear: in the expert stage, where the two domain-edge experts are paired with scales again computed from $u_0$, and in the global boundary terms of the root and fine tuning stages, there with the scale computed from the model's own boundary derivatives, detached from the gradient and updated at every step.
 
 The experts are trained with the same optimizer
 schedule as the root of the corresponding benchmark (Section~\ref{sec:root_training}). Each leaf draws a fixed, uniformly sampled point set whose size is proportional to its volume, subject to a
 minimum count, so that even thin leaves around a fine feature train on
 enough points to close their local problem.
 The loss weights $\lambda_r$, $\lambda_{ic}$, and $\lambda_{bc}$ are kept from the root
-training, and the interface weight is set to $\lambda_{\Gamma} = 1$. Examples of interface training samples for inner domain experts are shown in
+training, and the interface terms inherit them as well: the spatial-face terms
+of \eqref{eq:interface_loss} carry $\lambda_{\Gamma} = \lambda_{bc}$, while the
+time-face (local initial condition) terms carry $\lambda_{ic}$. Examples of interface training samples for inner domain experts are shown in
 Figure~\ref{fig:local_expert_training}.
 
 \vspace{0.5em}
@@ -377,5 +383,5 @@ domain, each covering its region with smooth transitions in the overlap zones.
 \noindent Finally, the full composition \eqref{eq:global_atoe} is jointly fine
 tuned under the global PDE loss. This last stage reconciles the independently
 trained experts in the overlap zones,
-producing a single, globally consistent solution. The fine tuning stage consists of 40k SSBroyden iterations with no Adam warm-up for the second order benchmarks and similarly 30k L-BFGS only for the higher order benchmarks, together with a sampling scheme that draws a fixed fraction of the collocation points from within the overlap regions; we use a ratio of $0.3$ and an
-overlap fraction $\alpha = 0.05$. Concentrating samples in the overlaps is motivated by two observations. First, these are the regions where the composition is weakest at the start of fine tuning. At an overlap point the blend mixes an expert on its own region with a neighbour evaluated outside the subdomain it was trained on, so the mismatch the fine tuning must resolve is by construction concentrated there. Second, the tree places its splits where the solution varies most sharply, so the overlaps contain the most complex features of the solution. This is inherent to decision trees, as a split is accepted where it most reduces the approximation error, which is where the function changes most rapidly. Oversampling them therefore directs training effort to the difficult regions, acting as a solution-driven counterpart of residual-based adaptive sampling methods such as RAD~\cite{wu2023rad}, with the sampling density fixed in advance by the decomposition rather than updated from the residual during training.
+producing a single, globally consistent solution. The fine tuning stage consists of 40k SSBroyden iterations with no Adam warm-up for the second order benchmarks and similarly 30k L-BFGS only for the higher order benchmarks, the latter with a learning rate of $10^{-3}$, smaller than in the earlier stages, as the composed loss landscape tolerates only smaller line-search trial steps. Fine tuning uses a sampling scheme that draws a fixed fraction of the collocation points from within the overlap regions; we use a ratio of $0.3$, with an
+overlap fraction $\alpha = 0.05$ for the second order benchmarks and $\alpha = 0.03$ for the higher order ones. Concentrating samples in the overlaps is motivated by two observations. First, these are the regions where the composition is weakest at the start of fine tuning. At an overlap point the blend mixes an expert on its own region with a neighbour evaluated outside the subdomain it was trained on, so the mismatch the fine tuning must resolve is by construction concentrated there. Second, the tree places its splits where the solution varies most sharply, so the overlaps contain the most complex features of the solution. This is inherent to decision trees, as a split is accepted where it most reduces the approximation error, which is where the function changes most rapidly. Oversampling them therefore directs training effort to the difficult regions, acting as a solution-driven counterpart of residual-based adaptive sampling methods such as RAD~\cite{wu2023rad}, with the sampling density fixed in advance by the decomposition rather than updated from the residual during training.
