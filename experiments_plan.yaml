@@ -1,42 +1,31 @@
 # ==========================================================================
-# FINE-TUNE FACTORIAL, NO-RESAMPLE PIPELINE (60x4 experts): 2x2x2 =
-# {sigma 0.05 | adaptive collar} x {ssbroyden lr 1 | 0.01} x
-# {collar_data 0.3 no-anneal | 0.5 annealed to 0}.
-# 3 PDEs x 8 cells = 24 cells, fine-tune only, 40k SSBroyden, NO warmup.
-# ==========================================================================
-#
-# Experts (full AToE state incl. the 60x4 root) load from
-# roots_checkpoints/double_precision/no_resample-4-60-roots/. RAD is OFF
-# everywhere (per-PDE adaptive_sampling disabled). cd03 cells are fully
-# STATIC (global cadence 99999): the 0.3 collar share is drawn once in the
-# segment-start draw. Only cd05an0 cells resample (fine_tune-local cadence
-# 500; uniform + collar-focused redraws, no RAD) -- the annealing rides on
-# those redraws.
-#
-# DIMENSIONS (2 options each):
-#   collar   s005 = fixed sigma 0.05 | ada = adaptive q=0.9 clamp [0.05,0.5]
-#   lr       ssbroyden trial step 1.0 (global default) | 0.01 (override)
-#   cd       cd03    = collar_data_ratio 0.3, no annealing, STATIC draw
-#            cd05an0 = collar_data_ratio 0.5 annealed linearly to 0 by 40k
-#                      (collar_data_annealing: 0.0), resample every 500
-#
-# NOTE: first live use of fine_tune.resample_every_epochs and
-# collar_data_annealing -- confirm the [Sampling]/[CollarAnneal] lines at
-# segment start.
-#
-# All cells: 40k pure SSBroyden fine-tune (no Adam warmup), float64, full
-# batch, eval_every 1000 x patience 5 (5k window). Starting compositions
-# are logged at load ([PretrainedExperts] recorded rel-L2).
-#
-# This is the DEFAULT plan: `python run_experiments.py` reads it as-is;
-# AWS_scripts/run_and_terminate.sh launches it and stops the box after.
+# AC / BURGERS / SCHRODINGER — 24-WIDE EXPERTS, OLD-COMMIT ARM (2026-08-23)
+# Branch experts24-oldcommit = commit 8424579 ("fine tunes no RAD 1", the
+# paper FINE-TUNE commit, leaves-frozen ft) + a ~12-line backport of the
+# fine_tune.collar_data_ratio segment-local override from HEAD, so one run
+# can do phase 3 with collar 0.0 and fine-tune with collar 0.3 (the paper's
+# two-config split). Companion arm to the current-code plan on main.
+# Paper run: ac_burgers_schrodinger_experts_creation_20260724_142507
+# (experts @ 0894149, fine-tunes @ 8424579). At THIS commit the tree still
+# fits the synthetic 200x200 lattice and solvers/split-loss match the paper
+# creation run exactly, so with the paper roots LOADED the decomposition
+# reproduces the paper's expert regions; experts are 2-24-24-24-1/2 (was
+# 2-20-20-20-1/2). Each run: root loaded -> tree -> phase 3 (41k,
+# adam->ssbroyden @1000, hard indicators) -> joint fine-tune (40k ssbroyden,
+# sigma 0.05, collar 0.3, root frozen). float64, seed 42, full batch, no
+# resample, no RAD/LRA/RWF/FF/causal, patience 5 x eval 1000, ssbroyden
+# lr 1.0 tol 1e-10 both segments.
+# Known deltas vs the paper creation run (accepted): per-expert direct
+# residual draw with min_points_per_expert 4096 floor (paper: global draw,
+# no floor — floor matches the current-code arm), full-batch loader without
+# per-epoch shuffle, seeded weight init (irrelevant — new expert draws).
+# sigma_fraction lives in fine_tune at this commit and is inert in phase 3
+# (hard blending + collar off) — same single-knob semantics as HEAD.
 # ==========================================================================
 base_config:
   activation: tanh
   adam:
-    betas:
-    - 0.9
-    - 0.999
+    betas: [0.9, 0.999]
     eps: 1.0e-08
   adaptive_pinn:
     AToE_threshold_capacity: null
@@ -46,17 +35,13 @@ base_config:
     enable_timing: false
     enabled: true
     expert_type: mlp
-    # FINE-TUNE (the only segment that runs): 40k PURE SSBroyden — NO Adam
-    # warmup. Adaptive collars q=0.9 clamped [0.05, 0.5] are the BASELINE;
-    # cells 2-3 override to fixed sigma, cells 4-5 switch on the single
-    # corrector. The lr key is inert (Adam-only); SSBroyden reads the
-    # ssbroyden block. sigma_fraction is the fallback if sizing fails.
     fine_tune:
       adaptive_collar_grid: 257
       adaptive_collar_quantile: 0.9
       adaptive_collar_sigma_max: 0.5
       adaptive_collar_sigma_min: 0.05
-      adaptive_collar_size: true
+      adaptive_collar_size: false
+      collar_data_ratio: 0.3
       corrector_architecture: null
       corrector_init: zero
       epochs: 40000
@@ -68,18 +53,8 @@ base_config:
       optimizer_switch_epoch: 99999
       sigma_fraction: 0.05
       single_corrector: false
-    initial_train:
-      # ROOT — SKIPPED in every cell (pretrained_local_expert_checkpoint is
-      # set, which skips root AND phase 3; this block is ignored).
-      epochs: 41000
-      lr: 0.001
-      lr_decay_rate: 0.98
-      lr_decay_steps: 1000
-      lr_schedule: none
-      lr_warmup_steps: 0
-      optimizer_1: adam
-      optimizer_2: ssbroyden
-      optimizer_switch_epoch: 1000
+    initial_train: {epochs: 41000, lr: 0.001, lr_decay_rate: 0.98, lr_decay_steps: 1000, lr_schedule: none,
+      lr_warmup_steps: 0, optimizer_1: adam, optimizer_2: ssbroyden, optimizer_switch_epoch: 1000}
     max_experts: 150
     split_icbc:
       enabled: true
@@ -89,269 +64,126 @@ base_config:
     variable_for_node_accept: norm
   allen_cahn:
     D: 0.0001
-    adaptive_sampling:
-      adaptive_ratio: 0.5
-      enabled: false
-      phi: quadratic
-      phi_epsilon: 1.0
-      phi_power: 2.0
+    adaptive_sampling: {adaptive_ratio: 0.3, enabled: false, phi: quadratic, phi_epsilon: 1.0, phi_power: 2.0}
     causal_training:
       enabled: false
       min_weight_threshold: 0.99
       num_chunks: 32
-      tol_schedule:
-      - 0.01
-      - 0.1
-      - 1.0
+      tol_schedule: [0.01, 0.1, 1.0]
     expert_grad_clip_norm: null
-    fourier_features:
-      dim: 10
-      enabled: false
-      periodic: false
-      scale: 3.0
+    fourier_features: {dim: 10, enabled: false, periodic: false, scale: 3.0}
     grad_clip_norm: null
-    init:
-      hidden: default
-      ls_use_bias: false
-      output: default
-    loss_weights:
-      bc: 1.0
-      continuity: 0.0
-      ic: 1.0
-      residual: 1.0
-    lra:
-      alpha: 0.1
-      enabled: false
-      epsilon: 1.0e-05
-      scheme: grad_norm
-      update_every: 100
+    init: {hidden: default, ls_use_bias: false, output: default}
+    loss_weights: {bc: 1.0, continuity: 0.0, ic: 1.0, residual: 1.0}
+    lra: {alpha: 0.1, enabled: false, epsilon: 1.0e-05, scheme: grad_norm, update_every: 100}
     new_norm_threshold: 0.04
     output_dim: 1
-    pretrained_base_checkpoint: null
-    pretrained_local_expert_checkpoint: roots_checkpoints/double_precision/no_resample-4-60-roots/allen_cahn_experts.pt
-    rwf:
-      enabled: false
-      mean: 1.0
-      std: 0.1
+    pretrained_base_checkpoint: roots_checkpoints/double_precision/no_resample-4-60-roots/allen_cahn_root.pt
+    pretrained_local_expert_checkpoint: null
+    rwf: {enabled: false, mean: 1.0, std: 0.1}
     spatial_dim: 1
     spatial_domain:
-    - - -1.0
-      - 1.0
-    temporal_domain:
-    - 0.0
-    - 1.0
-    time_marching:
-      enabled: false
-      freeze_previous_windows: true
-      m_distribution: quadratic
-      num_windows: 5
+    - [-1.0, 1.0]
+    temporal_domain: [0.0, 1.0]
+    time_marching: {enabled: false, freeze_previous_windows: true, m_distribution: quadratic, num_windows: 5}
     tree_smoothness_threshold: 0.5
     wavelet_threshold: 0.002
     window_smoothness_order: 2
     window_type: smoothstep
+  base_architecture: [2, 60, 60, 60, 60, 1]
   batch_size: 99999
   burgers1d:
-    adaptive_sampling:
-      adaptive_ratio: 0.5
-      enabled: false
-      phi: quadratic
-      phi_epsilon: 1.0
-      phi_power: 2.0
+    adaptive_sampling: {adaptive_ratio: 0.5, enabled: false, phi: quadratic, phi_epsilon: 1.0, phi_power: 2.0}
     causal_training:
       enabled: false
       min_weight_threshold: 0.99
       num_chunks: 32
-      tol_schedule:
-      - 0.01
-      - 0.1
-      - 1.0
+      tol_schedule: [0.01, 0.1, 1.0]
     expert_grad_clip_norm: null
-    fourier_features:
-      dim: 128
-      enabled: false
-      periodic: false
-      scale: 1.0
+    fourier_features: {dim: 128, enabled: false, periodic: false, scale: 1.0}
     grad_clip_norm: null
-    init:
-      hidden: default
-      ls_use_bias: false
-      output: default
-    loss_weights:
-      bc: 1.0
-      continuity: 0.0
-      ic: 1.0
-      residual: 1.0
-    lra:
-      alpha: 0.1
-      enabled: false
-      epsilon: 1.0e-05
-      scheme: grad_norm
-      update_every: 100
+    init: {hidden: default, ls_use_bias: false, output: default}
+    loss_weights: {bc: 1.0, continuity: 0.0, ic: 1.0, residual: 1.0}
+    lra: {alpha: 0.1, enabled: false, epsilon: 1.0e-05, scheme: grad_norm, update_every: 100}
     new_norm_threshold: 0.015
     nu: 0.01
     output_dim: 1
-    pretrained_base_checkpoint: null
-    pretrained_local_expert_checkpoint: roots_checkpoints/double_precision/no_resample-4-60-roots/burgers_experts.pt
-    rwf:
-      enabled: false
-      mean: 1.0
-      std: 0.1
+    pretrained_base_checkpoint: roots_checkpoints/double_precision/no_resample-4-60-roots/burgers_root.pt
+    pretrained_local_expert_checkpoint: null
+    rwf: {enabled: false, mean: 1.0, std: 0.1}
     spatial_dim: 1
     spatial_domain:
-    - - -1.0
-      - 1.0
-    temporal_domain:
-    - 0.0
-    - 1.0
-    time_marching:
-      enabled: false
-      freeze_previous_windows: true
-      m_distribution: quadratic
-      num_windows: 5
+    - [-1.0, 1.0]
+    temporal_domain: [0.0, 1.0]
+    time_marching: {enabled: false, freeze_previous_windows: true, m_distribution: quadratic, num_windows: 5}
     tree_smoothness_threshold: 0.5
     wavelet_threshold: 0.001
     window_smoothness_order: 2
     window_type: smoothstep
   cuda: true
-  # PHASE 3 -- SKIPPED in every cell (pretrained experts loaded).
-  epochs: 0
-  # The VERIFIED stopping rule: eval 1000 x patience 10 = a 10k window. The
-  # adacollar recipe has a known plateau around epochs 10-15k before its
-  # second descent — the 30-Jul verified run crossed it with 2 evals to
-  # spare; the 2.5k triage window executed it mid-plateau.
+  epochs: 41000
   eval_every: 1000
   eval_only: false
+  experts_architecture: [2, 24, 24, 24, 1]
   kdv:
-    adaptive_sampling:
-      adaptive_ratio: 0.3
-      enabled: false
-      phi: quadratic
-      phi_epsilon: 1.0
-      phi_power: 2.0
+    adaptive_sampling: {adaptive_ratio: 0.3, enabled: false, phi: quadratic, phi_epsilon: 1.0, phi_power: 2.0}
     causal_training:
       enabled: false
       min_weight_threshold: 0.99
       num_chunks: 16
-      tol_schedule:
-      - 0.01
+      tol_schedule: [0.01]
     expert_grad_clip_norm: null
-    fourier_features:
-      dim: 10
-      enabled: false
-      periodic: false
-      scale: 2.0
+    fourier_features: {dim: 10, enabled: false, periodic: false, scale: 2.0}
     grad_clip_norm: null
-    init:
-      hidden: default
-      ls_use_bias: false
-      output: default
-    loss_weights:
-      bc: 1.0
-      continuity: 0.0
-      ic: 1.0
-      residual: 1.0
-    lra:
-      alpha: 0.1
-      enabled: false
-      epsilon: 1.0e-05
-      scheme: grad_norm
-      update_every: 1000
+    init: {hidden: default, ls_use_bias: false, output: default}
+    loss_weights: {bc: 1.0, continuity: 0.0, ic: 1.0, residual: 1.0}
+    lra: {alpha: 0.1, enabled: false, epsilon: 1.0e-05, scheme: grad_norm, update_every: 1000}
     mu: 0.022
     new_norm_threshold: 0.2
     output_dim: 1
     pretrained_base_checkpoint: null
     pretrained_local_expert_checkpoint: null
-    rwf:
-      enabled: false
-      mean: 1.0
-      std: 0.1
+    rwf: {enabled: false, mean: 1.0, std: 0.1}
     spatial_dim: 1
     spatial_domain:
-    - - -1.0
-      - 1.0
-    temporal_domain:
-    - 0.0
-    - 1.0
-    time_marching:
-      enabled: true
-      freeze_previous_windows: true
-      m_distribution: quadratic
-      num_windows: 3
+    - [-1.0, 1.0]
+    temporal_domain: [0.0, 1.0]
+    time_marching: {enabled: true, freeze_previous_windows: true, m_distribution: quadratic, num_windows: 3}
     tree_smoothness_threshold: 0.4
     wavelet_threshold: 0.0025
     window_smoothness_order: 3
     window_type: smoothstep
   ks:
-    adaptive_sampling:
-      adaptive_ratio: 0.5
-      enabled: false
-      phi: quadratic
-      phi_epsilon: 1.0
-      phi_power: 2.0
+    adaptive_sampling: {adaptive_ratio: 0.5, enabled: false, phi: quadratic, phi_epsilon: 1.0, phi_power: 2.0}
     alpha: 6.25
     beta: 0.390625
     causal_training:
       enabled: false
       min_weight_threshold: 0.99
       num_chunks: 32
-      tol_schedule:
-      - 0.01
-      - 0.1
-      - 1
+      tol_schedule: [0.01, 0.1, 1]
     expert_grad_clip_norm: null
-    fourier_features:
-      dim: 10
-      enabled: false
-      periodic: false
-      scale: 1.0
+    fourier_features: {dim: 10, enabled: false, periodic: false, scale: 1.0}
     gamma: 0.00152587890625
     grad_clip_norm: null
-    init:
-      hidden: default
-      ls_use_bias: false
-      output: default
-    loss_weights:
-      bc: 1.0
-      continuity: 0.0
-      ic: 1.0
-      residual: 1.0
-    lra:
-      alpha: 0.1
-      enabled: false
-      epsilon: 1.0e-05
-      scheme: grad_norm
-      update_every: 100
+    init: {hidden: default, ls_use_bias: false, output: default}
+    loss_weights: {bc: 1.0, continuity: 0.0, ic: 1.0, residual: 1.0}
+    lra: {alpha: 0.1, enabled: false, epsilon: 1.0e-05, scheme: grad_norm, update_every: 100}
     new_norm_threshold: 10.0
     output_dim: 1
     pretrained_base_checkpoint: null
     pretrained_local_expert_checkpoint: null
-    rwf:
-      enabled: false
-      mean: 1.0
-      std: 0.1
+    rwf: {enabled: false, mean: 1.0, std: 0.1}
     spatial_dim: 1
     spatial_domain:
-    - - 0.0
-      - 6.283185307179586
-    temporal_domain:
-    - 0.0
-    - 1.0
-    time_marching:
-      enabled: true
-      freeze_previous_windows: true
-      m_distribution: quadratic
-      num_windows: 5
+    - [0.0, 6.283185307179586]
+    temporal_domain: [0.0, 1.0]
+    time_marching: {enabled: true, freeze_previous_windows: true, m_distribution: quadratic, num_windows: 5}
     tree_smoothness_threshold: 0.3
     wavelet_threshold: 0.04
     window_smoothness_order: 4
     window_type: smoothstep
-  lbfgs:
-    history_size: 100
-    line_search: strong_wolfe
-    lr: 1.0
-    max_iter: 1
-    tolerance_change: 0.0
-    tolerance_grad: 0.0
+  lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 1.0, max_iter: 1, tolerance_change: 0.0, tolerance_grad: 0.0}
   lr: 0.001
   lr_decay_rate: 0.98
   lr_decay_steps: 1000
@@ -360,396 +192,67 @@ base_config:
   lr_warmup_steps: 0
   min_epochs: 1
   model: AToELeaves
-  # Top-level keys govern PHASE 3: 1k Adam (fresh per-expert draws every
-  # epoch via the Adam cadence rule) -> SSBroyden on a static draw.
   optimizer_1: adam
   optimizer_2: ssbroyden
   optimizer_switch_epoch: 1000
-  # 5 evals x eval_every 1000 = 5k epochs without a 1% improvement.
   patience_evals: 5
   patience_rel_delta: 0.01
   precision: float64
   print_every: 1000
-  problem: burgers1d
-  profiling:
-    enabled: false
+  problem: allen_cahn
+  profiling: {enabled: false}
   resume_from: null
-  sampling:
-    collar_data_ratio: 0.0
-    collar_margin: 1.0
-    eval_train_ratio: 0.25
-    min_points_per_expert: 1024
-    n_boundary_train: 256
-    n_initial_train: 256
-    n_residual_train: 20000
-    plot_samples_every: 1000
-    rad_pool_size: 100000
-    rad_pool_chunk: 5000
-    # NO periodic resampling (the 24-Jul regime): Adam warmups still redraw
-    # every epoch via the cadence rule; SSBroyden phases are static.
-    resample_every_epochs: 99999
-    sample_volume_ratio: 35
+  sampling: {collar_data_ratio: 0.0, collar_margin: 1.0, eval_train_ratio: 0.25, min_points_per_expert: 4096,
+    n_boundary_train: 256, n_initial_train: 256, n_residual_train: 20000, plot_samples_every: 1000,
+    rad_pool_chunk: 5000, rad_pool_size: 100000, resample_every_epochs: 99999, sample_volume_ratio: 35}
   save_every: 999999
   schrodinger:
-    adaptive_sampling:
-      adaptive_ratio: 0.5
-      enabled: false
-      phi: quadratic
-      phi_epsilon: 1.0
-      phi_power: 2.0
+    adaptive_sampling: {adaptive_ratio: 0.3, enabled: false, phi: quadratic, phi_epsilon: 1.0, phi_power: 2.0}
     causal_training:
       enabled: false
       min_weight_threshold: 0.99
       num_chunks: 32
-      tol_schedule:
-      - 0.01
-      - 0.1
-      - 1.0
+      tol_schedule: [0.01, 0.1, 1.0]
     expert_grad_clip_norm: null
-    fourier_features:
-      dim: 128
-      enabled: false
-      periodic: false
-      scale: 1.0
+    fourier_features: {dim: 128, enabled: false, periodic: false, scale: 1.0}
     grad_clip_norm: null
-    init:
-      hidden: default
-      ls_use_bias: false
-      output: default
-    loss_weights:
-      bc: 1.0
-      continuity: 0.0
-      ic: 1.0
-      residual: 1.0
-    lra:
-      alpha: 0.1
-      enabled: false
-      epsilon: 1.0e-05
-      scheme: grad_norm
-      update_every: 100
+    init: {hidden: default, ls_use_bias: false, output: default}
+    loss_weights: {bc: 1.0, continuity: 0.0, ic: 1.0, residual: 1.0}
+    lra: {alpha: 0.1, enabled: false, epsilon: 1.0e-05, scheme: grad_norm, update_every: 100}
     new_norm_threshold: 2.0
     output_dim: 2
-    pretrained_base_checkpoint: null
-    pretrained_local_expert_checkpoint: roots_checkpoints/double_precision/no_resample-4-60-roots/schrodinger_experts.pt
-    rwf:
-      enabled: false
-      mean: 1.0
-      std: 0.1
+    pretrained_base_checkpoint: roots_checkpoints/double_precision/no_resample-4-60-roots/schrodinger_root.pt
+    pretrained_local_expert_checkpoint: null
+    rwf: {enabled: false, mean: 1.0, std: 0.1}
     spatial_dim: 1
     spatial_domain:
-    - - -5.0
-      - 5.0
-    temporal_domain:
-    - 0.0
-    - 1.5707963267948966
-    time_marching:
-      enabled: false
-      freeze_previous_windows: true
-      m_distribution: quadratic
-      num_windows: 5
+    - [-5.0, 5.0]
+    temporal_domain: [0.0, 1.5707963267948966]
+    time_marching: {enabled: false, freeze_previous_windows: true, m_distribution: quadratic, num_windows: 5}
     tree_smoothness_threshold: 0.7
     wavelet_threshold: 0.1
     window_smoothness_order: 2
     window_type: smoothstep
   seed: 42
   soap:
-    betas:
-    - 0.95
-    - 0.95
+    betas: [0.95, 0.95]
     precondition_frequency: 10
     weight_decay: 0.0
-  ssbroyden:
-    lr: 1.0
-    tolerance_grad: 1.0e-10
-experiment_name: ft_noresample_factorial_2x2x2
+  ssbroyden: {lr: 1.0, tolerance_grad: 1.0e-10}
+experiment_name: ac_burgers_schrodinger_experts24_oldcommit
 experiments:
-# -- cd03 / s003 / lr1 ----------------------------------------
-- name: burgers_s005_lr1_cd03
-  problem: burgers1d
+- base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 24, 24, 24, 1]
   model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    fine_tune:
-      adaptive_collar_size: false
-      sigma_fraction: 0.05
-  sampling:
-    collar_data_ratio: 0.3
-- name: allen_cahn_s005_lr1_cd03
+  name: allen_cahn
   problem: allen_cahn
+- base_architecture: [2, 60, 60, 60, 60, 1]
+  experts_architecture: [2, 24, 24, 24, 1]
   model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    fine_tune:
-      adaptive_collar_size: false
-      sigma_fraction: 0.05
-  sampling:
-    collar_data_ratio: 0.3
-- name: schrodinger_s005_lr1_cd03
-  problem: schrodinger
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 2]
-  experts_architecture: [2, 20, 20, 20, 2]
-  adaptive_pinn:
-    fine_tune:
-      adaptive_collar_size: false
-      sigma_fraction: 0.05
-  sampling:
-    collar_data_ratio: 0.3
-# -- cd03 / s003 / lr1e2 ----------------------------------------
-- name: burgers_s005_lr1e2_cd03
+  name: burgers1d
   problem: burgers1d
+- base_architecture: [2, 60, 60, 60, 60, 2]
+  experts_architecture: [2, 24, 24, 24, 2]
   model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    fine_tune:
-      ssbroyden:
-        lr: 0.01
-      adaptive_collar_size: false
-      sigma_fraction: 0.05
-  sampling:
-    collar_data_ratio: 0.3
-- name: allen_cahn_s005_lr1e2_cd03
-  problem: allen_cahn
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    fine_tune:
-      ssbroyden:
-        lr: 0.01
-      adaptive_collar_size: false
-      sigma_fraction: 0.05
-  sampling:
-    collar_data_ratio: 0.3
-- name: schrodinger_s005_lr1e2_cd03
+  name: schrodinger
   problem: schrodinger
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 2]
-  experts_architecture: [2, 20, 20, 20, 2]
-  adaptive_pinn:
-    fine_tune:
-      ssbroyden:
-        lr: 0.01
-      adaptive_collar_size: false
-      sigma_fraction: 0.05
-  sampling:
-    collar_data_ratio: 0.3
-# -- cd03 / ada / lr1 ----------------------------------------
-- name: burgers_ada_lr1_cd03
-  problem: burgers1d
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  sampling:
-    collar_data_ratio: 0.3
-- name: allen_cahn_ada_lr1_cd03
-  problem: allen_cahn
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  sampling:
-    collar_data_ratio: 0.3
-- name: schrodinger_ada_lr1_cd03
-  problem: schrodinger
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 2]
-  experts_architecture: [2, 20, 20, 20, 2]
-  sampling:
-    collar_data_ratio: 0.3
-# -- cd03 / ada / lr1e2 ----------------------------------------
-- name: burgers_ada_lr1e2_cd03
-  problem: burgers1d
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    fine_tune:
-      ssbroyden:
-        lr: 0.01
-  sampling:
-    collar_data_ratio: 0.3
-- name: allen_cahn_ada_lr1e2_cd03
-  problem: allen_cahn
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    fine_tune:
-      ssbroyden:
-        lr: 0.01
-  sampling:
-    collar_data_ratio: 0.3
-- name: schrodinger_ada_lr1e2_cd03
-  problem: schrodinger
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 2]
-  experts_architecture: [2, 20, 20, 20, 2]
-  adaptive_pinn:
-    fine_tune:
-      ssbroyden:
-        lr: 0.01
-  sampling:
-    collar_data_ratio: 0.3
-# -- cd05an0 / s003 / lr1 ----------------------------------------
-- name: burgers_s005_lr1_cd05an0
-  problem: burgers1d
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    fine_tune:
-      adaptive_collar_size: false
-      sigma_fraction: 0.05
-      resample_every_epochs: 500
-      collar_data_annealing: 0.0
-  sampling:
-    collar_data_ratio: 0.5
-- name: allen_cahn_s005_lr1_cd05an0
-  problem: allen_cahn
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    fine_tune:
-      adaptive_collar_size: false
-      sigma_fraction: 0.05
-      resample_every_epochs: 500
-      collar_data_annealing: 0.0
-  sampling:
-    collar_data_ratio: 0.5
-- name: schrodinger_s005_lr1_cd05an0
-  problem: schrodinger
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 2]
-  experts_architecture: [2, 20, 20, 20, 2]
-  adaptive_pinn:
-    fine_tune:
-      adaptive_collar_size: false
-      sigma_fraction: 0.05
-      resample_every_epochs: 500
-      collar_data_annealing: 0.0
-  sampling:
-    collar_data_ratio: 0.5
-# -- cd05an0 / s003 / lr1e2 ----------------------------------------
-- name: burgers_s005_lr1e2_cd05an0
-  problem: burgers1d
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    fine_tune:
-      ssbroyden:
-        lr: 0.01
-      adaptive_collar_size: false
-      sigma_fraction: 0.05
-      resample_every_epochs: 500
-      collar_data_annealing: 0.0
-  sampling:
-    collar_data_ratio: 0.5
-- name: allen_cahn_s005_lr1e2_cd05an0
-  problem: allen_cahn
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    fine_tune:
-      ssbroyden:
-        lr: 0.01
-      adaptive_collar_size: false
-      sigma_fraction: 0.05
-      resample_every_epochs: 500
-      collar_data_annealing: 0.0
-  sampling:
-    collar_data_ratio: 0.5
-- name: schrodinger_s005_lr1e2_cd05an0
-  problem: schrodinger
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 2]
-  experts_architecture: [2, 20, 20, 20, 2]
-  adaptive_pinn:
-    fine_tune:
-      ssbroyden:
-        lr: 0.01
-      adaptive_collar_size: false
-      sigma_fraction: 0.05
-      resample_every_epochs: 500
-      collar_data_annealing: 0.0
-  sampling:
-    collar_data_ratio: 0.5
-# -- cd05an0 / ada / lr1 ----------------------------------------
-- name: burgers_ada_lr1_cd05an0
-  problem: burgers1d
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    fine_tune:
-      resample_every_epochs: 500
-      collar_data_annealing: 0.0
-  sampling:
-    collar_data_ratio: 0.5
-- name: allen_cahn_ada_lr1_cd05an0
-  problem: allen_cahn
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    fine_tune:
-      resample_every_epochs: 500
-      collar_data_annealing: 0.0
-  sampling:
-    collar_data_ratio: 0.5
-- name: schrodinger_ada_lr1_cd05an0
-  problem: schrodinger
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 2]
-  experts_architecture: [2, 20, 20, 20, 2]
-  adaptive_pinn:
-    fine_tune:
-      resample_every_epochs: 500
-      collar_data_annealing: 0.0
-  sampling:
-    collar_data_ratio: 0.5
-# -- cd05an0 / ada / lr1e2 ----------------------------------------
-- name: burgers_ada_lr1e2_cd05an0
-  problem: burgers1d
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    fine_tune:
-      ssbroyden:
-        lr: 0.01
-      resample_every_epochs: 500
-      collar_data_annealing: 0.0
-  sampling:
-    collar_data_ratio: 0.5
-- name: allen_cahn_ada_lr1e2_cd05an0
-  problem: allen_cahn
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 20, 20, 20, 1]
-  adaptive_pinn:
-    fine_tune:
-      ssbroyden:
-        lr: 0.01
-      resample_every_epochs: 500
-      collar_data_annealing: 0.0
-  sampling:
-    collar_data_ratio: 0.5
-- name: schrodinger_ada_lr1e2_cd05an0
-  problem: schrodinger
-  model: AToELeaves
-  base_architecture: [2, 60, 60, 60, 60, 2]
-  experts_architecture: [2, 20, 20, 20, 2]
-  adaptive_pinn:
-    fine_tune:
-      ssbroyden:
-        lr: 0.01
-      resample_every_epochs: 500
-      collar_data_annealing: 0.0
-  sampling:
-    collar_data_ratio: 0.5
