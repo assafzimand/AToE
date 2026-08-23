@@ -166,7 +166,7 @@ def save_error_map(pde, segment, label, n_labels, x_grid, t_grid, err,
     return out_path
 
 
-def process_pde(ft_run_dir: Path, roots_dir: Path, out_dir: Path):
+def process_pde(ft_run_dir: Path, roots_dir: Path, out_dir: Path, root_checkpoint: Path = None):
     cfg = yaml.safe_load((ft_run_dir / 'config_used.yaml').read_text(encoding='utf-8'))
     pde = cfg['problem']
     labels = _DIM_LABELS.get(pde, ['u'])
@@ -185,7 +185,7 @@ def process_pde(ft_run_dir: Path, roots_dir: Path, out_dir: Path):
     xt = np.column_stack([X.ravel(), T.ravel()])
     gt_flat = np.stack([c.ravel() for c in gt_channels], axis=1)
 
-    root_ckpt_path = roots_dir / f'{_ROOT_TAG[pde]}_root.pt'
+    root_ckpt_path = root_checkpoint if root_checkpoint is not None else roots_dir / f'{_ROOT_TAG[pde]}_root.pt'
     ft_ckpt_path = ft_run_dir / 'checkpoints' / 'best_model_fine_tune.pt'
 
     segments = {}
@@ -230,13 +230,18 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('fine_tune_run_dirs', nargs='+', type=Path)
     ap.add_argument('--roots-dir', type=Path,
-                     default=Path('roots_checkpoints/double_precision/no_resample-4-60-roots'))
+                     default=Path('roots_checkpoints/double_precision/no_resample-4-60-roots'),
+                     help="Shared roots_checkpoints dir (used unless --root-checkpoint is given)")
+    ap.add_argument('--root-checkpoint', type=Path, default=None,
+                     help="Explicit root .pt path, overriding --roots-dir's <tag>_root.pt lookup "
+                          "-- for runs whose root was trained standalone (its own checkpoints/ dir) "
+                          "rather than coming from the shared roots_checkpoints/ folder")
     ap.add_argument('--out-dir', type=Path,
                      default=Path('outputs/paper_figures/heatmaps'))
     args = ap.parse_args()
 
     for run_dir in args.fine_tune_run_dirs:
-        process_pde(run_dir, args.roots_dir, args.out_dir)
+        process_pde(run_dir, args.roots_dir, args.out_dir, root_checkpoint=args.root_checkpoint)
 
 
 if __name__ == '__main__':
