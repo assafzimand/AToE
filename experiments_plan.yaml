@@ -3,10 +3,10 @@
 # 8424579 + collar-override backport): sigma x collar re-fine-tune of the
 # 24-wide experts from the old-commit reproduction run. Experts LOADED from
 # roots_checkpoints/double_precision/reproduce-old-commit (epochs 0 ->
-# root+phase3 skipped). Grid per PDE: sigma {0.03,0.05} x collar_data
-# {0.3,0.4} = 4 cells x 3 PDEs, block order sig005col03 -> sig003col03 ->
-# sig005col04 -> sig003col04, + 3 adaptive-collar cells (q=0.9, sigma 0.05,
-# collar 0.3) = 15 runs. Collar via the GLOBAL
+# root+phase3 skipped). Grid per PDE: sigma {0.03,0.04,0.05} x collar_data
+# {0.3,0.4} = 6 cells x 3 PDEs = 18 runs, block order per collar with
+# descending sigma: 005/03 -> 004/03 -> 003/03 -> 005/04 -> 004/04 ->
+# 003/04 (paper cell first). Collar via the GLOBAL
 # sampling.collar_data_ratio per experiment (paper-ft mechanism; no phase 3
 # here), fine_tune.collar_data_ratio removed from base so it cannot shadow
 # the grid value. Everything else = paper ft scheme: 40k ssbroyden lr 1.0
@@ -246,6 +246,33 @@ experiments:
   problem: schrodinger
   sampling: {collar_data_ratio: 0.3}
 - adaptive_pinn:
+    fine_tune: {sigma_fraction: 0.04}
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  epochs: 0
+  experts_architecture: [2, 24, 24, 24, 1]
+  model: AToELeaves
+  name: allen_cahn_ft24_sig004_col03
+  problem: allen_cahn
+  sampling: {collar_data_ratio: 0.3}
+- adaptive_pinn:
+    fine_tune: {sigma_fraction: 0.04}
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  epochs: 0
+  experts_architecture: [2, 24, 24, 24, 1]
+  model: AToELeaves
+  name: burgers1d_ft24_sig004_col03
+  problem: burgers1d
+  sampling: {collar_data_ratio: 0.3}
+- adaptive_pinn:
+    fine_tune: {sigma_fraction: 0.04}
+  base_architecture: [2, 60, 60, 60, 60, 2]
+  epochs: 0
+  experts_architecture: [2, 24, 24, 24, 2]
+  model: AToELeaves
+  name: schrodinger_ft24_sig004_col03
+  problem: schrodinger
+  sampling: {collar_data_ratio: 0.3}
+- adaptive_pinn:
     fine_tune: {sigma_fraction: 0.03}
   base_architecture: [2, 60, 60, 60, 60, 1]
   epochs: 0
@@ -300,6 +327,33 @@ experiments:
   problem: schrodinger
   sampling: {collar_data_ratio: 0.4}
 - adaptive_pinn:
+    fine_tune: {sigma_fraction: 0.04}
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  epochs: 0
+  experts_architecture: [2, 24, 24, 24, 1]
+  model: AToELeaves
+  name: allen_cahn_ft24_sig004_col04
+  problem: allen_cahn
+  sampling: {collar_data_ratio: 0.4}
+- adaptive_pinn:
+    fine_tune: {sigma_fraction: 0.04}
+  base_architecture: [2, 60, 60, 60, 60, 1]
+  epochs: 0
+  experts_architecture: [2, 24, 24, 24, 1]
+  model: AToELeaves
+  name: burgers1d_ft24_sig004_col04
+  problem: burgers1d
+  sampling: {collar_data_ratio: 0.4}
+- adaptive_pinn:
+    fine_tune: {sigma_fraction: 0.04}
+  base_architecture: [2, 60, 60, 60, 60, 2]
+  epochs: 0
+  experts_architecture: [2, 24, 24, 24, 2]
+  model: AToELeaves
+  name: schrodinger_ft24_sig004_col04
+  problem: schrodinger
+  sampling: {collar_data_ratio: 0.4}
+- adaptive_pinn:
     fine_tune: {sigma_fraction: 0.03}
   base_architecture: [2, 60, 60, 60, 60, 1]
   epochs: 0
@@ -326,30 +380,3 @@ experiments:
   name: schrodinger_ft24_sig003_col04
   problem: schrodinger
   sampling: {collar_data_ratio: 0.4}
-- adaptive_pinn:
-    fine_tune: {adaptive_collar_quantile: 0.9, adaptive_collar_size: true, sigma_fraction: 0.05}
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  epochs: 0
-  experts_architecture: [2, 24, 24, 24, 1]
-  model: AToELeaves
-  name: allen_cahn_ft24_adcolq09_sig005_col03
-  problem: allen_cahn
-  sampling: {collar_data_ratio: 0.3}
-- adaptive_pinn:
-    fine_tune: {adaptive_collar_quantile: 0.9, adaptive_collar_size: true, sigma_fraction: 0.05}
-  base_architecture: [2, 60, 60, 60, 60, 1]
-  epochs: 0
-  experts_architecture: [2, 24, 24, 24, 1]
-  model: AToELeaves
-  name: burgers1d_ft24_adcolq09_sig005_col03
-  problem: burgers1d
-  sampling: {collar_data_ratio: 0.3}
-- adaptive_pinn:
-    fine_tune: {adaptive_collar_quantile: 0.9, adaptive_collar_size: true, sigma_fraction: 0.05}
-  base_architecture: [2, 60, 60, 60, 60, 2]
-  epochs: 0
-  experts_architecture: [2, 24, 24, 24, 2]
-  model: AToELeaves
-  name: schrodinger_ft24_adcolq09_sig005_col03
-  problem: schrodinger
-  sampling: {collar_data_ratio: 0.3}
