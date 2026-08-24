@@ -183,8 +183,62 @@ def load_run(run_dir: Path):
     return metrics, cfg
 
 
-def concat_runs(run_dirs):
+def parse_run_arg(arg: str):
+    """'<run_dir>' or '<run_dir>@<segment>' -- the @segment suffix truncates
+    that run to just one of its segments (e.g. a run's metrics.json may hold
+    both 'root' and 'phase3'; @root keeps only the root portion, dropping
+    the rest, so it can be spliced against a DIFFERENT run's phase3/fine_tune)."""
+    if '@' in arg:
+        path_str, segment = arg.rsplit('@', 1)
+        return Path(path_str), segment
+    return Path(arg), None
+
+
+def truncate_to_segment(metrics, segment):
+    """Keep only one named segment's epoch range from a multi-segment run's
+    metrics (train_loss, eval rel_l2/inf_norm, loss_components, events)."""
+    seg_event = next((e for e in metrics.get('segment_events', []) if e['segment'] == segment), None)
+    rec_event = next((e for e in metrics.get('segment_reconcile_events', []) if e['segment'] == segment), None)
+    if seg_event is None or rec_event is None:
+        available = [e['segment'] for e in metrics.get('segment_events', [])]
+        raise ValueError(f"No segment '{segment}' in this run (available: {available})")
+    lo, hi = seg_event['start_epoch'], rec_event['end_epoch']
+
+    def _filter(epochs, *value_lists):
+        idx = [i for i, e in enumerate(epochs) if lo <= e <= hi]
+        return ([epochs[i] for i in idx],
+                *([vl[i] for i in idx] for vl in value_lists))
+
+    out = dict(metrics)
+    out['train_loss_epochs'], out['train_loss'] = _filter(
+        metrics['train_loss_epochs'], metrics['train_loss'])
+
+    inf_norm = metrics.get('inf_norm') or []
+    if inf_norm and len(inf_norm) == len(metrics['epochs']):
+        out['epochs'], out['rel_l2'], out['inf_norm'] = _filter(
+            metrics['epochs'], metrics['rel_l2'], inf_norm)
+    else:
+        out['epochs'], out['rel_l2'] = _filter(metrics['epochs'], metrics['rel_l2'])
+        out['inf_norm'] = []
+
+    lc = metrics.get('loss_components', {})
+    if lc.get('epochs'):
+        term_keys = [k for k in lc if k != 'epochs']
+        lc_ep, *term_vals = _filter(lc['epochs'], *[lc[k] for k in term_keys])
+        out['loss_components'] = {'epochs': lc_ep, **dict(zip(term_keys, term_vals))}
+
+    out['segment_events'] = [e for e in metrics.get('segment_events', []) if e['segment'] == segment]
+    out['segment_reconcile_events'] = [
+        e for e in metrics.get('segment_reconcile_events', []) if e['segment'] == segment]
+    out['optimizer_events'] = [
+        e for e in metrics.get('optimizer_events', []) if lo <= e['epoch'] <= hi]
+    return out
+
+
+def concat_runs(run_specs):
     """Stitch metrics.json from several runs into one continuous timeline.
+
+    run_specs: list of (run_dir, segment_or_None) pairs, as from parse_run_arg.
 
     Returns (combined_metrics, segment_markers, optimizer_switch_epochs, meta)
     ready to hand to trainer.plotting.plot_training_curves.
@@ -192,8 +246,10 @@ def concat_runs(run_dirs):
     runs_data = []
     offset = 0
     pde = None
-    for run_dir in run_dirs:
+    for run_dir, segment in run_specs:
         metrics, cfg = load_run(run_dir)
+        if segment is not None:
+            metrics = truncate_to_segment(metrics, segment)
         if pde is None:
             pde = cfg['problem']
         elif cfg['problem'] != pde:
@@ -262,14 +318,16 @@ def concat_runs(run_dirs):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('run_dirs', nargs='+', type=Path,
-                     help='Run dirs in chronological order')
+    ap.add_argument('run_dirs', nargs='+', type=str,
+                     help="Run dirs in chronological order; '<dir>@<segment>' "
+                          "truncates a multi-segment run to just that segment")
     ap.add_argument('--out-dir', type=Path,
                      default=Path('outputs/paper_figures/training_curves'),
                      help='Output directory for the figures')
     args = ap.parse_args()
 
-    combined, segment_markers, optimizer_switch_epochs, meta = concat_runs(args.run_dirs)
+    run_specs = [parse_run_arg(a) for a in args.run_dirs]
+    combined, segment_markers, optimizer_switch_epochs, meta = concat_runs(run_specs)
 
     stage_str = '_'.join(meta['stage_tags'])
     relL2 = meta['final_rel_l2']
@@ -278,7 +336,7 @@ def main():
                    + (f"_relL2_{relL2:.2e}" if relL2 is not None else ''))
 
     print(f"PDE: {meta['pde']}")
-    print(f"Concatenated {len(args.run_dirs)} run(s), total epochs = {meta['total_epochs']}")
+    print(f"Concatenated {len(run_specs)} run(s), total epochs = {meta['total_epochs']}")
     for epoch, name in segment_markers:
         print(f"  segment '{name}' starts at epoch {epoch}")
     relL2_str = f"{relL2:.3e}" if relL2 is not None else "n/a"
