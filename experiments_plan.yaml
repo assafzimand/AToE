@@ -1,25 +1,18 @@
 # ==========================================================================
-# KDV A/B — FULL PIPELINE, BOTH PRECISION FAMILIES (2026-08-24, main).
-# Goal: KdV counterpart of the AC/Burgers/Schrodinger result (phase 3 + ft
-# reach root-level accuracy with fewer weights). Both runs from scratch
-# (roots incompatible with the new weights), root -> tree -> phase 3 -> ft.
-# SHARED: ic/bc AND interface_ic/interface_bc all 1000 (explicit in
-#   kdv.loss_weights; interfaces would inherit anyway — pinned per policy);
-#   bc_max_derivative_order 1 + max_interface_derivative_order 1; NO
-#   per-order normalization anywhere (bc_term_normalization false +
-#   interface_term_normalization false); NO Fourier features; tree from
-#   time marching STRUCTURE ONLY: 3 windows, linear m_distribution; ft 40k
-#   sigma 0.03 collar 0.3 (global sampling collar 0.0 keeps phase 3
-#   collar-free); full batch (99999) of 20k n_residual, 256 ic/bc, static
-#   pool, min-per-expert 2048; eval_every 1000, seed 42.
-# A = f64 family: M15, root 4x60 + experts 3x20, both 1k adam -> 40k
-#   ssbroyden (41k, switch 1000, ssbroyden lr 1.0 tol 1e-10); ft 40k
-#   ssbroyden; patience 10.
-# B = f32 family: M18, root 6x128 + experts 3x40, both 50k adam -> 40k
-#   lbfgs (90k, switch 50000; flat adam lr 1e-3, NO scheduler); lbfgs lr
-#   0.1 strong-Wolfe (freeze fix) for ALL segments incl. ft; patience 30
-#   (10 too tight for the long adam leg).
-# History (commented below): schrodinger 24w re-creation + ft24 grid.
+# KDV ROOTS CREATION — 5x60 f64, BC-ORDER ABLATION (2026-08-25, main).
+# ROOT ONLY: initial_train 1k adam -> 40k ssbroyden (41k, switch 1000);
+# top-level epochs 0 skips phase 3, fine_tune epochs 0 skips ft (A0-style).
+# Both cells: float64, root 5x60 (5 hidden layers), NO Fourier, weights
+# ic/bc 1000 AND interface_ic/interface_bc 1000 (interfaces inert in a
+# root-only run — pinned per policy), normalization ON for BOTH interface
+# and bc terms, patience 10, full batch, static 20k pool, seed 42.
+#   cell 1: bc_max_derivative_order 1 + max_interface_derivative_order 1
+#   cell 2: FULL order — bc_max_derivative_order 2 (explicit 2, NOT null:
+#     the global kdv loss reads .get(key, 2), an explicit null becomes
+#     None and crashes) + max_interface_derivative_order null.
+# Tree config (M15 W3-linear structure-only) kept inert for later phases.
+# History (commented below): kdv A/B full-pipeline runs (2026-08-24),
+# schrodinger 24w re-creation + ft24 grid.
 # ==========================================================================
 base_config:
   activation: tanh
@@ -230,13 +223,17 @@ base_config:
     precondition_frequency: 10
     weight_decay: 0.0
   ssbroyden: {lr: 1.0, tolerance_grad: 1.0e-10}
-experiment_name: kdv_AB_M15W3lin_ord1_nonorm
+experiment_name: kdv_roots5x60_ic1kbc1k_bothnorm_ord1_vs_full
 experiments:
 - adaptive_pinn:
     M_experts_num: 15
-    split_icbc: {bc_term_normalization: false, interface_term_normalization: false,
+    fine_tune: {epochs: 0}
+    initial_train: {epochs: 41000, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
+      optimizer_1: adam, optimizer_2: ssbroyden, optimizer_switch_epoch: 1000}
+    split_icbc: {bc_term_normalization: true, interface_term_normalization: true,
       max_interface_derivative_order: 1}
-  base_architecture: [2, 60, 60, 60, 60, 1]
+  base_architecture: [2, 60, 60, 60, 60, 60, 1]
+  epochs: 0
   experts_architecture: [2, 20, 20, 20, 1]
   kdv:
     bc_max_derivative_order: 1
@@ -244,39 +241,79 @@ experiments:
     time_marching: {debug_windows: null, last_window_checkpoint: null, m_distribution: linear,
       num_windows: 3, only_for_tree_structure: true}
   model: AToELeaves
-  name: kdv_A_f64_4x60_e3x20_M15W3lin_ft_sig003_col03
+  name: kdv_root5x60_f64_ord1_bothnorm
   precision: float64
   problem: kdv
   sampling: {min_points_per_expert: 2048}
-- adaptive_pinn:
-    M_experts_num: 18
-    fine_tune: {optimizer_1: lbfgs}
-    initial_train: {epochs: 90000, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
-      optimizer_1: adam, optimizer_2: lbfgs, optimizer_switch_epoch: 50000}
-    split_icbc: {bc_term_normalization: false, interface_term_normalization: false,
-      max_interface_derivative_order: 1}
-  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
-  epochs: 90000
-  experts_architecture: [2, 40, 40, 40, 1]
-  kdv:
-    bc_max_derivative_order: 1
-    loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
-    time_marching: {debug_windows: null, last_window_checkpoint: null, m_distribution: linear,
-      num_windows: 3, only_for_tree_structure: true}
-  lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.1, max_iter: 1, tolerance_change: 0.0,
-    tolerance_grad: 0.0}
-  lr: 0.001
-  lr_schedule: none
-  lr_warmup_steps: 0
-  model: AToELeaves
-  name: kdv_B_f32_6x128_e3x40_adam50k_lbfgs40k_M18W3lin_ft_sig003_col03
-  optimizer_1: adam
-  optimizer_2: lbfgs
-  optimizer_switch_epoch: 50000
-  patience_evals: 30
-  precision: float32
-  problem: kdv
-  sampling: {min_points_per_expert: 2048}
+# ---- cell 2 (full order) — commented out, activate after cell 1 ----
+# - adaptive_pinn:
+#     M_experts_num: 15
+#     fine_tune: {epochs: 0}
+#     initial_train: {epochs: 41000, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
+#       optimizer_1: adam, optimizer_2: ssbroyden, optimizer_switch_epoch: 1000}
+#     split_icbc: {bc_term_normalization: true, interface_term_normalization: true,
+#       max_interface_derivative_order: null}
+#   base_architecture: [2, 60, 60, 60, 60, 60, 1]
+#   epochs: 0
+#   experts_architecture: [2, 20, 20, 20, 1]
+#   kdv:
+#     bc_max_derivative_order: 2
+#     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
+#     time_marching: {debug_windows: null, last_window_checkpoint: null, m_distribution: linear,
+#       num_windows: 3, only_for_tree_structure: true}
+#   model: AToELeaves
+#   name: kdv_root5x60_f64_ordfull_bothnorm
+#   precision: float64
+#   problem: kdv
+#   sampling: {min_points_per_expert: 2048}
+# ---- history (commented out 2026-08-25): kdv A/B full-pipeline runs ----
+# experiment_name: kdv_AB_M15W3lin_ord1_nonorm
+# experiments:
+# - adaptive_pinn:
+#     M_experts_num: 15
+#     split_icbc: {bc_term_normalization: false, interface_term_normalization: false,
+#       max_interface_derivative_order: 1}
+#   base_architecture: [2, 60, 60, 60, 60, 1]
+#   experts_architecture: [2, 20, 20, 20, 1]
+#   kdv:
+#     bc_max_derivative_order: 1
+#     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
+#     time_marching: {debug_windows: null, last_window_checkpoint: null, m_distribution: linear,
+#       num_windows: 3, only_for_tree_structure: true}
+#   model: AToELeaves
+#   name: kdv_A_f64_4x60_e3x20_M15W3lin_ft_sig003_col03
+#   precision: float64
+#   problem: kdv
+#   sampling: {min_points_per_expert: 2048}
+# - adaptive_pinn:
+#     M_experts_num: 18
+#     fine_tune: {optimizer_1: lbfgs}
+#     initial_train: {epochs: 90000, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
+#       optimizer_1: adam, optimizer_2: lbfgs, optimizer_switch_epoch: 50000}
+#     split_icbc: {bc_term_normalization: false, interface_term_normalization: false,
+#       max_interface_derivative_order: 1}
+#   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+#   epochs: 90000
+#   experts_architecture: [2, 40, 40, 40, 1]
+#   kdv:
+#     bc_max_derivative_order: 1
+#     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
+#     time_marching: {debug_windows: null, last_window_checkpoint: null, m_distribution: linear,
+#       num_windows: 3, only_for_tree_structure: true}
+#   lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.1, max_iter: 1, tolerance_change: 0.0,
+#     tolerance_grad: 0.0}
+#   lr: 0.001
+#   lr_schedule: none
+#   lr_warmup_steps: 0
+#   model: AToELeaves
+#   name: kdv_B_f32_6x128_e3x40_adam50k_lbfgs40k_M18W3lin_ft_sig003_col03
+#   optimizer_1: adam
+#   optimizer_2: lbfgs
+#   optimizer_switch_epoch: 50000
+#   patience_evals: 30
+#   precision: float32
+#   problem: kdv
+#   sampling: {min_points_per_expert: 2048}
 # ---- history (commented out 2026-08-24): schrodinger 24w re-creation ----
 # experiment_name: sch24_p3pat10_ft_sig003_col03
 # experiments:

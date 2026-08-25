@@ -40,7 +40,7 @@ from perfect_tree_examples import create_prefect_trees as cpt  # noqa: E402
 
 SWEEPS = {
     'kdv': {
-        'M': [8, 10, 15, 20],
+        'M': [12, 15, 18],
         'num_windows': [3],
         'm_distribution': ['quadratic_zero', 'linear_zero'],
         'eps': [0.0],

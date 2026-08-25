@@ -42,13 +42,10 @@ from perfect_tree_examples import create_prefect_trees as cpt  # noqa: E402
 # time_marching.enabled = False for that combo).
 SWEEPS = {
     'kdv': [
-        {  # full domain, no time-marching windows
-            'M': [8, 10, 12, 15, 18, 20],
-        },
-        {  # windowed trees
-            'M': [10, 12, 15, 18, 20],
-            'num_windows': [3, 5],
-            'm_distribution': ['quadratic', 'linear'],
+        {  # windowed trees, W=2, uniform allocation
+            'M': [12, 15, 18],
+            'num_windows': [2],
+            'm_distribution': ['equal'],
         },
     ],
 }
