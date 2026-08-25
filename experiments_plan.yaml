@@ -1,9 +1,12 @@
 # ==========================================================================
 # KDV f32 CLEANUP — 6x128 ROOT->PHASE3, 3 CELLS (2026-08-25, main).
-# Paper recipe (docs/3_method_updated.tex) with deltas: 50k FLAT-lr Adam
+# Paper recipe (docs/3_method_updated.tex) with deltas: 30k FLAT-lr Adam
 # (1e-3, no scheduler/warmup; paper: 30k scheduled) -> 40k LBFGS (paper:
-# 30k), experts 3x40 (paper: 3x30). Root AND phase 3 both 90k, switch
-# 50000. Shared: float32, root 6x128, M18 W3 linear STRUCTURE-ONLY tree,
+# 30k), experts 3x40 (paper: 3x30). Root AND phase 3 both 70k, switch
+# 30000 (50k adam retired: the adam50-100-200k_lbfgs15k sweep showed
+# longer adam does not help the lbfgs stage; 30k = paper handoff).
+# freeze_stop 100 on all cells (S1 froze at the lbfgs start once).
+# Shared: float32, root 6x128, M18 W3 linear STRUCTURE-ONLY tree,
 # ic/bc AND interface_ic/interface_bc 1000, bc + interface max order 1,
 # normalization ON for both (paper regime), ft 0, full batch STATIC 20k
 # pool (mimics kdv_AB_root6x128 20260821 LBFGS-EXPERTS run: batch 99999,
@@ -231,18 +234,19 @@ base_config:
     precondition_frequency: 10
     weight_decay: 0.0
   ssbroyden: {lr: 1.0, tolerance_grad: 1.0e-10}
-experiment_name: kdv_f32_6x128_e3x40_adam50kflat_lbfgs40k_S1234
+experiment_name: kdv_f32_6x128_e3x40_adam30kflat_lbfgs40k_S1234
 experiments:
 - adaptive_pinn:
     M_experts_num: 18
     fine_tune: {epochs: 0}
-    initial_train: {epochs: 90000, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
-      optimizer_1: adam, optimizer_2: lbfgs, optimizer_switch_epoch: 50000}
+    initial_train: {epochs: 70000, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
+      optimizer_1: adam, optimizer_2: lbfgs, optimizer_switch_epoch: 30000}
     split_icbc: {bc_term_normalization: true, interface_term_normalization: true,
       max_interface_derivative_order: 1}
   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
-  epochs: 90000
+  epochs: 70000
   experts_architecture: [2, 40, 40, 40, 1]
+  freeze_stop_epochs: 100
   kdv:
     bc_max_derivative_order: 1
     fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
@@ -258,7 +262,7 @@ experiments:
   name: kdv_S1_f32_paperclean_ff_lbfgs01
   optimizer_1: adam
   optimizer_2: lbfgs
-  optimizer_switch_epoch: 50000
+  optimizer_switch_epoch: 30000
   patience_evals: 30
   precision: float32
   problem: kdv
@@ -266,13 +270,14 @@ experiments:
 - adaptive_pinn:
     M_experts_num: 18
     fine_tune: {epochs: 0}
-    initial_train: {epochs: 90000, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
-      optimizer_1: adam, optimizer_2: lbfgs, optimizer_switch_epoch: 50000}
+    initial_train: {epochs: 70000, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
+      optimizer_1: adam, optimizer_2: lbfgs, optimizer_switch_epoch: 30000}
     split_icbc: {bc_term_normalization: true, interface_term_normalization: true,
       max_interface_derivative_order: 1}
   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
-  epochs: 90000
+  epochs: 70000
   experts_architecture: [2, 40, 40, 40, 1]
+  freeze_stop_epochs: 100
   kdv:
     bc_max_derivative_order: 1
     fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
@@ -288,7 +293,7 @@ experiments:
   name: kdv_S2_f32_unified_ff_lbfgs001
   optimizer_1: adam
   optimizer_2: lbfgs
-  optimizer_switch_epoch: 50000
+  optimizer_switch_epoch: 30000
   patience_evals: 30
   precision: float32
   problem: kdv
@@ -296,13 +301,14 @@ experiments:
 - adaptive_pinn:
     M_experts_num: 18
     fine_tune: {epochs: 0}
-    initial_train: {epochs: 90000, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
-      optimizer_1: adam, optimizer_2: lbfgs, optimizer_switch_epoch: 50000}
+    initial_train: {epochs: 70000, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
+      optimizer_1: adam, optimizer_2: lbfgs, optimizer_switch_epoch: 30000}
     split_icbc: {bc_term_normalization: true, interface_term_normalization: true,
       max_interface_derivative_order: 1}
   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
-  epochs: 90000
+  epochs: 70000
   experts_architecture: [2, 40, 40, 40, 1]
+  freeze_stop_epochs: 100
   kdv:
     bc_max_derivative_order: 1
     fourier_features: {dim: auto, enabled: false, periodic: false, scale: 2.0}
@@ -318,7 +324,7 @@ experiments:
   name: kdv_S3_f32_noff_lbfgs01
   optimizer_1: adam
   optimizer_2: lbfgs
-  optimizer_switch_epoch: 50000
+  optimizer_switch_epoch: 30000
   patience_evals: 30
   precision: float32
   problem: kdv
@@ -326,13 +332,14 @@ experiments:
 - adaptive_pinn:
     M_experts_num: 18
     fine_tune: {epochs: 0}
-    initial_train: {epochs: 90000, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
-      optimizer_1: adam, optimizer_2: lbfgs, optimizer_switch_epoch: 50000}
+    initial_train: {epochs: 70000, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
+      optimizer_1: adam, optimizer_2: lbfgs, optimizer_switch_epoch: 30000}
     split_icbc: {bc_term_normalization: true, interface_term_normalization: true,
       max_interface_derivative_order: 1}
   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
-  epochs: 90000
+  epochs: 70000
   experts_architecture: [2, 40, 40, 40, 1]
+  freeze_stop_epochs: 100
   kdv:
     bc_max_derivative_order: 1
     fourier_features: {dim: auto, enabled: false, periodic: false, scale: 2.0}
@@ -348,7 +355,7 @@ experiments:
   name: kdv_S4_f32_noff_lbfgs001
   optimizer_1: adam
   optimizer_2: lbfgs
-  optimizer_switch_epoch: 50000
+  optimizer_switch_epoch: 30000
   patience_evals: 30
   precision: float32
   problem: kdv
