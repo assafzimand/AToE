@@ -1,26 +1,26 @@
 # ==========================================================================
-# KDV f32 CLEANUP — 6x128 ROOT->PHASE3, 3 CELLS (2026-08-25, main).
+# KDV f32 CLEANUP — 6x128 ROOTS ONLY, 3 CELLS (2026-08-25, main).
 # Paper recipe (docs/3_method_updated.tex) with deltas: 30k FLAT-lr Adam
 # (1e-3, no scheduler/warmup; paper: 30k scheduled) -> 40k LBFGS (paper:
-# 30k), experts 3x40 (paper: 3x30). Root AND phase 3 both 70k, switch
-# 30000 (50k adam retired: the adam50-100-200k_lbfgs15k sweep showed
-# longer adam does not help the lbfgs stage; 30k = paper handoff).
-# freeze_stop 1001 on all cells (S1 froze at the lbfgs start once;
-# 1001 > eval_every so a freeze shows as a flat line in the curves).
-# Shared: float32, root 6x128, M18 W3 linear STRUCTURE-ONLY tree,
-# ic/bc AND interface_ic/interface_bc 1000, bc + interface max order 1,
-# normalization ON for both (paper regime), ft 0, full batch STATIC 20k
-# pool (mimics kdv_AB_root6x128 20260821 LBFGS-EXPERTS run: batch 99999,
-# resample 99999 — Adam draw static, LBFGS same pool), 256 ic/bc,
-# min-per-expert 2048, patience 30 (long adam leg), eval 1000, seed 42.
-# 2x2 grid: fourier on/off x lbfgs lr 0.1/1e-3 (strong Wolfe both):
-#   S1 paperclean:  RFF (dim auto -> width, scale 2, periodic false),
-#      lbfgs lr 0.1 (the proven root value).
-#   S2 unified-lr:  RFF, lbfgs lr 1e-3 EVERYWHERE (tests unifying
-#      root/experts with the ft value; overshoot-freeze was at lr 1.0,
-#      so 1e-3 is on the safe side — worst case slower steps).
-#   S3 noff:        no fourier (root + experts), lbfgs lr 0.1.
-#   S4 noff-unified: no fourier, lbfgs lr 1e-3 everywhere.
+# 30k). ROOT ONLY: initial_train 70k switch 30000; top-level epochs 0
+# skips phase 3, ft 0. (50k adam retired: the adam50-100-200k_lbfgs15k
+# sweep showed longer adam does not help the lbfgs stage; 30k = paper
+# handoff. S1 = RFF + lbfgs 0.1 REMOVED — froze at the lbfgs start.)
+# freeze_stop 1001 on all cells (1001 > eval_every so a freeze shows as
+# a flat line in the curves).
+# Shared: float32, root 6x128, ic/bc 1000 (+ interface weights/orders/
+# norms carried for later phases: 1000, max order 1, normalization ON),
+# bc max order 1 + bc normalization ON (paper regime), full batch STATIC
+# 20k pool (mimics kdv_AB_root6x128 20260821 LBFGS-EXPERTS run: batch
+# 99999, resample 99999), 256 ic/bc, patience 30 (long adam leg),
+# eval 1000, seed 42. M18 W3-linear structure-only tree + experts 3x40
+# carried inert for later phases.
+# Remaining cells (lbfgs strong Wolfe):
+#   S2 unified-lr:  RFF (dim auto -> width, scale 2, periodic false),
+#      lbfgs lr 1e-3 (overshoot-freeze was at bigger lrs; 1e-3 is the
+#      safe side — worst case slower steps).
+#   S3 noff:        no fourier, lbfgs lr 0.1.
+#   S4 noff-unified: no fourier, lbfgs lr 1e-3.
 # ON HOLD below (commented): f64 phase-3 tree grid awaiting the 5x60
 # roots checkpoints (ord1/ordfull best_model_root.pt under
 # roots_checkpoints/double_precision/
@@ -235,7 +235,7 @@ base_config:
     precondition_frequency: 10
     weight_decay: 0.0
   ssbroyden: {lr: 1.0, tolerance_grad: 1.0e-10}
-experiment_name: kdv_f32_6x128_e3x40_adam30kflat_lbfgs40k_S1234
+experiment_name: kdv_f32_roots6x128_adam30kflat_lbfgs40k_S234
 experiments:
 - adaptive_pinn:
     M_experts_num: 18
@@ -245,38 +245,7 @@ experiments:
     split_icbc: {bc_term_normalization: true, interface_term_normalization: true,
       max_interface_derivative_order: 1}
   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
-  epochs: 70000
-  experts_architecture: [2, 40, 40, 40, 1]
-  freeze_stop_epochs: 1001
-  kdv:
-    bc_max_derivative_order: 1
-    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
-    loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
-    time_marching: {debug_windows: null, last_window_checkpoint: null, m_distribution: linear,
-      num_windows: 3, only_for_tree_structure: true}
-  lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
-    tolerance_change: 0.0, tolerance_grad: 0.0}
-  lr: 0.001
-  lr_schedule: none
-  lr_warmup_steps: 0
-  model: AToELeaves
-  name: kdv_S1_f32_paperclean_ff_lbfgs01
-  optimizer_1: adam
-  optimizer_2: lbfgs
-  optimizer_switch_epoch: 30000
-  patience_evals: 30
-  precision: float32
-  problem: kdv
-  sampling: {min_points_per_expert: 2048}
-- adaptive_pinn:
-    M_experts_num: 18
-    fine_tune: {epochs: 0}
-    initial_train: {epochs: 70000, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
-      optimizer_1: adam, optimizer_2: lbfgs, optimizer_switch_epoch: 30000}
-    split_icbc: {bc_term_normalization: true, interface_term_normalization: true,
-      max_interface_derivative_order: 1}
-  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
-  epochs: 70000
+  epochs: 0
   experts_architecture: [2, 40, 40, 40, 1]
   freeze_stop_epochs: 1001
   kdv:
@@ -307,7 +276,7 @@ experiments:
     split_icbc: {bc_term_normalization: true, interface_term_normalization: true,
       max_interface_derivative_order: 1}
   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
-  epochs: 70000
+  epochs: 0
   experts_architecture: [2, 40, 40, 40, 1]
   freeze_stop_epochs: 1001
   kdv:
@@ -338,7 +307,7 @@ experiments:
     split_icbc: {bc_term_normalization: true, interface_term_normalization: true,
       max_interface_derivative_order: 1}
   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
-  epochs: 70000
+  epochs: 0
   experts_architecture: [2, 40, 40, 40, 1]
   freeze_stop_epochs: 1001
   kdv:
