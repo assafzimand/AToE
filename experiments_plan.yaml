@@ -231,38 +231,38 @@ experiments:
     initial_train: {epochs: 41000, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
       optimizer_1: adam, optimizer_2: ssbroyden, optimizer_switch_epoch: 1000}
     split_icbc: {bc_term_normalization: true, interface_term_normalization: true,
-      max_interface_derivative_order: 1}
+      max_interface_derivative_order: null}
   base_architecture: [2, 60, 60, 60, 60, 60, 1]
   epochs: 0
   experts_architecture: [2, 20, 20, 20, 1]
   kdv:
-    bc_max_derivative_order: 1
+    bc_max_derivative_order: 2
     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
     time_marching: {debug_windows: null, last_window_checkpoint: null, m_distribution: linear,
       num_windows: 3, only_for_tree_structure: true}
   model: AToELeaves
-  name: kdv_root5x60_f64_ord1_bothnorm
+  name: kdv_root5x60_f64_ordfull_bothnorm
   precision: float64
   problem: kdv
   sampling: {min_points_per_expert: 2048}
-# ---- cell 2 (full order) — commented out, activate after cell 1 ----
+# ---- cell 1 (order 1) — commented out ----
 # - adaptive_pinn:
 #     M_experts_num: 15
 #     fine_tune: {epochs: 0}
 #     initial_train: {epochs: 41000, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
 #       optimizer_1: adam, optimizer_2: ssbroyden, optimizer_switch_epoch: 1000}
 #     split_icbc: {bc_term_normalization: true, interface_term_normalization: true,
-#       max_interface_derivative_order: null}
+#       max_interface_derivative_order: 1}
 #   base_architecture: [2, 60, 60, 60, 60, 60, 1]
 #   epochs: 0
 #   experts_architecture: [2, 20, 20, 20, 1]
 #   kdv:
-#     bc_max_derivative_order: 2
+#     bc_max_derivative_order: 1
 #     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
 #     time_marching: {debug_windows: null, last_window_checkpoint: null, m_distribution: linear,
 #       num_windows: 3, only_for_tree_structure: true}
 #   model: AToELeaves
-#   name: kdv_root5x60_f64_ordfull_bothnorm
+#   name: kdv_root5x60_f64_ord1_bothnorm
 #   precision: float64
 #   problem: kdv
 #   sampling: {min_points_per_expert: 2048}
