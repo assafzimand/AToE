@@ -1229,7 +1229,7 @@ def _setup_training(
         logger.info(f"  Fourier Features: disabled")
     
     # RWF (read from per-problem config)
-    rwf_enabled = problem_cfg['rwf']
+    rwf_enabled = problem_cfg['rwf']['enabled']
     if rwf_enabled:
         logger.info(f"  RWF: enabled")
     else:

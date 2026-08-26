@@ -1,24 +1,24 @@
 # ==========================================================================
-# KDV PHASE-3 TREE-STRUCTURE GRID FROM THE 5x60 ROOTS (2026-08-25, main).
-# ACTIVE: 6 runs = 3 tree variants x 2 loaded roots (root skipped, ft 0):
-#   A: M12 W2 linear      -> [4, 8]      experts 3x24
-#   B: M12 W3 linear_zero -> [0, 4, 8]   experts 3x24 (W0 = one
-#      whole-window expert)
-#   C: M15 W3 linear      -> [3, 5, 7]   experts 3x20
-# Roots loaded from roots_checkpoints/double_precision/
-# kdv_no_resample-5-60-roots-ic-bc-1k-weights-tol14-derive-norm/:
-#   ord1/best_model_root.pt    (bc order 1, iface order 1 cell)
-#   ordfull/best_model_root.pt (bc order 2, iface order null cell)
-# Expert orders FOLLOW the root: ord1 runs use bc 1 + iface 1; ordfull
-# runs use bc 2 (explicit — null crashes the global kdv loss) + iface
-# null (=full). All 6: float64, phase 3 = 1k adam -> 40k ssbroyden (41k,
-# switch 1000, base ssbroyden lr 1.0 tol 1e-10), weights ic/bc AND
-# interface_ic/interface_bc 1000, normalization ON for both interface
-# and bc, time marching STRUCTURE ONLY, no Fourier, full batch, static
-# 20k pool, min-per-expert 2048, collar 0.0, patience 10, eval 1000,
-# seed 42. Run order: A/B/C on ord1, then A/B/C on ordfull.
-# ON HOLD below (commented): f32 S234 roots cells (6x128, 30k flat adam
-# -> 40k lbfgs, freeze_stop 1001; S1 removed after lbfgs-start freeze).
+# KDV f32 ROOTS GRID — ADAM LENGTH x LBFGS LR (2026-08-26, main).
+# ACTIVE: 6 root-only runs = adam {30k, 50k, 100k} x lbfgs lr {0.1, 1e-3}.
+# All: float32, root 6x128 + RFF (dim auto -> width, scale 2, periodic
+# false — the S234 batch showed no-fourier fails at ANY lbfgs lr, and
+# RFF + lbfgs 1e-3 was the only working cell, best 1.14e-1), adam FLAT
+# lr 1e-3 (no scheduler/warmup), 40k LBFGS strong-Wolfe, top-level
+# epochs 0 skips phase 3, ft 0. freeze_stop 1001 (> eval_every so a
+# freeze shows as a flat line). Adam redraws the full 20k pool fresh
+# every epoch (hard-coded per-optimizer rule; resample 99999 = static
+# for lbfgs only — never set 0, that kills the adam refresh too).
+# ic/bc 1000; carried inert for later phases: interface weights 1000,
+# max order 1 both, INTERFACE normalization ON / BC normalization OFF
+# (2026-08-26 note, do not re-enable: periodic bc pairing is a
+# scale-free equality u_L = u_R — only INTERFACE terms match root-scale
+# derivative values and need normalization), M18 W3-linear
+# structure-only tree, experts 3x40, min-per-expert 2048.
+# patience 30, eval 1000, seed 42, batch 99999 (full).
+# Run order: 30k/0.1, 30k/1e-3, 50k/0.1, 50k/1e-3, 100k/0.1, 100k/1e-3.
+# ON HOLD below (commented): f64 phase-3 tree grid from the 5x60 roots.
+# (f32 S234 block deleted 2026-08-26 — superseded by this grid.)
 # ==========================================================================
 base_config:
   activation: tanh
@@ -229,216 +229,308 @@ base_config:
     precondition_frequency: 10
     weight_decay: 0.0
   ssbroyden: {lr: 1.0, tolerance_grad: 1.0e-10}
-experiment_name: kdv_p3_trees_from5x60roots_ord1_vs_full
+experiment_name: kdv_f32_roots_ff_adam30-50-100k_lbfgs40k_lr01_001
 experiments:
 - adaptive_pinn:
-    M_experts_num: 12
+    M_experts_num: 18
     fine_tune: {epochs: 0}
-    split_icbc: {bc_term_normalization: true, interface_term_normalization: true,
+    initial_train: {epochs: 70000, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
+      optimizer_1: adam, optimizer_2: lbfgs, optimizer_switch_epoch: 30000}
+    split_icbc: {bc_term_normalization: false, interface_term_normalization: true,
       max_interface_derivative_order: 1}
-  base_architecture: [2, 60, 60, 60, 60, 60, 1]
-  epochs: 41000
-  experts_architecture: [2, 24, 24, 24, 1]
+  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+  epochs: 0
+  experts_architecture: [2, 40, 40, 40, 1]
+  freeze_stop_epochs: 1001
   kdv:
     bc_max_derivative_order: 1
+    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
-    pretrained_base_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-5-60-roots-ic-bc-1k-weights-tol14-derive-norm/ord1/best_model_root.pt
     time_marching: {debug_windows: null, last_window_checkpoint: null, m_distribution: linear,
-      num_windows: 2, only_for_tree_structure: true}
+      num_windows: 3, only_for_tree_structure: true}
+  lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
+    tolerance_change: 0.0, tolerance_grad: 0.0}
+  lr: 0.001
+  lr_schedule: none
+  lr_warmup_steps: 0
   model: AToELeaves
-  name: kdv_p3_A_ord1_M12W2lin_e3x24
-  precision: float64
+  name: kdv_root_f32_ff_adam30k_lbfgs01
+  optimizer_1: adam
+  optimizer_2: lbfgs
+  optimizer_switch_epoch: 30000
+  patience_evals: 30
+  precision: float32
   problem: kdv
   sampling: {min_points_per_expert: 2048}
 - adaptive_pinn:
-    M_experts_num: 12
+    M_experts_num: 18
     fine_tune: {epochs: 0}
-    split_icbc: {bc_term_normalization: true, interface_term_normalization: true,
+    initial_train: {epochs: 70000, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
+      optimizer_1: adam, optimizer_2: lbfgs, optimizer_switch_epoch: 30000}
+    split_icbc: {bc_term_normalization: false, interface_term_normalization: true,
       max_interface_derivative_order: 1}
-  base_architecture: [2, 60, 60, 60, 60, 60, 1]
-  epochs: 41000
-  experts_architecture: [2, 24, 24, 24, 1]
+  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+  epochs: 0
+  experts_architecture: [2, 40, 40, 40, 1]
+  freeze_stop_epochs: 1001
   kdv:
     bc_max_derivative_order: 1
+    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
-    pretrained_base_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-5-60-roots-ic-bc-1k-weights-tol14-derive-norm/ord1/best_model_root.pt
-    time_marching: {debug_windows: null, last_window_checkpoint: null, m_distribution: linear_zero,
+    time_marching: {debug_windows: null, last_window_checkpoint: null, m_distribution: linear,
       num_windows: 3, only_for_tree_structure: true}
+  lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.001, max_iter: 1,
+    tolerance_change: 0.0, tolerance_grad: 0.0}
+  lr: 0.001
+  lr_schedule: none
+  lr_warmup_steps: 0
   model: AToELeaves
-  name: kdv_p3_B_ord1_M12W3linzero_e3x24
-  precision: float64
+  name: kdv_root_f32_ff_adam30k_lbfgs001
+  optimizer_1: adam
+  optimizer_2: lbfgs
+  optimizer_switch_epoch: 30000
+  patience_evals: 30
+  precision: float32
   problem: kdv
   sampling: {min_points_per_expert: 2048}
 - adaptive_pinn:
-    M_experts_num: 15
+    M_experts_num: 18
     fine_tune: {epochs: 0}
-    split_icbc: {bc_term_normalization: true, interface_term_normalization: true,
+    initial_train: {epochs: 90000, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
+      optimizer_1: adam, optimizer_2: lbfgs, optimizer_switch_epoch: 50000}
+    split_icbc: {bc_term_normalization: false, interface_term_normalization: true,
       max_interface_derivative_order: 1}
-  base_architecture: [2, 60, 60, 60, 60, 60, 1]
-  epochs: 41000
-  experts_architecture: [2, 20, 20, 20, 1]
+  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+  epochs: 0
+  experts_architecture: [2, 40, 40, 40, 1]
+  freeze_stop_epochs: 1001
   kdv:
     bc_max_derivative_order: 1
+    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
-    pretrained_base_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-5-60-roots-ic-bc-1k-weights-tol14-derive-norm/ord1/best_model_root.pt
     time_marching: {debug_windows: null, last_window_checkpoint: null, m_distribution: linear,
       num_windows: 3, only_for_tree_structure: true}
+  lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
+    tolerance_change: 0.0, tolerance_grad: 0.0}
+  lr: 0.001
+  lr_schedule: none
+  lr_warmup_steps: 0
   model: AToELeaves
-  name: kdv_p3_C_ord1_M15W3lin_e3x20
-  precision: float64
+  name: kdv_root_f32_ff_adam50k_lbfgs01
+  optimizer_1: adam
+  optimizer_2: lbfgs
+  optimizer_switch_epoch: 50000
+  patience_evals: 30
+  precision: float32
   problem: kdv
   sampling: {min_points_per_expert: 2048}
 - adaptive_pinn:
-    M_experts_num: 12
+    M_experts_num: 18
     fine_tune: {epochs: 0}
-    split_icbc: {bc_term_normalization: true, interface_term_normalization: true,
-      max_interface_derivative_order: null}
-  base_architecture: [2, 60, 60, 60, 60, 60, 1]
-  epochs: 41000
-  experts_architecture: [2, 24, 24, 24, 1]
+    initial_train: {epochs: 90000, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
+      optimizer_1: adam, optimizer_2: lbfgs, optimizer_switch_epoch: 50000}
+    split_icbc: {bc_term_normalization: false, interface_term_normalization: true,
+      max_interface_derivative_order: 1}
+  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+  epochs: 0
+  experts_architecture: [2, 40, 40, 40, 1]
+  freeze_stop_epochs: 1001
   kdv:
-    bc_max_derivative_order: 2
+    bc_max_derivative_order: 1
+    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
-    pretrained_base_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-5-60-roots-ic-bc-1k-weights-tol14-derive-norm/ordfull/best_model_root.pt
     time_marching: {debug_windows: null, last_window_checkpoint: null, m_distribution: linear,
-      num_windows: 2, only_for_tree_structure: true}
+      num_windows: 3, only_for_tree_structure: true}
+  lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.001, max_iter: 1,
+    tolerance_change: 0.0, tolerance_grad: 0.0}
+  lr: 0.001
+  lr_schedule: none
+  lr_warmup_steps: 0
   model: AToELeaves
-  name: kdv_p3_A_ordfull_M12W2lin_e3x24
-  precision: float64
+  name: kdv_root_f32_ff_adam50k_lbfgs001
+  optimizer_1: adam
+  optimizer_2: lbfgs
+  optimizer_switch_epoch: 50000
+  patience_evals: 30
+  precision: float32
   problem: kdv
   sampling: {min_points_per_expert: 2048}
 - adaptive_pinn:
-    M_experts_num: 12
+    M_experts_num: 18
     fine_tune: {epochs: 0}
-    split_icbc: {bc_term_normalization: true, interface_term_normalization: true,
-      max_interface_derivative_order: null}
-  base_architecture: [2, 60, 60, 60, 60, 60, 1]
-  epochs: 41000
-  experts_architecture: [2, 24, 24, 24, 1]
+    initial_train: {epochs: 140000, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
+      optimizer_1: adam, optimizer_2: lbfgs, optimizer_switch_epoch: 100000}
+    split_icbc: {bc_term_normalization: false, interface_term_normalization: true,
+      max_interface_derivative_order: 1}
+  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+  epochs: 0
+  experts_architecture: [2, 40, 40, 40, 1]
+  freeze_stop_epochs: 1001
   kdv:
-    bc_max_derivative_order: 2
+    bc_max_derivative_order: 1
+    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
-    pretrained_base_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-5-60-roots-ic-bc-1k-weights-tol14-derive-norm/ordfull/best_model_root.pt
-    time_marching: {debug_windows: null, last_window_checkpoint: null, m_distribution: linear_zero,
+    time_marching: {debug_windows: null, last_window_checkpoint: null, m_distribution: linear,
       num_windows: 3, only_for_tree_structure: true}
+  lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
+    tolerance_change: 0.0, tolerance_grad: 0.0}
+  lr: 0.001
+  lr_schedule: none
+  lr_warmup_steps: 0
   model: AToELeaves
-  name: kdv_p3_B_ordfull_M12W3linzero_e3x24
-  precision: float64
+  name: kdv_root_f32_ff_adam100k_lbfgs01
+  optimizer_1: adam
+  optimizer_2: lbfgs
+  optimizer_switch_epoch: 100000
+  patience_evals: 30
+  precision: float32
   problem: kdv
   sampling: {min_points_per_expert: 2048}
 - adaptive_pinn:
-    M_experts_num: 15
+    M_experts_num: 18
     fine_tune: {epochs: 0}
-    split_icbc: {bc_term_normalization: true, interface_term_normalization: true,
-      max_interface_derivative_order: null}
-  base_architecture: [2, 60, 60, 60, 60, 60, 1]
-  epochs: 41000
-  experts_architecture: [2, 20, 20, 20, 1]
+    initial_train: {epochs: 140000, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
+      optimizer_1: adam, optimizer_2: lbfgs, optimizer_switch_epoch: 100000}
+    split_icbc: {bc_term_normalization: false, interface_term_normalization: true,
+      max_interface_derivative_order: 1}
+  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+  epochs: 0
+  experts_architecture: [2, 40, 40, 40, 1]
+  freeze_stop_epochs: 1001
   kdv:
-    bc_max_derivative_order: 2
+    bc_max_derivative_order: 1
+    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
-    pretrained_base_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-5-60-roots-ic-bc-1k-weights-tol14-derive-norm/ordfull/best_model_root.pt
     time_marching: {debug_windows: null, last_window_checkpoint: null, m_distribution: linear,
       num_windows: 3, only_for_tree_structure: true}
+  lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.001, max_iter: 1,
+    tolerance_change: 0.0, tolerance_grad: 0.0}
+  lr: 0.001
+  lr_schedule: none
+  lr_warmup_steps: 0
   model: AToELeaves
-  name: kdv_p3_C_ordfull_M15W3lin_e3x20
-  precision: float64
+  name: kdv_root_f32_ff_adam100k_lbfgs001
+  optimizer_1: adam
+  optimizer_2: lbfgs
+  optimizer_switch_epoch: 100000
+  patience_evals: 30
+  precision: float32
   problem: kdv
   sampling: {min_points_per_expert: 2048}
-# ---- ON HOLD (2026-08-25): f32 S234 roots cells — commented while the
-# f64 phase-3 tree grid runs ----
-# experiment_name: kdv_f32_roots6x128_adam30kflat_lbfgs40k_S234
+# ---- ON HOLD (2026-08-26): f64 phase-3 tree grid from the 5x60 roots ----
+# experiment_name: kdv_p3_trees_from5x60roots_ord1_vs_full
 # experiments:
 # - adaptive_pinn:
-#     M_experts_num: 18
+#     M_experts_num: 12
 #     fine_tune: {epochs: 0}
-#     initial_train: {epochs: 70000, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
-#       optimizer_1: adam, optimizer_2: lbfgs, optimizer_switch_epoch: 30000}
-#     split_icbc: {bc_term_normalization: true, interface_term_normalization: true,
+#     split_icbc: {bc_term_normalization: false, interface_term_normalization: true,
 #       max_interface_derivative_order: 1}
-#   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
-#   epochs: 0
-#   experts_architecture: [2, 40, 40, 40, 1]
-#   freeze_stop_epochs: 1001
+#   base_architecture: [2, 60, 60, 60, 60, 60, 1]
+#   epochs: 41000
+#   experts_architecture: [2, 24, 24, 24, 1]
 #   kdv:
 #     bc_max_derivative_order: 1
-#     fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
 #     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
+#     pretrained_base_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-5-60-roots-ic-bc-1k-weights-tol14-derive-norm/ord1/best_model_root.pt
 #     time_marching: {debug_windows: null, last_window_checkpoint: null, m_distribution: linear,
-#       num_windows: 3, only_for_tree_structure: true}
-#   lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.001, max_iter: 1,
-#     tolerance_change: 0.0, tolerance_grad: 0.0}
-#   lr: 0.001
-#   lr_schedule: none
-#   lr_warmup_steps: 0
+#       num_windows: 2, only_for_tree_structure: true}
 #   model: AToELeaves
-#   name: kdv_S2_f32_unified_ff_lbfgs001
-#   optimizer_1: adam
-#   optimizer_2: lbfgs
-#   optimizer_switch_epoch: 30000
-#   patience_evals: 30
-#   precision: float32
+#   name: kdv_p3_A_ord1_M12W2lin_e3x24
+#   precision: float64
 #   problem: kdv
 #   sampling: {min_points_per_expert: 2048}
 # - adaptive_pinn:
-#     M_experts_num: 18
+#     M_experts_num: 12
 #     fine_tune: {epochs: 0}
-#     initial_train: {epochs: 70000, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
-#       optimizer_1: adam, optimizer_2: lbfgs, optimizer_switch_epoch: 30000}
-#     split_icbc: {bc_term_normalization: true, interface_term_normalization: true,
+#     split_icbc: {bc_term_normalization: false, interface_term_normalization: true,
 #       max_interface_derivative_order: 1}
-#   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
-#   epochs: 0
-#   experts_architecture: [2, 40, 40, 40, 1]
-#   freeze_stop_epochs: 1001
+#   base_architecture: [2, 60, 60, 60, 60, 60, 1]
+#   epochs: 41000
+#   experts_architecture: [2, 24, 24, 24, 1]
 #   kdv:
 #     bc_max_derivative_order: 1
-#     fourier_features: {dim: auto, enabled: false, periodic: false, scale: 2.0}
 #     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
-#     time_marching: {debug_windows: null, last_window_checkpoint: null, m_distribution: linear,
+#     pretrained_base_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-5-60-roots-ic-bc-1k-weights-tol14-derive-norm/ord1/best_model_root.pt
+#     time_marching: {debug_windows: null, last_window_checkpoint: null, m_distribution: linear_zero,
 #       num_windows: 3, only_for_tree_structure: true}
-#   lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
-#     tolerance_change: 0.0, tolerance_grad: 0.0}
-#   lr: 0.001
-#   lr_schedule: none
-#   lr_warmup_steps: 0
 #   model: AToELeaves
-#   name: kdv_S3_f32_noff_lbfgs01
-#   optimizer_1: adam
-#   optimizer_2: lbfgs
-#   optimizer_switch_epoch: 30000
-#   patience_evals: 30
-#   precision: float32
+#   name: kdv_p3_B_ord1_M12W3linzero_e3x24
+#   precision: float64
 #   problem: kdv
 #   sampling: {min_points_per_expert: 2048}
 # - adaptive_pinn:
-#     M_experts_num: 18
+#     M_experts_num: 15
 #     fine_tune: {epochs: 0}
-#     initial_train: {epochs: 70000, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
-#       optimizer_1: adam, optimizer_2: lbfgs, optimizer_switch_epoch: 30000}
-#     split_icbc: {bc_term_normalization: true, interface_term_normalization: true,
+#     split_icbc: {bc_term_normalization: false, interface_term_normalization: true,
 #       max_interface_derivative_order: 1}
-#   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
-#   epochs: 0
-#   experts_architecture: [2, 40, 40, 40, 1]
-#   freeze_stop_epochs: 1001
+#   base_architecture: [2, 60, 60, 60, 60, 60, 1]
+#   epochs: 41000
+#   experts_architecture: [2, 20, 20, 20, 1]
 #   kdv:
 #     bc_max_derivative_order: 1
-#     fourier_features: {dim: auto, enabled: false, periodic: false, scale: 2.0}
 #     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
+#     pretrained_base_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-5-60-roots-ic-bc-1k-weights-tol14-derive-norm/ord1/best_model_root.pt
 #     time_marching: {debug_windows: null, last_window_checkpoint: null, m_distribution: linear,
 #       num_windows: 3, only_for_tree_structure: true}
-#   lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.001, max_iter: 1,
-#     tolerance_change: 0.0, tolerance_grad: 0.0}
-#   lr: 0.001
-#   lr_schedule: none
-#   lr_warmup_steps: 0
 #   model: AToELeaves
-#   name: kdv_S4_f32_noff_lbfgs001
-#   optimizer_1: adam
-#   optimizer_2: lbfgs
-#   optimizer_switch_epoch: 30000
-#   patience_evals: 30
-#   precision: float32
+#   name: kdv_p3_C_ord1_M15W3lin_e3x20
+#   precision: float64
+#   problem: kdv
+#   sampling: {min_points_per_expert: 2048}
+# - adaptive_pinn:
+#     M_experts_num: 12
+#     fine_tune: {epochs: 0}
+#     split_icbc: {bc_term_normalization: false, interface_term_normalization: true,
+#       max_interface_derivative_order: null}
+#   base_architecture: [2, 60, 60, 60, 60, 60, 1]
+#   epochs: 41000
+#   experts_architecture: [2, 24, 24, 24, 1]
+#   kdv:
+#     bc_max_derivative_order: 2
+#     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
+#     pretrained_base_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-5-60-roots-ic-bc-1k-weights-tol14-derive-norm/ordfull/best_model_root.pt
+#     time_marching: {debug_windows: null, last_window_checkpoint: null, m_distribution: linear,
+#       num_windows: 2, only_for_tree_structure: true}
+#   model: AToELeaves
+#   name: kdv_p3_A_ordfull_M12W2lin_e3x24
+#   precision: float64
+#   problem: kdv
+#   sampling: {min_points_per_expert: 2048}
+# - adaptive_pinn:
+#     M_experts_num: 12
+#     fine_tune: {epochs: 0}
+#     split_icbc: {bc_term_normalization: false, interface_term_normalization: true,
+#       max_interface_derivative_order: null}
+#   base_architecture: [2, 60, 60, 60, 60, 60, 1]
+#   epochs: 41000
+#   experts_architecture: [2, 24, 24, 24, 1]
+#   kdv:
+#     bc_max_derivative_order: 2
+#     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
+#     pretrained_base_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-5-60-roots-ic-bc-1k-weights-tol14-derive-norm/ordfull/best_model_root.pt
+#     time_marching: {debug_windows: null, last_window_checkpoint: null, m_distribution: linear_zero,
+#       num_windows: 3, only_for_tree_structure: true}
+#   model: AToELeaves
+#   name: kdv_p3_B_ordfull_M12W3linzero_e3x24
+#   precision: float64
+#   problem: kdv
+#   sampling: {min_points_per_expert: 2048}
+# - adaptive_pinn:
+#     M_experts_num: 15
+#     fine_tune: {epochs: 0}
+#     split_icbc: {bc_term_normalization: false, interface_term_normalization: true,
+#       max_interface_derivative_order: null}
+#   base_architecture: [2, 60, 60, 60, 60, 60, 1]
+#   epochs: 41000
+#   experts_architecture: [2, 20, 20, 20, 1]
+#   kdv:
+#     bc_max_derivative_order: 2
+#     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
+#     pretrained_base_checkpoint: roots_checkpoints/double_precision/kdv_no_resample-5-60-roots-ic-bc-1k-weights-tol14-derive-norm/ordfull/best_model_root.pt
+#     time_marching: {debug_windows: null, last_window_checkpoint: null, m_distribution: linear,
+#       num_windows: 3, only_for_tree_structure: true}
+#   model: AToELeaves
+#   name: kdv_p3_C_ordfull_M15W3lin_e3x20
+#   precision: float64
 #   problem: kdv
 #   sampling: {min_points_per_expert: 2048}
