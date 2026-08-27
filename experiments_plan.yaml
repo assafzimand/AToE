@@ -1,14 +1,15 @@
 # ==========================================================================
-# KDV f32 PHASE-3 TREE/EXPERT GRID (2026-08-26, main). ACTIVE: 6 runs,
-# root LOADED (root training skipped, ft 0) from the roots-grid winner
-# (adam 50k flat + lbfgs 0.1):
+# KDV f32 PHASE-3 — SMALLER-EXPERTS PAIR (2026-08-27, main). ACTIVE: 2
+# runs, root LOADED (root training skipped, ft 0) from the roots-grid
+# winner (adam 50k flat + lbfgs 0.1):
 #   roots_checkpoints/single_precision/kdv_adm50-lbfgs40-full-batch-
 #   root-128x6-max-order1-norm-interface-no-schedule.pt
-# Tree x expert cells (all W3, time marching STRUCTURE ONLY):
-#   M18 linear      -> [3, 6, 9]   x experts {3x30, 3x40}
-#   M12 linear_zero -> [0, 4, 8]   x experts {3x40, 3x50}  (W0 = one
-#      whole-window expert)
-#   M15 linear      -> [3, 5, 7]   x experts {3x30, 3x40}
+# Cells (W3, time marching STRUCTURE ONLY):
+#   M12 linear_zero -> [0, 4, 8]  experts 3x40  (W0 = one whole-window
+#      expert)
+#   M15 linear      -> [3, 5, 7]  experts 3x30
+# Commented below: M18 e3x30 (already run) + the larger-experts cells
+# (M18 e3x40, M12zero e3x50, M15 e3x40) held back.
 # Phase 3 = the root's scheme: 50k FLAT adam 1e-3 (no scheduler/warmup)
 # -> 40k lbfgs lr 0.1 strong-Wolfe (90k, switch 50000). float32, RFF
 # everywhere (dim auto -> width, scale 2, periodic false), ic/bc AND
@@ -229,7 +230,7 @@ base_config:
     precondition_frequency: 10
     weight_decay: 0.0
   ssbroyden: {lr: 1.0, tolerance_grad: 1.0e-10}
-experiment_name: kdv_f32_p3_trees_from_adam50k_lbfgs01_root
+experiment_name: kdv_f32_p3_trees_smaller_experts
 experiments:
 - adaptive_pinn:
     M_experts_num: 12
@@ -240,7 +241,7 @@ experiments:
       max_interface_derivative_order: 1}
   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
   epochs: 90000
-  experts_architecture: [2, 50, 50, 50, 1]
+  experts_architecture: [2, 40, 40, 40, 1]
   freeze_stop_epochs: 1001
   kdv:
     bc_max_derivative_order: 1
@@ -255,7 +256,7 @@ experiments:
   lr_schedule: none
   lr_warmup_steps: 0
   model: AToELeaves
-  name: kdv_p3_f32_M12W3linzero_e3x50
+  name: kdv_p3_f32_M12W3linzero_e3x40
   optimizer_1: adam
   optimizer_2: lbfgs
   optimizer_switch_epoch: 50000
@@ -295,40 +296,8 @@ experiments:
   precision: float32
   problem: kdv
   sampling: {min_points_per_expert: 2048}
-- adaptive_pinn:
-    M_experts_num: 15
-    fine_tune: {epochs: 0}
-    initial_train: {epochs: 90000, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
-      optimizer_1: adam, optimizer_2: lbfgs, optimizer_switch_epoch: 50000}
-    split_icbc: {bc_term_normalization: false, interface_term_normalization: true,
-      max_interface_derivative_order: 1}
-  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
-  epochs: 90000
-  experts_architecture: [2, 40, 40, 40, 1]
-  freeze_stop_epochs: 1001
-  kdv:
-    bc_max_derivative_order: 1
-    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
-    loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
-    pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adm50-lbfgs40-full-batch-root-128x6-max-order1-norm-interface-no-schedule.pt
-    time_marching: {debug_windows: null, last_window_checkpoint: null, m_distribution: linear,
-      num_windows: 3, only_for_tree_structure: true}
-  lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
-    tolerance_change: 0.0, tolerance_grad: 0.0}
-  lr: 0.001
-  lr_schedule: none
-  lr_warmup_steps: 0
-  model: AToELeaves
-  name: kdv_p3_f32_M15W3lin_e3x40
-  optimizer_1: adam
-  optimizer_2: lbfgs
-  optimizer_switch_epoch: 50000
-  patience_evals: 30
-  precision: float32
-  problem: kdv
-  sampling: {min_points_per_expert: 2048}
-# ---- first 3 cells (M18 e3x30, M18 e3x40, M12zero e3x40) commented out
-# 2026-08-26; last 3 remain active ----
+# ---- disabled 2026-08-27: M18 e3x30 already run; larger-experts cells
+#      (e3x40/e3x50) held back — running the smaller-experts pair only ----
 # - adaptive_pinn:
 #     M_experts_num: 18
 #     fine_tune: {epochs: 0}
@@ -402,7 +371,7 @@ experiments:
 #       max_interface_derivative_order: 1}
 #   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
 #   epochs: 90000
-#   experts_architecture: [2, 40, 40, 40, 1]
+#   experts_architecture: [2, 50, 50, 50, 1]
 #   freeze_stop_epochs: 1001
 #   kdv:
 #     bc_max_derivative_order: 1
@@ -417,7 +386,39 @@ experiments:
 #   lr_schedule: none
 #   lr_warmup_steps: 0
 #   model: AToELeaves
-#   name: kdv_p3_f32_M12W3linzero_e3x40
+#   name: kdv_p3_f32_M12W3linzero_e3x50
+#   optimizer_1: adam
+#   optimizer_2: lbfgs
+#   optimizer_switch_epoch: 50000
+#   patience_evals: 30
+#   precision: float32
+#   problem: kdv
+#   sampling: {min_points_per_expert: 2048}
+# - adaptive_pinn:
+#     M_experts_num: 15
+#     fine_tune: {epochs: 0}
+#     initial_train: {epochs: 90000, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
+#       optimizer_1: adam, optimizer_2: lbfgs, optimizer_switch_epoch: 50000}
+#     split_icbc: {bc_term_normalization: false, interface_term_normalization: true,
+#       max_interface_derivative_order: 1}
+#   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+#   epochs: 90000
+#   experts_architecture: [2, 40, 40, 40, 1]
+#   freeze_stop_epochs: 1001
+#   kdv:
+#     bc_max_derivative_order: 1
+#     fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+#     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
+#     pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_adm50-lbfgs40-full-batch-root-128x6-max-order1-norm-interface-no-schedule.pt
+#     time_marching: {debug_windows: null, last_window_checkpoint: null, m_distribution: linear,
+#       num_windows: 3, only_for_tree_structure: true}
+#   lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
+#     tolerance_change: 0.0, tolerance_grad: 0.0}
+#   lr: 0.001
+#   lr_schedule: none
+#   lr_warmup_steps: 0
+#   model: AToELeaves
+#   name: kdv_p3_f32_M15W3lin_e3x40
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 50000
