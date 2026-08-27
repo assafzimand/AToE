@@ -5,7 +5,8 @@
 # ratio in the ord1-vs-full grid) with the retired BC normalization now
 # OFF (the 8/25 grid ran with it on; inert on minimizers, this is the
 # paper-clean rerun). float64, root 5x60 from scratch, both segments 1k
-# adam -> 40k ssbroyden (41k, switch 1000, ssbroyden lr 1.0 tol 1e-10);
+# adam -> 40k ssbroyden (41k, switch 1000, ssbroyden lr 1.0 tol 1e-14 —
+# raised from 1e-10 after it actually tripped, back to the old tol14);
 # FULL order (bc 2 explicit, iface null) per the paper; INTERFACE
 # normalization ON / BC normalization OFF; weights ic/bc + interface
 # 1000; tree M12 W2 linear -> [4, 8] STRUCTURE ONLY; experts 3x24; no
@@ -233,7 +234,7 @@ base_config:
     betas: [0.95, 0.95]
     precondition_frequency: 10
     weight_decay: 0.0
-  ssbroyden: {lr: 1.0, tolerance_grad: 1.0e-10}
+  ssbroyden: {lr: 1.0, tolerance_grad: 1.0e-14}
 experiment_name: kdv_f64_repro_bcnormoff_root_p3_M12W2lin
 experiments:
 - adaptive_pinn:
