@@ -1,10 +1,12 @@
 # ==========================================================================
-# KDV f32 PHASE-3 (STAGE 1) FROM THE 200a-30l ROOTS (2026-08-28, main).
-# ACTIVE: 2 runs — with_scheduler root x tree {M15 no-TM, M18 W3-linear
-# structure-only}. Root LOADED from roots_checkpoints/single_precision/
-# 200adam-30lbfgs-4096batch/with_scheduler.pt; phase 3 = 200k ADAM ONLY
-# (no lbfgs), matching the root's own adam recipe (warmup 5000 from
-# factor 0.01, exp decay x0.9/5000); ft 0 — the ft grids (30k lbfgs
+# KDV f32 PHASE-3 (STAGE 1) FROM THE 200a-30l ROOTS (2026-08-29, main).
+# ACTIVE: 4 runs — root {with_scheduler (ep200k, 1.4404e-2), without_
+# scheduler (flat root + completed lbfgs, 3.132e-2)} x tree {M15 no-TM,
+# M18 W3-linear structure-only}. Roots LOADED from roots_checkpoints/
+# single_precision/200adam-30lbfgs-4096batch/; phase 3 = 200k ADAM ONLY
+# (no lbfgs), matching each root's own adam recipe (withsched: warmup
+# 5000 from factor 0.01, exp decay x0.9/5000; withoutsched: flat 1e-3);
+# ft 0 — the ft grids (30k lbfgs
 # lr 1e-3, sigma {0.03, 0.06, 0.1} x collar {0.3, 0.5}) run later as
 # stage 2 from the saved expert checkpoints (two-stage decision).
 # Sampling mirrors the root's fresh-4096 regime the split-segment way
@@ -304,69 +306,67 @@ experiments:
   precision: float32
   problem: kdv
   sampling: {min_points_per_expert: 512, n_residual_train: 4096, resample_every_epochs: 99999}
-# ---- PENDING (activate when without_scheduler.pt lands in
-#      roots_checkpoints/single_precision/200adam-30lbfgs-4096batch/) ----
-# - adaptive_pinn:
-#     M_experts_num: 15
-#     fine_tune: {epochs: 0}
-#     initial_train: {epochs: 0, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
-#       optimizer_1: adam, optimizer_2: null, optimizer_switch_epoch: 999999}
-#     split_icbc: {bc_term_normalization: false, interface_term_normalization: true,
-#       max_interface_derivative_order: 1}
-#   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
-#   batch_size: 99999999
-#   epochs: 200000
-#   experts_architecture: [2, 30, 30, 30, 1]
-#   freeze_stop_epochs: 1001
-#   kdv:
-#     bc_max_derivative_order: 1
-#     fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
-#     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
-#     pretrained_base_checkpoint: roots_checkpoints/single_precision/200adam-30lbfgs-4096batch/without_scheduler.pt
-#     time_marching: {enabled: false}
-#   lr: 0.001
-#   lr_schedule: none
-#   lr_warmup_steps: 0
-#   model: AToELeaves
-#   name: kdv_p3_withoutsched_M15noTM_e3x30_adam200k
-#   optimizer_1: adam
-#   optimizer_2: null
-#   optimizer_switch_epoch: 999999
-#   patience_evals: 50
-#   precision: float32
-#   problem: kdv
-#   sampling: {min_points_per_expert: 512, n_residual_train: 4096, resample_every_epochs: 99999}
-# - adaptive_pinn:
-#     M_experts_num: 18
-#     fine_tune: {epochs: 0}
-#     initial_train: {epochs: 0, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
-#       optimizer_1: adam, optimizer_2: null, optimizer_switch_epoch: 999999}
-#     split_icbc: {bc_term_normalization: false, interface_term_normalization: true,
-#       max_interface_derivative_order: 1}
-#   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
-#   batch_size: 99999999
-#   epochs: 200000
-#   experts_architecture: [2, 30, 30, 30, 1]
-#   freeze_stop_epochs: 1001
-#   kdv:
-#     bc_max_derivative_order: 1
-#     fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
-#     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
-#     pretrained_base_checkpoint: roots_checkpoints/single_precision/200adam-30lbfgs-4096batch/without_scheduler.pt
-#     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
-#       m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
-#   lr: 0.001
-#   lr_schedule: none
-#   lr_warmup_steps: 0
-#   model: AToELeaves
-#   name: kdv_p3_withoutsched_M18W3lin_e3x30_adam200k
-#   optimizer_1: adam
-#   optimizer_2: null
-#   optimizer_switch_epoch: 999999
-#   patience_evals: 50
-#   precision: float32
-#   problem: kdv
-#   sampling: {min_points_per_expert: 512, n_residual_train: 4096, resample_every_epochs: 99999}
+- adaptive_pinn:
+    M_experts_num: 15
+    fine_tune: {epochs: 0}
+    initial_train: {epochs: 0, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
+      optimizer_1: adam, optimizer_2: null, optimizer_switch_epoch: 999999}
+    split_icbc: {bc_term_normalization: false, interface_term_normalization: true,
+      max_interface_derivative_order: 1}
+  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+  batch_size: 99999999
+  epochs: 200000
+  experts_architecture: [2, 30, 30, 30, 1]
+  freeze_stop_epochs: 1001
+  kdv:
+    bc_max_derivative_order: 1
+    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+    loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
+    pretrained_base_checkpoint: roots_checkpoints/single_precision/200adam-30lbfgs-4096batch/without_scheduler.pt
+    time_marching: {enabled: false}
+  lr: 0.001
+  lr_schedule: none
+  lr_warmup_steps: 0
+  model: AToELeaves
+  name: kdv_p3_withoutsched_M15noTM_e3x30_adam200k
+  optimizer_1: adam
+  optimizer_2: null
+  optimizer_switch_epoch: 999999
+  patience_evals: 50
+  precision: float32
+  problem: kdv
+  sampling: {min_points_per_expert: 512, n_residual_train: 4096, resample_every_epochs: 99999}
+- adaptive_pinn:
+    M_experts_num: 18
+    fine_tune: {epochs: 0}
+    initial_train: {epochs: 0, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
+      optimizer_1: adam, optimizer_2: null, optimizer_switch_epoch: 999999}
+    split_icbc: {bc_term_normalization: false, interface_term_normalization: true,
+      max_interface_derivative_order: 1}
+  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+  batch_size: 99999999
+  epochs: 200000
+  experts_architecture: [2, 30, 30, 30, 1]
+  freeze_stop_epochs: 1001
+  kdv:
+    bc_max_derivative_order: 1
+    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+    loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
+    pretrained_base_checkpoint: roots_checkpoints/single_precision/200adam-30lbfgs-4096batch/without_scheduler.pt
+    time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
+      m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
+  lr: 0.001
+  lr_schedule: none
+  lr_warmup_steps: 0
+  model: AToELeaves
+  name: kdv_p3_withoutsched_M18W3lin_e3x30_adam200k
+  optimizer_1: adam
+  optimizer_2: null
+  optimizer_switch_epoch: 999999
+  patience_evals: 50
+  precision: float32
+  problem: kdv
+  sampling: {min_points_per_expert: 512, n_residual_train: 4096, resample_every_epochs: 99999}
 # ---- for memory (2026-08-28): complete-lbfgs resume run ----
 # experiment_name: kdv_f32_root_complete_lbfgs_resume
 # experiments:
