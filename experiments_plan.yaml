@@ -257,71 +257,6 @@ experiments:
     bc_max_derivative_order: 1
     fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
-    pretrained_base_checkpoint: roots_checkpoints/single_precision/200adam-30lbfgs-4096batch/with_scheduler.pt
-    time_marching: {enabled: false}
-  lr: 0.001
-  lr_decay_rate: 0.9
-  lr_decay_steps: 5000
-  lr_schedule: exponential
-  lr_warmup_steps: 5000
-  model: AToELeaves
-  name: kdv_p3_withsched_M15noTM_e3x30_adam200k
-  optimizer_1: adam
-  optimizer_2: null
-  optimizer_switch_epoch: 999999
-  patience_evals: 50
-  precision: float32
-  problem: kdv
-  sampling: {min_points_per_expert: 512, n_residual_train: 4096, resample_every_epochs: 99999}
-- adaptive_pinn:
-    M_experts_num: 18
-    fine_tune: {epochs: 0}
-    initial_train: {epochs: 0, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
-      optimizer_1: adam, optimizer_2: null, optimizer_switch_epoch: 999999}
-    split_icbc: {bc_term_normalization: false, interface_term_normalization: true,
-      max_interface_derivative_order: 1}
-  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
-  batch_size: 99999999
-  epochs: 200000
-  experts_architecture: [2, 30, 30, 30, 1]
-  freeze_stop_epochs: 1001
-  kdv:
-    bc_max_derivative_order: 1
-    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
-    loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
-    pretrained_base_checkpoint: roots_checkpoints/single_precision/200adam-30lbfgs-4096batch/with_scheduler.pt
-    time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
-      m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
-  lr: 0.001
-  lr_decay_rate: 0.9
-  lr_decay_steps: 5000
-  lr_schedule: exponential
-  lr_warmup_steps: 5000
-  model: AToELeaves
-  name: kdv_p3_withsched_M18W3lin_e3x30_adam200k
-  optimizer_1: adam
-  optimizer_2: null
-  optimizer_switch_epoch: 999999
-  patience_evals: 50
-  precision: float32
-  problem: kdv
-  sampling: {min_points_per_expert: 512, n_residual_train: 4096, resample_every_epochs: 99999}
-- adaptive_pinn:
-    M_experts_num: 15
-    fine_tune: {epochs: 0}
-    initial_train: {epochs: 0, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
-      optimizer_1: adam, optimizer_2: null, optimizer_switch_epoch: 999999}
-    split_icbc: {bc_term_normalization: false, interface_term_normalization: true,
-      max_interface_derivative_order: 1}
-  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
-  batch_size: 99999999
-  epochs: 200000
-  experts_architecture: [2, 30, 30, 30, 1]
-  freeze_stop_epochs: 1001
-  kdv:
-    bc_max_derivative_order: 1
-    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
-    loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
     pretrained_base_checkpoint: roots_checkpoints/single_precision/200adam-30lbfgs-4096batch/without_scheduler.pt
     time_marching: {enabled: false}
   lr: 0.001
@@ -367,6 +302,72 @@ experiments:
   precision: float32
   problem: kdv
   sampling: {min_points_per_expert: 512, n_residual_train: 4096, resample_every_epochs: 99999}
+# ---- withsched pair commented out 2026-08-29 (already run) ----
+# - adaptive_pinn:
+#     M_experts_num: 15
+#     fine_tune: {epochs: 0}
+#     initial_train: {epochs: 0, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
+#       optimizer_1: adam, optimizer_2: null, optimizer_switch_epoch: 999999}
+#     split_icbc: {bc_term_normalization: false, interface_term_normalization: true,
+#       max_interface_derivative_order: 1}
+#   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+#   batch_size: 99999999
+#   epochs: 200000
+#   experts_architecture: [2, 30, 30, 30, 1]
+#   freeze_stop_epochs: 1001
+#   kdv:
+#     bc_max_derivative_order: 1
+#     fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+#     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
+#     pretrained_base_checkpoint: roots_checkpoints/single_precision/200adam-30lbfgs-4096batch/with_scheduler.pt
+#     time_marching: {enabled: false}
+#   lr: 0.001
+#   lr_decay_rate: 0.9
+#   lr_decay_steps: 5000
+#   lr_schedule: exponential
+#   lr_warmup_steps: 5000
+#   model: AToELeaves
+#   name: kdv_p3_withsched_M15noTM_e3x30_adam200k
+#   optimizer_1: adam
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
+#   patience_evals: 50
+#   precision: float32
+#   problem: kdv
+#   sampling: {min_points_per_expert: 512, n_residual_train: 4096, resample_every_epochs: 99999}
+# - adaptive_pinn:
+#     M_experts_num: 18
+#     fine_tune: {epochs: 0}
+#     initial_train: {epochs: 0, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
+#       optimizer_1: adam, optimizer_2: null, optimizer_switch_epoch: 999999}
+#     split_icbc: {bc_term_normalization: false, interface_term_normalization: true,
+#       max_interface_derivative_order: 1}
+#   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+#   batch_size: 99999999
+#   epochs: 200000
+#   experts_architecture: [2, 30, 30, 30, 1]
+#   freeze_stop_epochs: 1001
+#   kdv:
+#     bc_max_derivative_order: 1
+#     fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+#     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
+#     pretrained_base_checkpoint: roots_checkpoints/single_precision/200adam-30lbfgs-4096batch/with_scheduler.pt
+#     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
+#       m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
+#   lr: 0.001
+#   lr_decay_rate: 0.9
+#   lr_decay_steps: 5000
+#   lr_schedule: exponential
+#   lr_warmup_steps: 5000
+#   model: AToELeaves
+#   name: kdv_p3_withsched_M18W3lin_e3x30_adam200k
+#   optimizer_1: adam
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
+#   patience_evals: 50
+#   precision: float32
+#   problem: kdv
+#   sampling: {min_points_per_expert: 512, n_residual_train: 4096, resample_every_epochs: 99999}
 # ---- for memory (2026-08-28): complete-lbfgs resume run ----
 # experiment_name: kdv_f32_root_complete_lbfgs_resume
 # experiments:
