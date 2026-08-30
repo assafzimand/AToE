@@ -34,6 +34,7 @@ Usage:
     their own); run dirs always use their own config's value.
 """
 
+import os
 import sys
 import json
 import argparse
@@ -201,9 +202,19 @@ def process_combo(combo_dir: Path, base_cfg, sigma_fraction: float, out_dir: Pat
         delta_lo=delta_lo, delta_hi=delta_hi)
 
 
+def _winlong(path: Path) -> str:
+    """Windows extended-length path (bypasses the 260-char MAX_PATH limit)."""
+    s = str(Path(path).resolve())
+    if os.name == 'nt' and not s.startswith('\\\\?\\'):
+        return '\\\\?\\' + s
+    return s
+
+
 def process_run(run_dir: Path, out_dir: Path):
-    cfg = yaml.safe_load((run_dir / 'config_used.yaml').read_text(encoding='utf-8'))
-    metrics = json.loads((run_dir / 'metrics.json').read_text(encoding='utf-8'))
+    with open(_winlong(run_dir / 'config_used.yaml'), encoding='utf-8') as f:
+        cfg = yaml.safe_load(f)
+    with open(_winlong(run_dir / 'metrics.json'), encoding='utf-8') as f:
+        metrics = json.load(f)
     problem = cfg['problem']
     pc = cfg[problem]
     domain_bounds = {
@@ -256,11 +267,12 @@ def main():
 
     base_cfg = None
     for source_dir in args.source_dirs:
-        if (source_dir / 'perfect_trees.json').exists():
+        if os.path.exists(_winlong(source_dir / 'perfect_trees.json')):
             if base_cfg is None:
                 base_cfg = cpt.load_config(REPO_ROOT / 'experiments_plan.yaml')
             process_combo(source_dir, base_cfg, args.sigma_fraction, args.out_dir)
-        elif (source_dir / 'metrics.json').exists() and (source_dir / 'config_used.yaml').exists():
+        elif (os.path.exists(_winlong(source_dir / 'metrics.json'))
+              and os.path.exists(_winlong(source_dir / 'config_used.yaml'))):
             process_run(source_dir, args.out_dir)
         else:
             print(f"Skipping {source_dir}: no perfect_trees.json or metrics.json+config_used.yaml found")

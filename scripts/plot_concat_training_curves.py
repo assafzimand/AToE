@@ -18,6 +18,7 @@ config_used.yaml), e.g.:
     outputs/experiments/<experiment>/allen_cahn-.../20260724_142510
 """
 
+import os
 import sys
 import json
 import argparse
@@ -177,9 +178,19 @@ def plot_training_curves_paper(metrics, save_dir, optimizer_switch_epochs=None,
     print(f"  Training curves saved to {save_path} (+ per-panel files)")
 
 
+def _winlong(path: Path) -> str:
+    """Windows extended-length path (bypasses the 260-char MAX_PATH limit)."""
+    s = str(Path(path).resolve())
+    if os.name == 'nt' and not s.startswith('\\\\?\\'):
+        return '\\\\?\\' + s
+    return s
+
+
 def load_run(run_dir: Path):
-    metrics = json.loads((run_dir / 'metrics.json').read_text(encoding='utf-8'))
-    cfg = yaml.safe_load((run_dir / 'config_used.yaml').read_text(encoding='utf-8'))
+    with open(_winlong(run_dir / 'metrics.json'), encoding='utf-8') as f:
+        metrics = json.load(f)
+    with open(_winlong(run_dir / 'config_used.yaml'), encoding='utf-8') as f:
+        cfg = yaml.safe_load(f)
     return metrics, cfg
 
 
