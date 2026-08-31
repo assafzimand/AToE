@@ -128,9 +128,24 @@ def train_orchestrator(ctx: TrainingContext) -> None:
         ctx.total_epochs = ctx.epoch
         return
 
-    # ── Pretrained leaf-expert checkpoint: skip root + phase 3, fine-tune only ──
+    # ── Pretrained leaf-expert checkpoint: skip root + phase-3 SPAWN ──
+    # A positive top-level `epochs` CONTINUES phase 3 on the loaded experts
+    # (split loss; interface targets minted from the checkpoint's own base)
+    # before the fine-tune — the regions come from the checkpoint, so no
+    # tree is built and nothing is re-spawned. epochs 0 = fine-tune only.
     if ctx.pretrained_local_expert_checkpoint is not None:
         _prepare_pretrained_experts_baseline(ctx)
+        _p3_more = int(cfg['epochs'])
+        if _p3_more > 0:
+            _set_trainable(model, 'leaves')
+            logger.info(f"[Phase 3] Continuing on {model.num_experts} loaded "
+                        f"leaf experts for {_p3_more} epochs")
+            if ctx.adaptive_cfg.get('split_icbc', {}).get('enabled', False):
+                res = _run_split_segment(ctx, 'phase3', _p3_more, cfg)
+            else:
+                res = _train_segment(ctx, 'phase3', _p3_more, cfg)
+            if res.nan_detected or res.oom_stopped:
+                return
         _run_fine_tune(ctx)
         ctx.total_epochs = ctx.epoch
         return

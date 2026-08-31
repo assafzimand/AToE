@@ -968,7 +968,11 @@ def _setup_training(
                         "expert checkpoint already contains the base.")
         logger.info(f"\n  [3-Phase] Phases 1+3 skipped: full leaf-expert model "
                     f"loaded from {pretrained_local_expert_checkpoint}")
-        logger.info("  [3-Phase] Only the fine-tune segment will run.")
+        if cfg['epochs'] > 0:
+            logger.info(f"  [3-Phase] Phase 3 CONTINUES on the loaded experts "
+                        f"for {cfg['epochs']} epochs, then fine-tune.")
+        else:
+            logger.info("  [3-Phase] Only the fine-tune segment will run.")
     elif pretrained_base_checkpoint is not None:
         # Phase 1 supplied as a checkpoint: load the base, skip Phase-1 training,
         # force the spawn on the first loop epoch, then transition to Phase 3.
