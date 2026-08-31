@@ -1,24 +1,19 @@
 # ==========================================================================
-# KDV f32 PHASE-3 LBFGS CONTINUATION — SW lr 1e-3 (2026-08-31, main).
-# ACTIVE: 1 run. The 30+30 full-flow run (20260831_070828) produced a
-# GREAT root (1.871e-2, bc norm off, lbfgs ran full 30k) but phase 3's
-# LBFGS froze INSTANTLY at the switch (SW 0.1 zoom collapse on the
-# split-loss cliff), leaving p3 = 30k-adam-only at 1.259e-1. This run
-# retries ONLY the phase-3 LBFGS stage: loads the adam-end experts via
-# pretrained_local_expert_checkpoint (experts-to-compete-30-30-with-
-# smaller-lbfgs-lr.pt = hash-verified copy of that run's
-# best_model_phase3.pt; frozen lbfgs => equals adam-end ep90k) and
-# CONTINUES phase 3 for 30k LBFGS-only epochs at SW lr 1e-3 (vs the
-# frozen 0.1). NEW CODE PATH (orchestrator, 2026-08-31): expert-ckpt +
-# epochs>0 now continues the split phase-3 segment on loaded experts
-# (regions from ckpt, no re-spawn; interface targets from the ckpt's
-# own base), then ft (0 here). Split sampling: 20k static full-batch
-# pool (lbfgs), min 1024/expert; order 1, iface norm ON / bc norm OFF,
-# weights 1k, patience 50, freeze_stop 1001, f32, seed 42.
-# ON HOLD below (commented): 30+30 full-flow (RAN 2026-08-31), e3x35 p3
-# run, f64 ssb ft rerun (done: froze), stage-1 p3 pairs, complete-lbfgs
-# resume, f64 ssb ft grid, adam200k roots, ft ablation v2, f64 repro,
-# f64 p3 grid.
+# KDV f32 PHASE-3 — WITHSCHED M12 W3-LINZERO, EXPERTS 3x40 (2026-08-31,
+# main). ACTIVE: 1 run = the exact config of the finished e3x35 run
+# (kdv_p3_withsched_M18W3lin_e3x35_adam200k, 20260830_091049, 2.193e-2
+# at full 200k) with tree M12 / W3 linear_zero (the 50adam-line winner
+# tree: 11 leaves) and experts [2,40,40,40,1]. Root LOADED
+# (with_scheduler.pt, ep200k 1.4404e-2); phase 3 = 200k ADAM ONLY,
+# scheduled (warmup 5000, exp decay x0.9/5000), ft 0. RFF dim auto,
+# fresh-4096 split sampling (full batch, min 512/expert), bc + iface
+# max order 1, INTERFACE norm ON / bc norm OFF, weights 1k, patience
+# 50, freeze_stop 1001, f32, seed 42.
+# ON HOLD below (commented): p3-lbfgs continuation (STOPPED 2026-08-31,
+# not doing well), 30+30 full-flow (ran: root 1.871e-2, p3 froze),
+# e3x35 p3 run (ran: 2.193e-2), f64 ssb ft rerun (done: froze), stage-1
+# p3 pairs, complete-lbfgs resume, f64 ssb ft grid, adam200k roots, ft
+# ablation v2, f64 repro, f64 p3 grid.
 # ==========================================================================
 base_config:
   activation: tanh
@@ -229,42 +224,79 @@ base_config:
     precondition_frequency: 10
     weight_decay: 0.0
   ssbroyden: {lr: 1.0, tolerance_grad: 1.0e-14}
-experiment_name: kdv_f32_p3lbfgs_cont_sw1e3
+experiment_name: kdv_f32_p3_withsched_M12W3linzero_e3x40
 experiments:
 - adaptive_pinn:
-    M_experts_num: 18
+    M_experts_num: 12
     fine_tune: {epochs: 0}
     initial_train: {epochs: 0, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
       optimizer_1: adam, optimizer_2: null, optimizer_switch_epoch: 999999}
     split_icbc: {bc_term_normalization: false, interface_term_normalization: true,
       max_interface_derivative_order: 1}
   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
-  batch_size: 99999
-  epochs: 30000
-  experts_architecture: [2, 30, 30, 30, 1]
+  batch_size: 99999999
+  epochs: 200000
+  experts_architecture: [2, 40, 40, 40, 1]
   freeze_stop_epochs: 1001
   kdv:
     bc_max_derivative_order: 1
     fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
-    pretrained_base_checkpoint: null
-    pretrained_local_expert_checkpoint: roots_checkpoints/experts-to-compete-30-30-with-smaller-lbfgs-lr.pt
+    pretrained_base_checkpoint: roots_checkpoints/single_precision/200adam-30lbfgs-4096batch/with_scheduler.pt
     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
-      m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
-  lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.001, max_iter: 1,
-    tolerance_change: 0.0, tolerance_grad: 0.0}
+      m_distribution: linear_zero, num_windows: 3, only_for_tree_structure: true}
   lr: 0.001
-  lr_schedule: none
-  lr_warmup_steps: 0
+  lr_decay_rate: 0.9
+  lr_decay_steps: 5000
+  lr_schedule: exponential
+  lr_warmup_steps: 5000
   model: AToELeaves
-  name: kdv_p3cont_lbfgs_sw1e3_from_adamend_3030flow
-  optimizer_1: lbfgs
+  name: kdv_p3_withsched_M12W3linzero_e3x40_adam200k
+  optimizer_1: adam
   optimizer_2: null
   optimizer_switch_epoch: 999999
   patience_evals: 50
   precision: float32
   problem: kdv
-  sampling: {min_points_per_expert: 1024, n_residual_train: 20000, resample_every_epochs: 99999}
+  sampling: {min_points_per_expert: 512, n_residual_train: 4096, resample_every_epochs: 99999}
+# ---- for memory (2026-08-31): p3-lbfgs continuation SW 1e-3 (STOPPED mid-run,
+# ---- not doing well) ----
+# experiment_name: kdv_f32_p3lbfgs_cont_sw1e3
+# experiments:
+# - adaptive_pinn:
+#     M_experts_num: 18
+#     fine_tune: {epochs: 0}
+#     initial_train: {epochs: 0, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
+#       optimizer_1: adam, optimizer_2: null, optimizer_switch_epoch: 999999}
+#     split_icbc: {bc_term_normalization: false, interface_term_normalization: true,
+#       max_interface_derivative_order: 1}
+#   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+#   batch_size: 99999
+#   epochs: 30000
+#   experts_architecture: [2, 30, 30, 30, 1]
+#   freeze_stop_epochs: 1001
+#   kdv:
+#     bc_max_derivative_order: 1
+#     fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+#     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
+#     pretrained_base_checkpoint: null
+#     pretrained_local_expert_checkpoint: roots_checkpoints/experts-to-compete-30-30-with-smaller-lbfgs-lr.pt
+#     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
+#       m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
+#   lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.001, max_iter: 1,
+#     tolerance_change: 0.0, tolerance_grad: 0.0}
+#   lr: 0.001
+#   lr_schedule: none
+#   lr_warmup_steps: 0
+#   model: AToELeaves
+#   name: kdv_p3cont_lbfgs_sw1e3_from_adamend_3030flow
+#   optimizer_1: lbfgs
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
+#   patience_evals: 50
+#   precision: float32
+#   problem: kdv
+#   sampling: {min_points_per_expert: 1024, n_residual_train: 20000, resample_every_epochs: 99999}
 # ---- for memory (2026-08-31): 30+30 full-flow bc-norm-off (RAN 20260831_070828:
 # ---- root 1.871e-2 no freeze; p3 lbfgs froze instantly -> 1.259e-1; ft 1.177e-1) ----
 # experiment_name: kdv_f32_fullflow_30a30l_nobcnorm
