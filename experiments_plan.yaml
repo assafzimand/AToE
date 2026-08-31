@@ -242,7 +242,7 @@ experiments:
     bc_max_derivative_order: 1
     fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
-    pretrained_base_checkpoint: roots_checkpoints/single_precision/200adam-30lbfgs-4096batch/with_scheduler.pt
+    pretrained_base_checkpoint: roots_checkpoints/single_precision/200adam-30lbfgs-4096batch/with_scheduler_root.pt
     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
       m_distribution: linear_zero, num_windows: 3, only_for_tree_structure: true}
   lr: 0.001
