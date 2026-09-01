@@ -41,7 +41,7 @@ The architecture and training process of the initial model $u_0$ follows the cla
 with learning rate $10^{-3}$, followed by 40k SSBroyden iterations, and all computations are performed in
 double precision, as suggested in~\cite{kiyani2025optimizer}.
 
-For the higher order benchmarks we use larger networks: an MLP with 6 hidden layers of 128 neurons, combined with a random Fourier feature embedding~\cite{tancik2020fourier} of the input, with scale $2$ and embedding dimension equal to the layer width. To keep a network of this size affordable we train it in single precision, and the reduced precision in turn calls for a longer first order stage: 30k Adam iterations governed by a scheduler with base learning rate $10^{-3}$, a warmup from $10^{-5}$ to $10^{-3}$ over the first 2k iterations, and an exponential decay by a factor of $0.9$ every 2k iterations thereafter, followed by 30k L-BFGS iterations with learning rate $0.1$.
+For the higher order benchmarks we use larger networks: an MLP with 6 hidden layers of 128 neurons, combined with a random Fourier feature embedding~\cite{tancik2020fourier} of the input, with scale $2$ and embedding dimension equal to the layer width. To keep a network of this size affordable we train it in single precision, and the reduced precision in turn calls for a longer first order stage: 50k Adam iterations at a constant learning rate of $10^{-3}$, followed by 40k L-BFGS iterations with learning rate $0.1$.
 
 For KS, whose chaotic dynamics make a single global fit over the full horizon difficult, the root itself is trained by the sequential time marching approach of~\cite{wight2021timeadaptive}. Advancing over successive time windows, rather than fitting the full horizon at once, is the common treatment of KS in the PINN literature. The time interval is divided into 5 equal windows, and an independent network with the higher order architecture above is trained on each window in order, with the converged prediction of the preceding network at the shared time slice serving as the initial condition of the next. The resulting piecewise model over the 5 windows serves as the root $u_0$, and the remainder of the pipeline, the tree construction with time tiling, the expert training, and the global fine-tuning, proceeds exactly as for KdV.
 
@@ -73,7 +73,7 @@ pipeline proceeds unchanged.
 Each leaf region $\Omega_j \in \Lambda$ of the resulting tree is assigned a neural network expert $u_j$ with the expert architecture
 $\mathcal{A}_{\mathrm{exp}}$, which is smaller than the root architecture. The reduced size is possible without sacrificing accuracy because each expert approximates the solution only on its own subdomain, where by construction of the tree the solution has more uniform local regularity, rather than the full problem with all its variation. 
 
-Each expert is an MLP with 3 hidden layers of 24 neurons for the second order benchmarks, and 3 hidden layers of 30 neurons, with the random Fourier feature embedding of Section~\ref{sec:root_training}, for the higher order ones. In the experiments shown in Section~\ref{sec:experiments} we set $M = 8$ for the second order PDEs and $M = 18$ for the higher order ones, using 3 time tiles, with a linear allocation strategy for KdV and a quadratic one for KS.
+Each expert is an MLP with 3 hidden layers of 24 neurons for the second order benchmarks, and, with the random Fourier feature embedding of Section~\ref{sec:root_training}, 3 hidden layers of 40 neurons for KdV and of 30 neurons for KS. In the experiments shown in Section~\ref{sec:experiments} we set $M = 8$ for the second order PDEs, and for the higher order ones, using 3 time tiles, $M = 12$ for KdV with a linear allocation strategy and $M = 18$ for KS with a quadratic one.
 The KS solution develops fine structure that intensifies toward the end of
 the time horizon more sharply than the KdV solution does, so its budget is
 skewed more strongly toward the later tiles. Since the completion to a full binary tree adds or removes leaves relative to the selected terms, the resulting number of experts varies per problem (see Tables~\ref{tab:benchmark_results_second} and~\ref{tab:benchmark_results_high}).
@@ -149,7 +149,7 @@ complexity of the solution.
 \end{subfigure}
 
 \caption{
-Effective approximation capacity induced by the adaptive decomposition relative to the subdomain volume for benchmark PDEs. Trees are constructed using the $M$-term procedure of Section~\ref{sec:tree_construction} with $M=8$ for the second order examples and $M=18$ with time tiling for the higher order ones.}
+Effective approximation capacity induced by the adaptive decomposition relative to the subdomain volume for benchmark PDEs. Trees are constructed using the $M$-term procedure of Section~\ref{sec:tree_construction} with $M=8$ for the second order examples and, with time tiling, $M=12$ for KdV and $M=18$ for KS.}
 \label{fig:capacity_maps}
 \end{figure}
 
@@ -378,7 +378,7 @@ domain, each covering its region with smooth transitions in the overlap zones.
 \end{figure}
 
 Finally, the full composition \eqref{eq:global_atoe} is jointly fine-tuned under the global PDE loss. This last stage reconciles the independently trained experts in the overlap zones,
-producing a single, globally consistent solution. The fine-tuning stage consists of 40k SSBroyden iterations with no Adam warm-up for the second order benchmarks, and 30k L-BFGS iterations, likewise with no warm-up, for the higher order ones, the latter with a learning rate of $10^{-3}$, smaller than in the earlier stages, as the composed loss landscape tolerates only smaller line-search trial steps. Fine-tuning uses a sampling scheme that draws a fixed fraction of the collocation points from within the overlap regions; we use an overlap sampling fraction of $0.3$, with an
+producing a single, globally consistent solution. The fine-tuning stage consists of 40k SSBroyden iterations with no Adam warm-up for the second order benchmarks, and 40k L-BFGS iterations, likewise with no warm-up, for the higher order ones, the latter with a learning rate of $10^{-3}$, smaller than in the earlier stages, as the composed loss landscape tolerates only smaller line-search trial steps. Fine-tuning uses a sampling scheme that draws a fixed fraction of the collocation points from within the overlap regions; we use an overlap sampling fraction of $0.3$, with an
 overlap fraction $\alpha = 0.03$ for all benchmarks.
 
 Concentrating samples in the overlaps is
