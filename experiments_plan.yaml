@@ -7,16 +7,25 @@
 # windows (real marching, M 0 + equal -> [0]*5 root-only, window w>=1
 # IC = frozen w-1 prediction), bc_max_derivative_order 1, ic/bc
 # weights 1e3, NO normalization, RFF dim auto / scale 2, per window
-# initial_train 32000 = 2k FLAT adam 1e-3 (no scheduler) -> 30k 2nd
-# optimizer, fresh 20k/epoch adam + static 20k pool for the 2nd opt,
-# 256 ic / 256 bc, full batch, patience 30, eval 1000, freeze_stop
-# 1001 (f32: grad-tol no-op -> freeze stop; f64: SSB tol no-op ->
-# same), seed 42.
+# initial_train 50000 = 20k FLAT adam 1e-3 (no scheduler: since we
+# skip Kiyani's decay schedule, the substitute is a longer flat
+# warmup; 20k = the MEASURED best-adam point on KS windows) -> 30k
+# 2nd optimizer, fresh 20k/epoch adam + static 20k pool for the 2nd
+# opt, 256 ic / 256 bc, full batch, patience 30, eval 1000,
+# freeze_stop 1001 (f32: grad-tol no-op -> freeze stop; f64: SSB tol
+# no-op -> same), seed 42.
+# 2026-09-03 REV3: first launch (2k-adam + lbfgs lr 1.0) froze window
+# 0 instantly (rel 2.6e-1). Evidence from the running w5-T1 50a40l
+# job, window 0: adam improves to 3.7e-2 @ 20k then goes UNSTABLE
+# 25k-45k at flat 1e-3 (rel 0.33-0.41), recovers by luck at the 50k
+# switch; lbfgs 0.1 then trained 11k eps to 2.16e-2. -> adam capped
+# at 20k (best state, pre-instability), lbfgs.lr 0.1 (proven f32 SW
+# step; 1.0 froze).
 # RUN A (f32): 6x128 + RFF auto (~87k/window), LBFGS history_size 1000
 # (long-memory ~= BFGS-quality directions, ~0.7GB; NOT literature-
 # backed per se — interpolates Rathore h100 default toward Kiyani's
-# dense-BFGS win), lr 1.0 (unit step, tripwire = freeze_stop; fallback
-# 0.1), strong_wolfe, tolerance_grad 1e-7 (f32 floor).
+# dense-BFGS win), lr 0.1 (the proven f32 SW step; 1.0 froze),
+# strong_wolfe, tolerance_grad 1e-7 (f32 floor).
 # RUN B (f64): 5x60 + RFF auto (~18.6k/window — just under the SSB
 # dense ceiling, first f64+RFF+SSB combo; if scimba fails, lever =
 # rff dim 32), SSBroyden lr 1.0 / tol_grad 1e-14 (base_config).
@@ -249,8 +258,8 @@ experiments:
 - adaptive_pinn:
     M_experts_num: 0
     fine_tune: {epochs: 0}
-    initial_train: {epochs: 32000, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
-      optimizer_1: adam, optimizer_2: lbfgs, optimizer_switch_epoch: 2000}
+    initial_train: {epochs: 50000, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
+      optimizer_1: adam, optimizer_2: lbfgs, optimizer_switch_epoch: 20000}
     split_icbc: {bc_term_normalization: false, interface_term_normalization: true,
       max_interface_derivative_order: 1}
   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
@@ -266,16 +275,16 @@ experiments:
     time_marching: {debug_windows: null, enabled: true, freeze_previous_windows: true,
       last_window_checkpoint: null, m_distribution: equal, num_windows: 5,
       only_for_tree_structure: false}
-  lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 1.0, max_iter: 1,
+  lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
     tolerance_change: 0.0, tolerance_grad: 1.0e-07}
   lr: 0.001
   lr_schedule: none
   lr_warmup_steps: 0
   model: AToELeaves
-  name: ks_root_tw5_f32_2a30lbfgs_h1000
+  name: ks_root_tw5_f32_20a30lbfgs_h1000_lr01
   optimizer_1: adam
   optimizer_2: lbfgs
-  optimizer_switch_epoch: 2000
+  optimizer_switch_epoch: 20000
   patience_evals: 30
   precision: float32
   problem: ks
@@ -283,8 +292,8 @@ experiments:
 - adaptive_pinn:
     M_experts_num: 0
     fine_tune: {epochs: 0}
-    initial_train: {epochs: 32000, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
-      optimizer_1: adam, optimizer_2: ssbroyden, optimizer_switch_epoch: 2000}
+    initial_train: {epochs: 50000, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
+      optimizer_1: adam, optimizer_2: ssbroyden, optimizer_switch_epoch: 20000}
     split_icbc: {bc_term_normalization: false, interface_term_normalization: true,
       max_interface_derivative_order: 1}
   base_architecture: [2, 60, 60, 60, 60, 60, 1]
@@ -304,10 +313,10 @@ experiments:
   lr_schedule: none
   lr_warmup_steps: 0
   model: AToELeaves
-  name: ks_root_tw5_f64_2a30ssb_5x60rff
+  name: ks_root_tw5_f64_20a30ssb_5x60rff
   optimizer_1: adam
   optimizer_2: ssbroyden
-  optimizer_switch_epoch: 2000
+  optimizer_switch_epoch: 20000
   patience_evals: 30
   precision: float64
   problem: ks
