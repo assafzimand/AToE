@@ -1,31 +1,29 @@
 # ==========================================================================
-# KS f32 TIME-WINDOW ROOT — 3 SEQUENTIAL ROOT-ONLY WINDOWS (REAL MARCHING)
-# (2026-09-03, main). ACTIVE: 1 run = the exact KS twin of the KdV
-# time-window root (kdv_f32_timewindow_root_w3_50a40l): real time
-# marching (enabled, NOT only_for_tree_structure) trains a FRESH root
-# per window (6x128 + RFF auto, ~87k params each, 3x total) with the
-# 50a40l scheme: 50k flat adam 1e-3 (no scheduler/warmup) -> 40k SW
-# lbfgs lr 0.1 (initial_train 90k/window, switch 50000). M 0 + equal
-# -> [0,0,0]: no nodes accepted, no experts/p3/ft — root-only windows.
-# Window w>=1 IC = window w-1's frozen prediction (ic weight 1k).
-# bc_max_derivative_order 1 (value + ux pairing, same as KdV) — knob
-# ADDED to losses/ks_loss.py 2026-09-03 (default 3 = old hardcoded C3
-# behavior, verified bit-identical); split_loss already reads the same
-# key generically. KS coefficients from base_config (alpha 6.25,
-# beta 0.390625, gamma 0.00152587890625, x in [0,2pi], t in [0,1], GT
-# cached 512x500). Per window: fresh datasets (20k residual, 256 ic /
-# 256 bc), full batch, weights 1k, patience 30, eval 1000, freeze_stop
-# 1001, f32, seed 42. ~270k epochs total, sequential.
-# ON HOLD below (commented): KdV tw root (launched 2026-09-03), ft
-# lr-grid on e3x35 experts (created 2026-09-03), joint no-p3 M18e3x30
-# (created 2026-09-01), e3x35 50adam-line p3 (launched 2026-09-01, RAN
-# -> ckpt 1.28814e-2), collar ft grid2 (launched 2026-09-01),
-# M12W3linzero e3x50 p3 (launched 2026-09-01), 8-cell ft grid (launched
-# 2026-08-31), M12W3linzero e3x40 p3 (launched 2026-08-31), p3-lbfgs
-# continuation (stopped), 30+30 full-flow (ran), e3x35 withsched p3
-# (ran), f64 ssb ft rerun (froze), stage-1 p3 pairs, complete-lbfgs
-# resume, f64 ssb ft grid, adam200k roots, ft ablation v2, f64 repro,
-# f64 p3 grid.
+# KS f64 TIME-WINDOW ROOT — 3 ROOT-ONLY WINDOWS, F64/SSBROYDEN RECIPE
+# (2026-09-03, main). ACTIVE: 1 run. The KS f32 tw root underperformed;
+# this swaps each window's root recipe to the marked f64-best one (KdV
+# run 20260827_200117: root 5x60 1.3126e-5): precision float64, base
+# [2,60x5,1] (~15k params/window, under the ~20k SSB dense ceiling),
+# RFF OFF, per window 41k = 1k flat adam 1e-3 -> 40k SSBroyden (global
+# ssbroyden lr 1.0 / tol_grad 1e-14 from base_config; lbfgs dict
+# dropped, unused), patience 10, freeze_stop 0. bc_max_derivative_order
+# 3 = full C3 seam pairing (the f64-line full-order philosophy; knob
+# added to ks_loss 2026-09-03, 3 = old hardcoded behavior). Windowing
+# unchanged: real marching, M 0 + equal -> [0,0,0] root-only windows,
+# window w>=1 IC = frozen w-1 prediction (ic weight 1k), 20k static
+# pool full batch, per-window f64 datasets (force-regenerated), GT
+# cached 512x500. FIRST KS-f64 run (recipe KdV-proven, KS untested);
+# ~123k epochs total sequential.
+# ON HOLD below (commented): KS f32 tw root (launched 2026-09-03,
+# weak), KdV tw root (launched 2026-09-03), ft lr-grid on e3x35
+# experts (created 2026-09-03), joint no-p3 M18e3x30 (created
+# 2026-09-01), e3x35 50adam-line p3 (launched 2026-09-01, RAN -> ckpt
+# 1.28814e-2), collar ft grid2 (launched 2026-09-01), M12W3linzero
+# e3x50 p3 (launched 2026-09-01), 8-cell ft grid (launched 2026-08-31),
+# M12W3linzero e3x40 p3 (launched 2026-08-31), p3-lbfgs continuation
+# (stopped), 30+30 full-flow (ran), e3x35 withsched p3 (ran), f64 ssb
+# ft rerun (froze), stage-1 p3 pairs, complete-lbfgs resume, f64 ssb
+# ft grid, adam200k roots, ft ablation v2, f64 repro, f64 p3 grid.
 # ==========================================================================
 base_config:
   activation: tanh
@@ -236,41 +234,75 @@ base_config:
     precondition_frequency: 10
     weight_decay: 0.0
   ssbroyden: {lr: 1.0, tolerance_grad: 1.0e-14}
-experiment_name: ks_f32_timewindow_root_w3_50a40l
+experiment_name: ks_f64_timewindow_root_w3_adam1k_ssb40k
 experiments:
 - adaptive_pinn:
     M_experts_num: 0
     fine_tune: {epochs: 0}
-    initial_train: {epochs: 90000, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
-      optimizer_1: adam, optimizer_2: lbfgs, optimizer_switch_epoch: 50000}
+    initial_train: {epochs: 41000, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
+      optimizer_1: adam, optimizer_2: ssbroyden, optimizer_switch_epoch: 1000}
     split_icbc: {bc_term_normalization: false, interface_term_normalization: true,
-      max_interface_derivative_order: 1}
-  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+      max_interface_derivative_order: null}
+  base_architecture: [2, 60, 60, 60, 60, 60, 1]
   batch_size: 99999
   epochs: 0
-  experts_architecture: [2, 30, 30, 30, 1]
-  freeze_stop_epochs: 1001
+  experts_architecture: [2, 24, 24, 24, 1]
+  freeze_stop_epochs: 0
   ks:
-    bc_max_derivative_order: 1
-    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+    bc_max_derivative_order: 3
+    fourier_features: {dim: 10, enabled: false, periodic: false, scale: 2.0}
     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
     time_marching: {debug_windows: null, enabled: true, freeze_previous_windows: true,
       last_window_checkpoint: null, m_distribution: equal, num_windows: 3,
       only_for_tree_structure: false}
-  lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
-    tolerance_change: 0.0, tolerance_grad: 0.0}
   lr: 0.001
   lr_schedule: none
   lr_warmup_steps: 0
   model: AToELeaves
-  name: ks_root_tw3_f32_6x128_50a40l
+  name: ks_root_tw3_f64_5x60_1a40ssb
   optimizer_1: adam
-  optimizer_2: lbfgs
-  optimizer_switch_epoch: 50000
-  patience_evals: 30
-  precision: float32
+  optimizer_2: ssbroyden
+  optimizer_switch_epoch: 1000
+  patience_evals: 10
+  precision: float64
   problem: ks
   sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+# ---- for memory (2026-09-03): KS f32 time-window root (launched 2026-09-03, weak) ----
+# experiment_name: ks_f32_timewindow_root_w3_50a40l
+# experiments:
+# - adaptive_pinn:
+#     M_experts_num: 0
+#     fine_tune: {epochs: 0}
+#     initial_train: {epochs: 90000, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
+#       optimizer_1: adam, optimizer_2: lbfgs, optimizer_switch_epoch: 50000}
+#     split_icbc: {bc_term_normalization: false, interface_term_normalization: true,
+#       max_interface_derivative_order: 1}
+#   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+#   batch_size: 99999
+#   epochs: 0
+#   experts_architecture: [2, 30, 30, 30, 1]
+#   freeze_stop_epochs: 1001
+#   ks:
+#     bc_max_derivative_order: 1
+#     fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+#     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
+#     time_marching: {debug_windows: null, enabled: true, freeze_previous_windows: true,
+#       last_window_checkpoint: null, m_distribution: equal, num_windows: 3,
+#       only_for_tree_structure: false}
+#   lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
+#     tolerance_change: 0.0, tolerance_grad: 0.0}
+#   lr: 0.001
+#   lr_schedule: none
+#   lr_warmup_steps: 0
+#   model: AToELeaves
+#   name: ks_root_tw3_f32_6x128_50a40l
+#   optimizer_1: adam
+#   optimizer_2: lbfgs
+#   optimizer_switch_epoch: 50000
+#   patience_evals: 30
+#   precision: float32
+#   problem: ks
+#   sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
 # ---- for memory (2026-09-03): KdV time-window root (launched 2026-09-03) ----
 # experiment_name: kdv_f32_timewindow_root_w3_50a40l
 # experiments:
