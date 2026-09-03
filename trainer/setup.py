@@ -695,6 +695,12 @@ def _load_pretrained_base(model: nn.Module, ckpt_path: str, cfg: Dict) -> None:
     if not p.exists():
         raise FileNotFoundError(
             f"pretrained_base_checkpoint not found: {ckpt_path}")
+    # A DIRECTORY means a collected window-segment folder (manifest.json +
+    # window_{i}_best_model_<segment>.pt from a time-marching run): the base
+    # becomes a frozen stitched WindowedBase instead of a single net.
+    if p.is_dir():
+        _load_pretrained_windowed_base(model, p, cfg)
+        return
     # Converted root checkpoints are plain tensor dicts (safe load); legacy
     # checkpoints with pickled config/metrics need weights_only=False.
     try:
@@ -752,6 +758,86 @@ def _load_pretrained_base(model: nn.Module, ckpt_path: str, cfg: Dict) -> None:
         logger.info(f"  [PretrainedBase] Base architecture: {list(model.base_architecture)}; "
               f"experts architecture unchanged: {list(model.experts_architecture)}")
     # Re-sync AToE's batched container so the forward pass sees the loaded base.
+    if hasattr(model, 'batched_models'):
+        model.batched_models.sync_from_models(model.base_model, model.experts)
+
+
+def _load_pretrained_windowed_base(model: nn.Module, folder, cfg: Dict) -> None:
+    """Install a stitched time-window root as ``model.base_model``.
+
+    ``folder`` is a collected window-segment directory written by
+    ``train_with_time_marching`` (manifest.json + one
+    ``window_{i}_best_model_<segment>.pt`` per window). Every window must hold
+    the SAME base architecture, matching the run's ``base_architecture``.
+    Routing: window i serves t up to AND INCLUDING its t_end (at a seam the
+    earlier window predicts — it trained to that endpoint; the next window
+    only ever saw its prediction there as an IC).
+    """
+    import copy as _copy
+    import json as _json
+    from models.windowed_base import WindowedBase
+
+    manifest_path = folder / 'manifest.json'
+    if not manifest_path.exists():
+        raise FileNotFoundError(
+            f"pretrained_base_checkpoint is a directory but has no "
+            f"manifest.json: {folder}")
+    with open(manifest_path, encoding='utf-8') as f:
+        manifest = _json.load(f)
+    if manifest.get('problem') != cfg.get('problem'):
+        raise ValueError(
+            f"[WindowedBase] manifest problem '{manifest.get('problem')}' != "
+            f"run problem '{cfg.get('problem')}' ({folder})")
+    _dom = manifest.get('temporal_domain')
+    _cfg_dom = cfg.get(cfg['problem'], {}).get('temporal_domain')
+    if _dom is not None and _cfg_dom is not None and list(_dom) != list(_cfg_dom):
+        raise ValueError(
+            f"[WindowedBase] manifest temporal_domain {_dom} != run "
+            f"temporal_domain {_cfg_dom} ({folder})")
+
+    windows = sorted(manifest['windows'], key=lambda w: w['idx'])
+    nets, t_ends = [], []
+    for w in windows:
+        fpath = folder / w['file']
+        if not fpath.exists():
+            raise FileNotFoundError(
+                f"[WindowedBase] manifest window {w['idx']} file missing: "
+                f"{fpath}")
+        try:
+            ckpt = torch.load(fpath, map_location='cpu', weights_only=True)
+        except Exception:
+            ckpt = torch.load(fpath, map_location='cpu', weights_only=False)
+        adaptive_state = ckpt.get('adaptive_state') if isinstance(ckpt, dict) else None
+        if adaptive_state and 'base_model' in adaptive_state:
+            base_sd = adaptive_state['base_model']
+            saved_arch = adaptive_state.get('base_architecture')
+        elif isinstance(ckpt, dict) and 'model_state_dict' in ckpt:
+            base_sd = ckpt['model_state_dict']
+            saved_arch = (ckpt.get('config') or {}).get('base_architecture')
+        else:
+            raise ValueError(
+                f"[WindowedBase] no base weights in window checkpoint {fpath}")
+        if not saved_arch:
+            saved_arch = _infer_base_arch_from_state_dict(base_sd)
+        if list(saved_arch) != list(model.base_architecture):
+            raise ValueError(
+                f"[WindowedBase] ARCHITECTURE MISMATCH — window {w['idx']} "
+                f"({fpath}) holds base architecture {list(saved_arch)} but "
+                f"the config requests {list(model.base_architecture)}.")
+        # The run's base was built with the correct arch/RFF config, so each
+        # window net is a weight-loaded copy of it.
+        net = _copy.deepcopy(model.base_model)
+        net.load_state_dict(base_sd)
+        nets.append(net)
+        t_ends.append(float(w['t_end']))
+
+    ref = next(model.base_model.parameters())
+    wb = WindowedBase(nets, t_ends).to(device=ref.device, dtype=ref.dtype)
+    model.base_model = wb
+    n_params = sum(q.numel() for q in wb.parameters())
+    logger.info(f"  [PretrainedBase] Loaded WINDOWED base from {folder}: "
+                f"{len(nets)} windows, t_ends={t_ends}, "
+                f"{n_params} params total ({wb})")
     if hasattr(model, 'batched_models'):
         model.batched_models.sync_from_models(model.base_model, model.experts)
 

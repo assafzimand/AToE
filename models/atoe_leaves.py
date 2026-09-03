@@ -669,10 +669,29 @@ class AToELeaves(nn.Module):
         saved_adaptive = state_dict.get('adaptive_config', {})
         saved_expert_type = saved_adaptive.get('expert_type', 'mlp')
 
-        if saved_base_arch is None:
-            saved_base_arch = self._infer_architecture_from_state_dict(state_dict['base_model'])
+        # A windowed base (stitched time-window root) saves its state dict
+        # with 'windows.{i}.' keys — rebuild the WindowedBase wrapper instead
+        # of loading into a single net.
+        _base_sd = state_dict['base_model']
+        _windowed_base = any(k.startswith('windows.') for k in _base_sd)
 
-        if saved_base_arch != self.base_architecture:
+        if saved_base_arch is None:
+            if _windowed_base:
+                raise ValueError(
+                    "Windowed base checkpoint without stored "
+                    "base_architecture — cannot rebuild WindowedBase.")
+            saved_base_arch = self._infer_architecture_from_state_dict(_base_sd)
+
+        if _windowed_base:
+            from models.windowed_base import WindowedBase
+            device = next(self.base_model.parameters()).device
+            logger.info(f"  Rebuilding WINDOWED base ({saved_base_arch}) "
+                        f"from checkpoint")
+            self.base_model = WindowedBase.from_state_dict(
+                _base_sd, saved_base_arch, saved_activation, self.config,
+                expert_type=saved_expert_type).to(device)
+            self.base_architecture = list(saved_base_arch)
+        elif saved_base_arch != self.base_architecture:
             logger.info(f"  Recreating base model: {self.base_architecture} -> {saved_base_arch}")
             device = next(self.base_model.parameters()).device
             self.base_model = create_network(
@@ -686,7 +705,8 @@ class AToELeaves(nn.Module):
         if saved_experts_arch_cfg is not None:
             self.experts_architecture = list(saved_experts_arch_cfg)
 
-        self.base_model.load_state_dict(state_dict['base_model'])
+        if not _windowed_base:
+            self.base_model.load_state_dict(state_dict['base_model'])
 
         self.experts = nn.ModuleList()
         self.regions = []
