@@ -4,7 +4,9 @@
 # this swaps each window's root recipe to the marked f64-best one (KdV
 # run 20260827_200117: root 5x60 1.3126e-5): precision float64, base
 # [2,60x5,1] (~15k params/window, under the ~20k SSB dense ceiling),
-# RFF OFF, per window 41k = 1k flat adam 1e-3 -> 40k SSBroyden (global
+# RFF ON dim auto / scale 2 (DELIBERATE DEVIATION: the f64 reference
+# ran RFF off; auto/2 is the f32-line embedding — first f64+RFF combo),
+# per window 41k = 1k flat adam 1e-3 -> 40k SSBroyden (global
 # ssbroyden lr 1.0 / tol_grad 1e-14 from base_config; lbfgs dict
 # dropped, unused), patience 10, freeze_stop 0. bc_max_derivative_order
 # 3 = full C3 seam pairing (the f64-line full-order philosophy; knob
@@ -250,7 +252,7 @@ experiments:
   freeze_stop_epochs: 0
   ks:
     bc_max_derivative_order: 3
-    fourier_features: {dim: 10, enabled: false, periodic: false, scale: 2.0}
+    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
     time_marching: {debug_windows: null, enabled: true, freeze_previous_windows: true,
       last_window_checkpoint: null, m_distribution: equal, num_windows: 3,
