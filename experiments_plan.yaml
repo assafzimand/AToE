@@ -1,35 +1,32 @@
 # ==========================================================================
-# KDV f32 PHASE-3 ON THE WINDOWED ROOT — M18 W3-LIN, EXPERTS 3x50
-# (2026-09-03, main). ACTIVE: 1 run = the current-best p3 recipe
-# (kdv_p3_f32_M18W3lin_e3x35_50a40l, 20260901_140146, 1.28814e-2) with
-# two changes: (1) base = the 3-WINDOW STITCHED ROOT loaded from the
-# collected folder kdv_3_windowed_root-6x128RFF-50adam40lbfgs (NEW
-# WindowedBase plumbing, 2026-09-03: models/windowed_base.py + dir
-# branch in setup._load_pretrained_base + reload branch in
-# load_state_dict_extended; seam convention = earlier window owns the
-# exact boundary t; measured stitched rel-L2 5.116e-3 full-domain =
-# 2.6x better than the single champion root, per-window 9.9e-4 /
-# 3.7e-3 / 8.0e-3, seam jumps ~3e-4); (2) experts widened to
-# [2,50,50,50,1]. Rest identical: M18 W3-linear structure-only tree
-# (tiles aligned to the root's seams at t=1/3, 2/3), phase 3 = 50k
-# FLAT adam 1e-3 -> 40k SW lbfgs 0.1 (90k budget, switch 50000), ft 0,
-# RFF dim auto, full batch (adam fresh 20k/epoch, lbfgs static 20k),
-# min 2048/expert, bc + iface max order 1, INTERFACE norm ON / bc norm
-# OFF, weights 1k, patience 30, eval 1000, freeze_stop 1001, f32,
-# seed 42. Interface targets at seam-coincident interfaces come from
-# the earlier window (frozen root = the stitched WindowedBase).
-# ON HOLD below (commented): KS f64 tw root (created 2026-09-03),
-# KS f32 tw root (launched 2026-09-03, weak), KdV tw root (launched
-# 2026-09-03, RAN -> stitched 5.116e-3), ft lr-grid on e3x35 experts
-# (RAN 2026-09-03 -> all froze, blend 1.28590e-2 = marked best), joint
-# no-p3 M18e3x30 (created 2026-09-01), e3x35 50adam-line p3 (RAN ->
-# ckpt 1.28814e-2), collar ft grid2 (launched 2026-09-01),
-# M12W3linzero e3x50 p3 (launched 2026-09-01), 8-cell ft grid
-# (launched 2026-08-31), M12W3linzero e3x40 p3 (launched 2026-08-31),
-# p3-lbfgs continuation (stopped), 30+30 full-flow (ran), e3x35
-# withsched p3 (ran), f64 ssb ft rerun (froze), stage-1 p3 pairs,
-# complete-lbfgs resume, f64 ssb ft grid, adam200k roots, ft ablation
-# v2, f64 repro, f64 p3 grid.
+# KS f32 TIME-WINDOW ROOT — 5 SEQUENTIAL ROOT-ONLY WINDOWS (REAL MARCHING)
+# (2026-09-03, main). ACTIVE: 1 run = the KS f32 w3 tw-root batch
+# (ks_f32_timewindow_root_w3_50a40l, launched 2026-09-03, weak) with
+# num_windows 3 -> 5; everything else identical. Real time marching
+# trains a FRESH root per window (6x128 + RFF auto, ~87k params each,
+# 5x total) with the 50a40l scheme: 50k flat adam 1e-3 (no scheduler/
+# warmup) -> 40k SW lbfgs lr 0.1 (initial_train 90k/window, switch
+# 50000). M 0 + equal -> [0,0,0,0,0]: root-only windows, no experts/
+# p3/ft. Window w>=1 IC = window w-1's frozen prediction (ic weight
+# 1k). bc_max_derivative_order 1 (value + ux pairing; ks_loss knob).
+# Per window: fresh f32 datasets (20k residual in the 0.2-wide window,
+# 256 ic / 256 bc), full batch, weights 1k, patience 30, eval 1000,
+# freeze_stop 1001, f32, seed 42. ~450k epochs total sequential
+# (~5x a single root's wall-clock). Rationale: KdV w3 stitched root
+# hit 5.116e-3 (2.6x better than its single root); KS w3 was weak —
+# narrower windows to cut per-window difficulty further.
+# ON HOLD below (commented): KdV windowed-root p3 e3x50 (created
+# 2026-09-03), KS f64 tw root (created 2026-09-03), KS f32 tw root w3
+# (launched 2026-09-03, weak), KdV tw root (RAN -> stitched 5.116e-3),
+# ft lr-grid on e3x35 experts (RAN -> all froze, blend 1.28590e-2 =
+# marked best), joint no-p3 M18e3x30 (created 2026-09-01), e3x35
+# 50adam-line p3 (RAN -> ckpt 1.28814e-2), collar ft grid2 (launched
+# 2026-09-01), M12W3linzero e3x50 p3 (launched 2026-09-01), 8-cell ft
+# grid (launched 2026-08-31), M12W3linzero e3x40 p3 (launched
+# 2026-08-31), p3-lbfgs continuation (stopped), 30+30 full-flow (ran),
+# e3x35 withsched p3 (ran), f64 ssb ft rerun (froze), stage-1 p3
+# pairs, complete-lbfgs resume, f64 ssb ft grid, adam200k roots, ft
+# ablation v2, f64 repro, f64 p3 grid.
 # ==========================================================================
 base_config:
   activation: tanh
@@ -240,10 +237,10 @@ base_config:
     precondition_frequency: 10
     weight_decay: 0.0
   ssbroyden: {lr: 1.0, tolerance_grad: 1.0e-14}
-experiment_name: kdv_f32_p3_windowedroot_M18W3lin_e3x50
+experiment_name: ks_f32_timewindow_root_w5_50a40l
 experiments:
 - adaptive_pinn:
-    M_experts_num: 18
+    M_experts_num: 0
     fine_tune: {epochs: 0}
     initial_train: {epochs: 90000, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
       optimizer_1: adam, optimizer_2: lbfgs, optimizer_switch_epoch: 50000}
@@ -251,30 +248,66 @@ experiments:
       max_interface_derivative_order: 1}
   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
   batch_size: 99999
-  epochs: 90000
-  experts_architecture: [2, 50, 50, 50, 1]
+  epochs: 0
+  experts_architecture: [2, 30, 30, 30, 1]
   freeze_stop_epochs: 1001
-  kdv:
+  ks:
     bc_max_derivative_order: 1
     fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
-    pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_3_windowed_root-6x128RFF-50adam40lbfgs
-    time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
-      m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
+    time_marching: {debug_windows: null, enabled: true, freeze_previous_windows: true,
+      last_window_checkpoint: null, m_distribution: equal, num_windows: 5,
+      only_for_tree_structure: false}
   lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
     tolerance_change: 0.0, tolerance_grad: 0.0}
   lr: 0.001
   lr_schedule: none
   lr_warmup_steps: 0
   model: AToELeaves
-  name: kdv_p3_f32_wroot3_M18W3lin_e3x50_50a40l
+  name: ks_root_tw5_f32_6x128_50a40l
   optimizer_1: adam
   optimizer_2: lbfgs
   optimizer_switch_epoch: 50000
   patience_evals: 30
   precision: float32
-  problem: kdv
-  sampling: {min_points_per_expert: 2048, n_residual_train: 20000, resample_every_epochs: 99999}
+  problem: ks
+  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+# ---- for memory (2026-09-03): KdV windowed-root p3 e3x50 (created 2026-09-03) ----
+# experiment_name: kdv_f32_p3_windowedroot_M18W3lin_e3x50
+# experiments:
+# - adaptive_pinn:
+#     M_experts_num: 18
+#     fine_tune: {epochs: 0}
+#     initial_train: {epochs: 90000, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
+#       optimizer_1: adam, optimizer_2: lbfgs, optimizer_switch_epoch: 50000}
+#     split_icbc: {bc_term_normalization: false, interface_term_normalization: true,
+#       max_interface_derivative_order: 1}
+#   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+#   batch_size: 99999
+#   epochs: 90000
+#   experts_architecture: [2, 50, 50, 50, 1]
+#   freeze_stop_epochs: 1001
+#   kdv:
+#     bc_max_derivative_order: 1
+#     fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+#     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
+#     pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_3_windowed_root-6x128RFF-50adam40lbfgs
+#     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
+#       m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
+#   lbfgs: {history_size: 100, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
+#     tolerance_change: 0.0, tolerance_grad: 0.0}
+#   lr: 0.001
+#   lr_schedule: none
+#   lr_warmup_steps: 0
+#   model: AToELeaves
+#   name: kdv_p3_f32_wroot3_M18W3lin_e3x50_50a40l
+#   optimizer_1: adam
+#   optimizer_2: lbfgs
+#   optimizer_switch_epoch: 50000
+#   patience_evals: 30
+#   precision: float32
+#   problem: kdv
+#   sampling: {min_points_per_expert: 2048, n_residual_train: 20000, resample_every_epochs: 99999}
 # ---- for memory (2026-09-03): KS f64 time-window root (created 2026-09-03) ----
 # experiment_name: ks_f64_timewindow_root_w3_adam1k_ssb40k
 # experiments:
