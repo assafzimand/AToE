@@ -195,13 +195,25 @@ def load_run(run_dir: Path):
 
 
 def parse_run_arg(arg: str):
-    """'<run_dir>' or '<run_dir>@<segment>' -- the @segment suffix truncates
-    that run to just one of its segments (e.g. a run's metrics.json may hold
-    both 'root' and 'phase3'; @root keeps only the root portion, dropping
-    the rest, so it can be spliced against a DIFFERENT run's phase3/fine_tune)."""
+    """'<run_dir>' or '<run_dir>@<segment>' or '<run_dir>@<=N' or
+    '<run_dir>@continue' -- @segment truncates that run to just one of its
+    named segments (e.g. a run's metrics.json may hold both 'root' and
+    'phase3'; @root keeps only the root portion, dropping the rest, so it
+    can be spliced against a DIFFERENT run's phase3/fine_tune). @<=N
+    truncates to epochs <= N instead, for splicing mid-segment -- e.g.
+    dropping a trailing optimizer excursion that diverged from the
+    checkpoint actually used downstream. @continue marks this run as a
+    continuation of the PREVIOUS run's segment (e.g. an LBFGS resume
+    seeded from a mid-segment checkpoint of the run before it): its own
+    segment-start marker is suppressed and drawn as an optimizer-switch
+    line instead, so the two runs read as one unbroken segment."""
     if '@' in arg:
-        path_str, segment = arg.rsplit('@', 1)
-        return Path(path_str), segment
+        path_str, spec = arg.rsplit('@', 1)
+        if spec.startswith('<=') and spec[2:].isdigit():
+            return Path(path_str), ('max_epoch', int(spec[2:]))
+        if spec == 'continue':
+            return Path(path_str), ('continue',)
+        return Path(path_str), spec
     return Path(arg), None
 
 
@@ -246,6 +258,43 @@ def truncate_to_segment(metrics, segment):
     return out
 
 
+def truncate_to_max_epoch(metrics, max_epoch):
+    """Keep only epochs <= max_epoch from a run's metrics (splicing mid-
+    segment, e.g. dropping a trailing optimizer excursion past the epoch
+    whose checkpoint was actually used to seed a downstream run)."""
+    lo, hi = 1, max_epoch
+
+    def _filter(epochs, *value_lists):
+        idx = [i for i, e in enumerate(epochs) if lo <= e <= hi]
+        return ([epochs[i] for i in idx],
+                *([vl[i] for i in idx] for vl in value_lists))
+
+    out = dict(metrics)
+    out['train_loss_epochs'], out['train_loss'] = _filter(
+        metrics['train_loss_epochs'], metrics['train_loss'])
+
+    inf_norm = metrics.get('inf_norm') or []
+    if inf_norm and len(inf_norm) == len(metrics['epochs']):
+        out['epochs'], out['rel_l2'], out['inf_norm'] = _filter(
+            metrics['epochs'], metrics['rel_l2'], inf_norm)
+    else:
+        out['epochs'], out['rel_l2'] = _filter(metrics['epochs'], metrics['rel_l2'])
+        out['inf_norm'] = []
+
+    lc = metrics.get('loss_components', {})
+    if lc.get('epochs'):
+        term_keys = [k for k in lc if k != 'epochs']
+        lc_ep, *term_vals = _filter(lc['epochs'], *[lc[k] for k in term_keys])
+        out['loss_components'] = {'epochs': lc_ep, **dict(zip(term_keys, term_vals))}
+
+    out['segment_events'] = [e for e in metrics.get('segment_events', []) if e['start_epoch'] <= hi]
+    out['segment_reconcile_events'] = [
+        e for e in metrics.get('segment_reconcile_events', []) if e.get('end_epoch', hi) <= hi]
+    out['optimizer_events'] = [
+        e for e in metrics.get('optimizer_events', []) if lo <= e['epoch'] <= hi]
+    return out
+
+
 def concat_runs(run_specs):
     """Stitch metrics.json from several runs into one continuous timeline.
 
@@ -259,19 +308,25 @@ def concat_runs(run_specs):
     pde = None
     for run_dir, segment in run_specs:
         metrics, cfg = load_run(run_dir)
+        is_continuation = False
         if segment is not None:
-            metrics = truncate_to_segment(metrics, segment)
+            if isinstance(segment, tuple) and segment[0] == 'max_epoch':
+                metrics = truncate_to_max_epoch(metrics, segment[1])
+            elif isinstance(segment, tuple) and segment[0] == 'continue':
+                is_continuation = True
+            else:
+                metrics = truncate_to_segment(metrics, segment)
         if pde is None:
             pde = cfg['problem']
         elif cfg['problem'] != pde:
             raise ValueError(
                 f"PDE mismatch: {run_dir} is '{cfg['problem']}', expected '{pde}'")
         local_final = max(metrics['train_loss_epochs']) if metrics['train_loss_epochs'] else 0
-        runs_data.append((run_dir, metrics, offset, local_final))
+        runs_data.append((run_dir, metrics, offset, local_final, is_continuation))
         offset += local_final
 
     all_terms = set()
-    for _, metrics, _, _ in runs_data:
+    for _, metrics, _, _, _ in runs_data:
         lc = metrics.get('loss_components', {})
         all_terms.update(k for k in lc if k != 'epochs')
 
@@ -283,7 +338,7 @@ def concat_runs(run_specs):
     optimizer_switch_epochs = []
     stage_tags = []
 
-    for run_dir, metrics, off, local_final in runs_data:
+    for run_dir, metrics, off, local_final, is_continuation in runs_data:
         train_loss_epochs += [e + off for e in metrics['train_loss_epochs']]
         train_loss += metrics['train_loss']
         eval_epochs += [e + off for e in metrics['epochs']]
@@ -299,8 +354,14 @@ def concat_runs(run_specs):
                 vals = [float('nan')] * len(lc_ep)
             lc_terms[term] += vals
 
-        for ev in metrics.get('segment_events', []):
-            segment_markers.append((ev['start_epoch'] + off, ev['segment']))
+        segs = metrics.get('segment_events', [])
+        if is_continuation and segs:
+            optimizer_switch_epochs.append(segs[0]['start_epoch'] + off)
+            for ev in segs[1:]:
+                segment_markers.append((ev['start_epoch'] + off, ev['segment']))
+        else:
+            for ev in segs:
+                segment_markers.append((ev['start_epoch'] + off, ev['segment']))
         for ev in metrics.get('optimizer_events', []):
             optimizer_switch_epochs.append(ev['epoch'] + off)
 
