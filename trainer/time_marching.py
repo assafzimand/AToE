@@ -794,8 +794,26 @@ def train_with_time_marching(
         precision = window_cfg.get('precision', 'float32')
         if precision == 'float64':
             window_model = window_model.double()
-        
+
         logger.info(f"  {type(window_model).__name__} created")
+
+        # Optional warm start (time_marching.warm_start_from_previous):
+        # initialize this window's BASE from the previous window's trained
+        # base — the literature-standard transfer init for sequential
+        # windows. The IC override already supplies the previous prediction
+        # as DATA; this additionally starts the optimizer near it. Base
+        # weights only (experts, if any, still spawn/train normally).
+        if (tm_cfg.get('warm_start_from_previous', False)
+                and prev_model is not None):
+            _prev_base = getattr(prev_model, 'base_model', prev_model)
+            _new_base = getattr(window_model, 'base_model', window_model)
+            try:
+                _new_base.load_state_dict(_prev_base.state_dict())
+                logger.info(f"  [WarmStart] Window {window.idx} base "
+                            f"initialized from the previous window's weights.")
+            except Exception as _ws_err:  # noqa: BLE001
+                logger.warning(f"  [WarmStart] SKIPPED — incompatible base "
+                               f"state dict: {_ws_err}")
         
         # 4. Build loss function for this window
         loss_module = importlib.import_module(f"losses.{problem}_loss")
