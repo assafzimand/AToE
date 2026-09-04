@@ -57,7 +57,7 @@ def advance_causal_schedule(causal_state: Optional[Dict]) -> bool:
     Call this once per epoch from the trainer. Returns True
     if epsilon was advanced, False otherwise.
     """
-    if causal_state is None:
+    if causal_state is None or not causal_state.get('enabled', True):
         return False
     idx = causal_state['schedule_idx']
     schedule = causal_state['schedule']
@@ -91,7 +91,10 @@ def compute_causal_residual(
         causal_state: Causal training state dict (or None if disabled)
         update_state: If False, don't update causal_state (use during eval)
     """
-    if causal_state is None:
+    # 'enabled' can be flipped off mid-run (the trainer disables causal
+    # weighting at the quasi-Newton switch: strong Wolfe needs an objective
+    # whose weights don't shift under it) — plain MSE from then on.
+    if causal_state is None or not causal_state.get('enabled', True):
         return torch.mean(residual_squared)
     return _apply_causal_weights(
         residual_squared,

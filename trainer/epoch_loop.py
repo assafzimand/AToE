@@ -1081,6 +1081,20 @@ def _train_segment(
                                    for k, v in lra_weights.weights.items())
                 logger.info(f"  [LRA] FROZEN for the {current_optimizer_name} "
                             f"phase at: {_w_str}")
+            # Causal weighting is an Adam-phase curriculum for the same
+            # reason: its weights are a function of the current residuals, so
+            # they shift under the line search. Disable at the switch — a
+            # completed ladder has weights ~1 anyway; an incomplete one hands
+            # the quasi-Newton phase the clean plain-MSE residual.
+            _cs = getattr(loss_fn, 'causal_state', None)
+            if _cs is not None and _cs.get('enabled', True):
+                _cs['enabled'] = False
+                logger.info(
+                    f"  [Causal] DISABLED for the {current_optimizer_name} "
+                    f"phase (ladder stage {_cs['schedule_idx'] + 1}/"
+                    f"{len(_cs['schedule'])}, tol={_cs['tol']:.2f}, "
+                    f"min_w={_cs['min_weight']:.4f}) — residual reverts to "
+                    f"plain MSE.")
             metrics['optimizer_events'].append({
                 'epoch': epoch,
                 'from': _prev_opt,
