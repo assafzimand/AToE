@@ -1,22 +1,26 @@
 # ==========================================================================
-# KDV f32 WINDOWED-ROOT P3 — 50A40L REPEAT WITH HISTORY 1000 (SINGLE KNOB)
-# (2026-09-04, main). ACTIVE: 1 run = the EXACT config of the wroot p3
-# run kdv_p3_f32_wroot3_M18W3lin_e3x50_50a40l (20260903_100222 in
-# kdv_f32_p3_windowedroot_M18W3lin_e3x50_20260903_100219: best rel-L2
-# 6.167e-3 @ ep83k, froze 83,504 — NEW BEST KdV f32, 2.1x below the
-# e3x35 chain 1.286e-2, +20% vs its stitched root 5.116e-3) with ONE
-# change: lbfgs.history_size 100 -> 1000 (long-memory; clean h-ablation
-# on a proven config; tolerance_grad stays 0.0 as in the run). Base =
-# 3-window stitched root folder via WindowedBase, M18 W3-linear
-# structure-only (tiles seam-aligned t=1/3, 2/3), experts 3x50, p3 =
-# 90k budget: 50k FLAT adam 1e-3 -> 40k SW lbfgs lr 0.1 (switch
-# 50000), ft 0, RFF dim auto, full batch (adam fresh 20k/epoch, lbfgs
-# static 20k), min 2048/expert, bc + iface max order 1, INTERFACE norm
-# ON / bc norm OFF, weights 1k, patience 30, eval 1000, freeze_stop
-# 1001, f32, seed 42.
-# ON HOLD below (commented): wroot p3 20a30l-h1000 variant (created
-# 2026-09-03), KS w5 T=0.5 f32/f64 pair (launched 2026-09-03), KdV
-# windowed-root p3 50a40l (RAN 20260903_100222 -> 6.167e-3), KS f64 tw
+# KS f32 W5 T=0.5 — COMPLETE THE MISSING WINDOW 4 (DEBUG-WINDOW RESUME)
+# (2026-09-04, main). ACTIVE: 1 run. The launched f32 pair run
+# (20260903_133241, cell ks_root_tw5_f32_20a30lbfgs_h1000_lr01)
+# stopped before window 4; windows 0-3 are saved in the _partial
+# mirror (per-window best rel-L2: w0 5.55e-4 (!), w1 5.91e-3, w2
+# 6.29e-2, w3 3.37e-1 — recipe excellent per window, IC-handoff chain
+# degrades ~10x/window). This cell = the EXACT same config with
+# time_marching.debug_windows [4] + last_window_checkpoint =
+# roots_checkpoints/single_precision/ks_tw5_T05_f32_20a30lh1000_
+# window3_root.pt (copied from the partial's checkpoints/root/
+# window_3_best_model_root.pt) so window 4 takes its IC from frozen
+# window 3. Debug-subset mode: NO combined model / full-domain rel-L2
+# (final metrics + plots scripted later by merging the partial's
+# checkpoints/root with this run's window_4 file + manifest edit).
+# Scheme per window: 20k FLAT adam 1e-3 -> 30k LBFGS h1000 / lr 0.1 /
+# SW / tol_grad 1e-7; 6x128 + RFF auto, bc order 1, weights 1k, 20k
+# static pool full batch, patience 30, eval 1000, freeze_stop 1001,
+# f32, seed 42, temporal_domain [0, 0.5], 5 windows equal M 0.
+# ON HOLD below (commented): wroot p3 50a40l-h1000 repeat (created
+# 2026-09-04), wroot p3 20a30l-h1000 variant (created 2026-09-03), KS
+# w5 T=0.5 f32/f64 pair (launched 2026-09-03, f32 RAN windows 0-3),
+# KdV windowed-root p3 50a40l (RAN -> 6.167e-3 NEW BEST), KS f64 tw
 # root 41k-variant (created 2026-09-03), KS f32 tw root w3 (launched
 # 2026-09-03, weak), KdV tw root (RAN -> stitched 5.116e-3), ft
 # lr-grid on e3x35 experts (RAN -> blend 1.28590e-2), joint no-p3
@@ -238,41 +242,78 @@ base_config:
     precondition_frequency: 10
     weight_decay: 0.0
   ssbroyden: {lr: 1.0, tolerance_grad: 1.0e-14}
-experiment_name: kdv_f32_p3_windowedroot_M18W3lin_e3x50_50a40l_h1000
+experiment_name: ks_f32_tw5_T05_complete_window4
 experiments:
 - adaptive_pinn:
-    M_experts_num: 18
+    M_experts_num: 0
     fine_tune: {epochs: 0}
-    initial_train: {epochs: 90000, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
-      optimizer_1: adam, optimizer_2: lbfgs, optimizer_switch_epoch: 50000}
+    initial_train: {epochs: 50000, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
+      optimizer_1: adam, optimizer_2: lbfgs, optimizer_switch_epoch: 20000}
     split_icbc: {bc_term_normalization: false, interface_term_normalization: true,
       max_interface_derivative_order: 1}
   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
   batch_size: 99999
-  epochs: 90000
-  experts_architecture: [2, 50, 50, 50, 1]
+  epochs: 0
+  experts_architecture: [2, 30, 30, 30, 1]
   freeze_stop_epochs: 1001
-  kdv:
+  ks:
     bc_max_derivative_order: 1
     fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
-    pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_3_windowed_root-6x128RFF-50adam40lbfgs
-    time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
-      m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
+    temporal_domain: [0.0, 0.5]
+    time_marching: {debug_windows: [4], enabled: true, freeze_previous_windows: true,
+      last_window_checkpoint: roots_checkpoints/single_precision/ks_tw5_T05_f32_20a30lh1000_window3_root.pt,
+      m_distribution: equal, num_windows: 5, only_for_tree_structure: false}
   lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
-    tolerance_change: 0.0, tolerance_grad: 0.0}
+    tolerance_change: 0.0, tolerance_grad: 1.0e-07}
   lr: 0.001
   lr_schedule: none
   lr_warmup_steps: 0
   model: AToELeaves
-  name: kdv_p3_f32_wroot3_M18W3lin_e3x50_50a40l_h1000
+  name: ks_root_tw5_f32_20a30lh1000_w4only
   optimizer_1: adam
   optimizer_2: lbfgs
-  optimizer_switch_epoch: 50000
+  optimizer_switch_epoch: 20000
   patience_evals: 30
   precision: float32
-  problem: kdv
-  sampling: {min_points_per_expert: 2048, n_residual_train: 20000, resample_every_epochs: 99999}
+  problem: ks
+  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+# ---- for memory (2026-09-04): wroot p3 50a40l-h1000 repeat (created 2026-09-04) ----
+# experiment_name: kdv_f32_p3_windowedroot_M18W3lin_e3x50_50a40l_h1000
+# experiments:
+# - adaptive_pinn:
+#     M_experts_num: 18
+#     fine_tune: {epochs: 0}
+#     initial_train: {epochs: 90000, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
+#       optimizer_1: adam, optimizer_2: lbfgs, optimizer_switch_epoch: 50000}
+#     split_icbc: {bc_term_normalization: false, interface_term_normalization: true,
+#       max_interface_derivative_order: 1}
+#   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+#   batch_size: 99999
+#   epochs: 90000
+#   experts_architecture: [2, 50, 50, 50, 1]
+#   freeze_stop_epochs: 1001
+#   kdv:
+#     bc_max_derivative_order: 1
+#     fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+#     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
+#     pretrained_base_checkpoint: roots_checkpoints/single_precision/kdv_3_windowed_root-6x128RFF-50adam40lbfgs
+#     time_marching: {debug_windows: null, enabled: true, last_window_checkpoint: null,
+#       m_distribution: linear, num_windows: 3, only_for_tree_structure: true}
+#   lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
+#     tolerance_change: 0.0, tolerance_grad: 0.0}
+#   lr: 0.001
+#   lr_schedule: none
+#   lr_warmup_steps: 0
+#   model: AToELeaves
+#   name: kdv_p3_f32_wroot3_M18W3lin_e3x50_50a40l_h1000
+#   optimizer_1: adam
+#   optimizer_2: lbfgs
+#   optimizer_switch_epoch: 50000
+#   patience_evals: 30
+#   precision: float32
+#   problem: kdv
+#   sampling: {min_points_per_expert: 2048, n_residual_train: 20000, resample_every_epochs: 99999}
 # ---- for memory (2026-09-03): wroot p3 20a30l-h1000 variant (created 2026-09-03) ----
 # experiment_name: kdv_f32_p3_windowedroot_M18W3lin_e3x50_20a30l
 # experiments:
