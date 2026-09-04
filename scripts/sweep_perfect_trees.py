@@ -42,10 +42,10 @@ from perfect_tree_examples import create_prefect_trees as cpt  # noqa: E402
 # time_marching.enabled = False for that combo).
 SWEEPS = {
     'kdv': [
-        {  # windowed trees, W=2, uniform allocation
-            'M': [12, 15, 18],
-            'num_windows': [2],
-            'm_distribution': ['equal'],
+        {  # windowed trees, W=3, all allocations
+            'M': [25, 30],
+            'num_windows': [3],
+            'm_distribution': ['equal', 'linear', 'quadratic'],
         },
     ],
 }
@@ -175,8 +175,15 @@ def main():
             }
 
     OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
-    with open(OUTPUT_ROOT / 'sweep_summary.json', 'w') as f:
-        json.dump(summary, f, indent=2)
+    summary_path = OUTPUT_ROOT / 'sweep_summary.json'
+    merged = {}
+    if summary_path.exists():
+        with open(summary_path) as f:
+            merged = json.load(f)
+    for problem, combos in summary.items():
+        merged.setdefault(problem, {}).update(combos)
+    with open(summary_path, 'w') as f:
+        json.dump(merged, f, indent=2)
 
     print(f"\n{'=' * 74}")
     print(f"{'problem':<10}{'combo':<26}{'accepted':>10}{'leaves':>10}")
