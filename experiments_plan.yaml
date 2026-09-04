@@ -1,46 +1,40 @@
 # ==========================================================================
-# KS f32 WINDOW-0/1 DEBUG ABLATION — SCHEDULER / H3000 / WARMUP / WARM-START
-# (2026-09-04, main). ACTIVE: 6 runs, all debug_windows subsets of the
-# w5 T=0.5 f32 line. BENCHMARKS (pair run 20260903_133241): window 0 =
-# 5.546e-4 (froze ep 25,855; terminal-slice err 1.204e-3), window 1 =
-# 5.911e-3. Diagnosis: every window reaches its inherited-error floor;
-# final chain error ~ sum of per-window ADDED error x ~13^(windows
-# remaining) — so the levers are window-0/1 depth. Base recipe (all
-# cells): 20k adam 1e-3 -> 30k LBFGS lr 0.1 SW tol_grad 1e-7,
-# 6x128+RFF auto, bc order 1, weights 1k, 20k static pool, patience
-# 30, freeze 1001, f32, temporal [0,0.5], 5w equal M0.
-# CELLS (one knob each, then combos):
-#  A sched:   adam exp decay x0.9/5000 (Wang) — h1000
-#  B h3000:   lbfgs history_size 3000 (covers ~50% of realized steps;
-#             window 0 froze after 5,855 lbfgs steps at h1000)
-#  C wu5k:    linear lr warmup ramp 5000 steps to 1e-3 — h1000
-#  D = A+B    sched + h3000
-#  E = A+B+C  sched + h3000 + warmup ramp
-#  F w1 warm-start: debug_windows [1], last_window_checkpoint =
-#     ks_5_windowed_root-...-h1000/window_0_best_model_root.pt,
-#     time_marching.warm_start_from_previous TRUE (NEW flag,
-#     2026-09-04: trainer/time_marching.py copies the previous
-#     window's BASE weights into the fresh window net; default false
-#     everywhere else). ONLY the warm start differs from benchmark —
-#     h1000, no sched/warmup. Target: beat w1 = 5.911e-3.
-# A-E run debug_windows [0] (true IC, no checkpoint needed); debug
-# mode writes per-window outputs + checkpoints, skips combined stages.
-# ON HOLD below (commented): wroot p3 50a40l-h1000 repeat (created
-# 2026-09-04), wroot p3 20a30l-h1000 variant (created 2026-09-03), KS
-# w5 T=0.5 f32/f64 pair (launched 2026-09-03; f32 RAN w0-3 + w4
-# debug-resume -> stitched 4.327e-1, per-window 5.5e-4/5.9e-3/6.3e-2/
-# 3.4e-1/7.1e-1), KdV windowed-root p3 50a40l (RAN -> 6.167e-3 NEW
-# BEST), KS f64 tw root 41k-variant (created 2026-09-03), KS f32 tw
-# root w3 (launched 2026-09-03, weak), KdV tw root (RAN -> stitched
-# 5.116e-3), ft lr-grid on e3x35 experts (RAN -> blend 1.28590e-2),
-# joint no-p3 M18e3x30 (created 2026-09-01), e3x35 50adam-line p3
-# (RAN -> ckpt 1.28814e-2), collar ft grid2 (launched 2026-09-01),
-# M12W3linzero e3x50 p3 (launched 2026-09-01), 8-cell ft grid
-# (launched 2026-08-31), M12W3linzero e3x40 p3 (launched 2026-08-31),
-# p3-lbfgs continuation (stopped), 30+30 full-flow (ran), e3x35
-# withsched p3 (ran), f64 ssb ft rerun (froze), stage-1 p3 pairs,
-# complete-lbfgs resume, f64 ssb ft grid, adam200k roots, ft ablation
-# v2, f64 repro, f64 p3 grid.
+# KS f32 WINDOW-0 DEBUG — CELLS G (MODIFIED MLP) + H (LRA GRAD-NORM)
+# (2026-09-04, main). ACTIVE: 2 runs, debug_windows [0], each =
+# BENCHMARK (w0 5.546e-4: 20k flat adam 1e-3 -> 30k LBFGS h1000 lr 0.1
+# SW tol_grad 1e-7, 6x128+RFF auto, bc order 1, 20k static pool,
+# patience 30, freeze 1001, f32, T=0.5 w5 equal M0) + ONE mechanism
+# from the Expert's Guide KS ablation (their Table 5):
+#  G modified_mlp: adaptive_pinn.expert_type modified_mlp (NEW backbone
+#    2026-09-04, models/modified_mlp.py: Wang gated U/V-encoder MLP,
+#    RFF + RWF parity, network.layer_i naming; their KS ablation shows
+#    x21 penalty when removed). NOTE +33k params vs FCNet (132k vs
+#    99k) — capacity confound inherent to the mechanism.
+#  H lra on: ks.lra enabled, scheme grad_norm (= jaxpi formula; our
+#    alpha 0.1 == their 0.9 convention), update_every 1000 (their f).
+#    NEW semantics 2026-09-04 (setup/epoch_loop/lra.py): static ic/bc
+#    1000 weights BYPASSED — weights start 1.0, adapt during adam
+#    only, FROZEN at the LBFGS switch; bc_dx* diagnostic terms no
+#    longer double-counted. Weights column in logs shows the
+#    discovered scale.
+# Both compare against w0 = 5.546e-4 (and freeze epoch 25,855).
+# ON HOLD below (commented): w0/w1 A-F ablation (launched 2026-09-04:
+# A sched, B h3000, C wu5k, D A+B, E A+B+C, F w1 warm-start vs
+# 5.911e-3), KS w4 debug completion (RAN -> w4 7.083e-1, stitched
+# 4.327e-1), wroot p3 50a40l-h1000 repeat (created 2026-09-04), wroot
+# p3 20a30l-h1000 variant (created 2026-09-03), KS w5 T=0.5 f32/f64
+# pair (launched 2026-09-03; f32 RAN w0-3), KdV windowed-root p3
+# 50a40l (RAN -> 6.167e-3 NEW BEST), KS f64 tw root 41k-variant
+# (created 2026-09-03), KS f32 tw root w3 (launched 2026-09-03, weak),
+# KdV tw root (RAN -> stitched 5.116e-3), ft lr-grid on e3x35 experts
+# (RAN -> blend 1.28590e-2), joint no-p3 M18e3x30 (created
+# 2026-09-01), e3x35 50adam-line p3 (RAN -> ckpt 1.28814e-2), collar
+# ft grid2 (launched 2026-09-01), M12W3linzero e3x50 p3 (launched
+# 2026-09-01), 8-cell ft grid (launched 2026-08-31), M12W3linzero
+# e3x40 p3 (launched 2026-08-31), p3-lbfgs continuation (stopped),
+# 30+30 full-flow (ran), e3x35 withsched p3 (ran), f64 ssb ft rerun
+# (froze), stage-1 p3 pairs, complete-lbfgs resume, f64 ssb ft grid,
+# adam200k roots, ft ablation v2, f64 repro, f64 p3 grid.
 # ==========================================================================
 base_config:
   activation: tanh
@@ -251,12 +245,13 @@ base_config:
     precondition_frequency: 10
     weight_decay: 0.0
   ssbroyden: {lr: 1.0, tolerance_grad: 1.0e-14}
-experiment_name: ks_w0w1_debug_ablation_f32
+experiment_name: ks_w0_debug_GH_modmlp_lra
 experiments:
 - adaptive_pinn:
     M_experts_num: 0
+    expert_type: modified_mlp
     fine_tune: {epochs: 0}
-    initial_train: {epochs: 50000, lr: 0.001, lr_schedule: exponential, lr_decay_rate: 0.9, lr_decay_steps: 5000, lr_warmup_steps: 0,
+    initial_train: {epochs: 50000, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
       optimizer_1: adam, optimizer_2: lbfgs, optimizer_switch_epoch: 20000}
     split_icbc: {bc_term_normalization: false, interface_term_normalization: true,
       max_interface_derivative_order: 1}
@@ -271,17 +266,15 @@ experiments:
     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
     temporal_domain: [0.0, 0.5]
     time_marching: {debug_windows: [0], enabled: true, freeze_previous_windows: true,
-      last_window_checkpoint: null,
-      m_distribution: equal, num_windows: 5, only_for_tree_structure: false}
+      last_window_checkpoint: null, m_distribution: equal, num_windows: 5,
+      only_for_tree_structure: false}
   lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
     tolerance_change: 0.0, tolerance_grad: 1.0e-07}
   lr: 0.001
-  lr_decay_rate: 0.9
-  lr_decay_steps: 5000
-  lr_schedule: exponential
+  lr_schedule: none
   lr_warmup_steps: 0
   model: AToELeaves
-  name: ks_w0dbg_A_sched
+  name: ks_w0dbg_G_modmlp
   optimizer_1: adam
   optimizer_2: lbfgs
   optimizer_switch_epoch: 20000
@@ -305,157 +298,18 @@ experiments:
     bc_max_derivative_order: 1
     fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
+    lra: {alpha: 0.1, enabled: true, epsilon: 1.0e-05, scheme: grad_norm, update_every: 1000}
     temporal_domain: [0.0, 0.5]
     time_marching: {debug_windows: [0], enabled: true, freeze_previous_windows: true,
-      last_window_checkpoint: null,
-      m_distribution: equal, num_windows: 5, only_for_tree_structure: false}
-  lbfgs: {history_size: 3000, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
-    tolerance_change: 0.0, tolerance_grad: 1.0e-07}
-  lr: 0.001
-  lr_schedule: none
-  lr_warmup_steps: 0
-  model: AToELeaves
-  name: ks_w0dbg_B_h3000
-  optimizer_1: adam
-  optimizer_2: lbfgs
-  optimizer_switch_epoch: 20000
-  patience_evals: 30
-  precision: float32
-  problem: ks
-  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
-- adaptive_pinn:
-    M_experts_num: 0
-    fine_tune: {epochs: 0}
-    initial_train: {epochs: 50000, lr: 0.001, lr_schedule: none, lr_warmup_steps: 5000,
-      optimizer_1: adam, optimizer_2: lbfgs, optimizer_switch_epoch: 20000}
-    split_icbc: {bc_term_normalization: false, interface_term_normalization: true,
-      max_interface_derivative_order: 1}
-  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
-  batch_size: 99999
-  epochs: 0
-  experts_architecture: [2, 30, 30, 30, 1]
-  freeze_stop_epochs: 1001
-  ks:
-    bc_max_derivative_order: 1
-    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
-    loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
-    temporal_domain: [0.0, 0.5]
-    time_marching: {debug_windows: [0], enabled: true, freeze_previous_windows: true,
-      last_window_checkpoint: null,
-      m_distribution: equal, num_windows: 5, only_for_tree_structure: false}
-  lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
-    tolerance_change: 0.0, tolerance_grad: 1.0e-07}
-  lr: 0.001
-  lr_schedule: none
-  lr_warmup_steps: 5000
-  model: AToELeaves
-  name: ks_w0dbg_C_wu5k
-  optimizer_1: adam
-  optimizer_2: lbfgs
-  optimizer_switch_epoch: 20000
-  patience_evals: 30
-  precision: float32
-  problem: ks
-  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
-- adaptive_pinn:
-    M_experts_num: 0
-    fine_tune: {epochs: 0}
-    initial_train: {epochs: 50000, lr: 0.001, lr_schedule: exponential, lr_decay_rate: 0.9, lr_decay_steps: 5000, lr_warmup_steps: 0,
-      optimizer_1: adam, optimizer_2: lbfgs, optimizer_switch_epoch: 20000}
-    split_icbc: {bc_term_normalization: false, interface_term_normalization: true,
-      max_interface_derivative_order: 1}
-  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
-  batch_size: 99999
-  epochs: 0
-  experts_architecture: [2, 30, 30, 30, 1]
-  freeze_stop_epochs: 1001
-  ks:
-    bc_max_derivative_order: 1
-    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
-    loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
-    temporal_domain: [0.0, 0.5]
-    time_marching: {debug_windows: [0], enabled: true, freeze_previous_windows: true,
-      last_window_checkpoint: null,
-      m_distribution: equal, num_windows: 5, only_for_tree_structure: false}
-  lbfgs: {history_size: 3000, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
-    tolerance_change: 0.0, tolerance_grad: 1.0e-07}
-  lr: 0.001
-  lr_decay_rate: 0.9
-  lr_decay_steps: 5000
-  lr_schedule: exponential
-  lr_warmup_steps: 0
-  model: AToELeaves
-  name: ks_w0dbg_D_sched_h3000
-  optimizer_1: adam
-  optimizer_2: lbfgs
-  optimizer_switch_epoch: 20000
-  patience_evals: 30
-  precision: float32
-  problem: ks
-  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
-- adaptive_pinn:
-    M_experts_num: 0
-    fine_tune: {epochs: 0}
-    initial_train: {epochs: 50000, lr: 0.001, lr_schedule: exponential, lr_decay_rate: 0.9, lr_decay_steps: 5000, lr_warmup_steps: 5000,
-      optimizer_1: adam, optimizer_2: lbfgs, optimizer_switch_epoch: 20000}
-    split_icbc: {bc_term_normalization: false, interface_term_normalization: true,
-      max_interface_derivative_order: 1}
-  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
-  batch_size: 99999
-  epochs: 0
-  experts_architecture: [2, 30, 30, 30, 1]
-  freeze_stop_epochs: 1001
-  ks:
-    bc_max_derivative_order: 1
-    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
-    loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
-    temporal_domain: [0.0, 0.5]
-    time_marching: {debug_windows: [0], enabled: true, freeze_previous_windows: true,
-      last_window_checkpoint: null,
-      m_distribution: equal, num_windows: 5, only_for_tree_structure: false}
-  lbfgs: {history_size: 3000, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
-    tolerance_change: 0.0, tolerance_grad: 1.0e-07}
-  lr: 0.001
-  lr_decay_rate: 0.9
-  lr_decay_steps: 5000
-  lr_schedule: exponential
-  lr_warmup_steps: 5000
-  model: AToELeaves
-  name: ks_w0dbg_E_sched_h3000_wu5k
-  optimizer_1: adam
-  optimizer_2: lbfgs
-  optimizer_switch_epoch: 20000
-  patience_evals: 30
-  precision: float32
-  problem: ks
-  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
-- adaptive_pinn:
-    M_experts_num: 0
-    fine_tune: {epochs: 0}
-    initial_train: {epochs: 50000, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
-      optimizer_1: adam, optimizer_2: lbfgs, optimizer_switch_epoch: 20000}
-    split_icbc: {bc_term_normalization: false, interface_term_normalization: true,
-      max_interface_derivative_order: 1}
-  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
-  batch_size: 99999
-  epochs: 0
-  experts_architecture: [2, 30, 30, 30, 1]
-  freeze_stop_epochs: 1001
-  ks:
-    bc_max_derivative_order: 1
-    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
-    loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
-    temporal_domain: [0.0, 0.5]
-    time_marching: {debug_windows: [1], enabled: true, freeze_previous_windows: true,
-      last_window_checkpoint: roots_checkpoints/single_precision/ks_5_windowed_root-6x128RFF-20a30lbfgs-h1000/window_0_best_model_root.pt,
-      m_distribution: equal, num_windows: 5, only_for_tree_structure: false, warm_start_from_previous: true}
+      last_window_checkpoint: null, m_distribution: equal, num_windows: 5,
+      only_for_tree_structure: false}
   lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
     tolerance_change: 0.0, tolerance_grad: 1.0e-07}
   lr: 0.001
   lr_schedule: none
   lr_warmup_steps: 0
   model: AToELeaves
-  name: ks_w1dbg_F_warmstart
+  name: ks_w0dbg_H_lra
   optimizer_1: adam
   optimizer_2: lbfgs
   optimizer_switch_epoch: 20000
@@ -463,6 +317,219 @@ experiments:
   precision: float32
   problem: ks
   sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+# ---- for memory (2026-09-04): w0/w1 A-F debug ablation (launched 2026-09-04) ----
+# experiment_name: ks_w0w1_debug_ablation_f32
+# experiments:
+# - adaptive_pinn:
+#     M_experts_num: 0
+#     fine_tune: {epochs: 0}
+#     initial_train: {epochs: 50000, lr: 0.001, lr_schedule: exponential, lr_decay_rate: 0.9, lr_decay_steps: 5000, lr_warmup_steps: 0,
+#       optimizer_1: adam, optimizer_2: lbfgs, optimizer_switch_epoch: 20000}
+#     split_icbc: {bc_term_normalization: false, interface_term_normalization: true,
+#       max_interface_derivative_order: 1}
+#   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+#   batch_size: 99999
+#   epochs: 0
+#   experts_architecture: [2, 30, 30, 30, 1]
+#   freeze_stop_epochs: 1001
+#   ks:
+#     bc_max_derivative_order: 1
+#     fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+#     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
+#     temporal_domain: [0.0, 0.5]
+#     time_marching: {debug_windows: [0], enabled: true, freeze_previous_windows: true,
+#       last_window_checkpoint: null,
+#       m_distribution: equal, num_windows: 5, only_for_tree_structure: false}
+#   lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
+#     tolerance_change: 0.0, tolerance_grad: 1.0e-07}
+#   lr: 0.001
+#   lr_decay_rate: 0.9
+#   lr_decay_steps: 5000
+#   lr_schedule: exponential
+#   lr_warmup_steps: 0
+#   model: AToELeaves
+#   name: ks_w0dbg_A_sched
+#   optimizer_1: adam
+#   optimizer_2: lbfgs
+#   optimizer_switch_epoch: 20000
+#   patience_evals: 30
+#   precision: float32
+#   problem: ks
+#   sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+# - adaptive_pinn:
+#     M_experts_num: 0
+#     fine_tune: {epochs: 0}
+#     initial_train: {epochs: 50000, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
+#       optimizer_1: adam, optimizer_2: lbfgs, optimizer_switch_epoch: 20000}
+#     split_icbc: {bc_term_normalization: false, interface_term_normalization: true,
+#       max_interface_derivative_order: 1}
+#   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+#   batch_size: 99999
+#   epochs: 0
+#   experts_architecture: [2, 30, 30, 30, 1]
+#   freeze_stop_epochs: 1001
+#   ks:
+#     bc_max_derivative_order: 1
+#     fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+#     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
+#     temporal_domain: [0.0, 0.5]
+#     time_marching: {debug_windows: [0], enabled: true, freeze_previous_windows: true,
+#       last_window_checkpoint: null,
+#       m_distribution: equal, num_windows: 5, only_for_tree_structure: false}
+#   lbfgs: {history_size: 3000, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
+#     tolerance_change: 0.0, tolerance_grad: 1.0e-07}
+#   lr: 0.001
+#   lr_schedule: none
+#   lr_warmup_steps: 0
+#   model: AToELeaves
+#   name: ks_w0dbg_B_h3000
+#   optimizer_1: adam
+#   optimizer_2: lbfgs
+#   optimizer_switch_epoch: 20000
+#   patience_evals: 30
+#   precision: float32
+#   problem: ks
+#   sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+# - adaptive_pinn:
+#     M_experts_num: 0
+#     fine_tune: {epochs: 0}
+#     initial_train: {epochs: 50000, lr: 0.001, lr_schedule: none, lr_warmup_steps: 5000,
+#       optimizer_1: adam, optimizer_2: lbfgs, optimizer_switch_epoch: 20000}
+#     split_icbc: {bc_term_normalization: false, interface_term_normalization: true,
+#       max_interface_derivative_order: 1}
+#   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+#   batch_size: 99999
+#   epochs: 0
+#   experts_architecture: [2, 30, 30, 30, 1]
+#   freeze_stop_epochs: 1001
+#   ks:
+#     bc_max_derivative_order: 1
+#     fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+#     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
+#     temporal_domain: [0.0, 0.5]
+#     time_marching: {debug_windows: [0], enabled: true, freeze_previous_windows: true,
+#       last_window_checkpoint: null,
+#       m_distribution: equal, num_windows: 5, only_for_tree_structure: false}
+#   lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
+#     tolerance_change: 0.0, tolerance_grad: 1.0e-07}
+#   lr: 0.001
+#   lr_schedule: none
+#   lr_warmup_steps: 5000
+#   model: AToELeaves
+#   name: ks_w0dbg_C_wu5k
+#   optimizer_1: adam
+#   optimizer_2: lbfgs
+#   optimizer_switch_epoch: 20000
+#   patience_evals: 30
+#   precision: float32
+#   problem: ks
+#   sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+# - adaptive_pinn:
+#     M_experts_num: 0
+#     fine_tune: {epochs: 0}
+#     initial_train: {epochs: 50000, lr: 0.001, lr_schedule: exponential, lr_decay_rate: 0.9, lr_decay_steps: 5000, lr_warmup_steps: 0,
+#       optimizer_1: adam, optimizer_2: lbfgs, optimizer_switch_epoch: 20000}
+#     split_icbc: {bc_term_normalization: false, interface_term_normalization: true,
+#       max_interface_derivative_order: 1}
+#   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+#   batch_size: 99999
+#   epochs: 0
+#   experts_architecture: [2, 30, 30, 30, 1]
+#   freeze_stop_epochs: 1001
+#   ks:
+#     bc_max_derivative_order: 1
+#     fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+#     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
+#     temporal_domain: [0.0, 0.5]
+#     time_marching: {debug_windows: [0], enabled: true, freeze_previous_windows: true,
+#       last_window_checkpoint: null,
+#       m_distribution: equal, num_windows: 5, only_for_tree_structure: false}
+#   lbfgs: {history_size: 3000, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
+#     tolerance_change: 0.0, tolerance_grad: 1.0e-07}
+#   lr: 0.001
+#   lr_decay_rate: 0.9
+#   lr_decay_steps: 5000
+#   lr_schedule: exponential
+#   lr_warmup_steps: 0
+#   model: AToELeaves
+#   name: ks_w0dbg_D_sched_h3000
+#   optimizer_1: adam
+#   optimizer_2: lbfgs
+#   optimizer_switch_epoch: 20000
+#   patience_evals: 30
+#   precision: float32
+#   problem: ks
+#   sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+# - adaptive_pinn:
+#     M_experts_num: 0
+#     fine_tune: {epochs: 0}
+#     initial_train: {epochs: 50000, lr: 0.001, lr_schedule: exponential, lr_decay_rate: 0.9, lr_decay_steps: 5000, lr_warmup_steps: 5000,
+#       optimizer_1: adam, optimizer_2: lbfgs, optimizer_switch_epoch: 20000}
+#     split_icbc: {bc_term_normalization: false, interface_term_normalization: true,
+#       max_interface_derivative_order: 1}
+#   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+#   batch_size: 99999
+#   epochs: 0
+#   experts_architecture: [2, 30, 30, 30, 1]
+#   freeze_stop_epochs: 1001
+#   ks:
+#     bc_max_derivative_order: 1
+#     fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+#     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
+#     temporal_domain: [0.0, 0.5]
+#     time_marching: {debug_windows: [0], enabled: true, freeze_previous_windows: true,
+#       last_window_checkpoint: null,
+#       m_distribution: equal, num_windows: 5, only_for_tree_structure: false}
+#   lbfgs: {history_size: 3000, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
+#     tolerance_change: 0.0, tolerance_grad: 1.0e-07}
+#   lr: 0.001
+#   lr_decay_rate: 0.9
+#   lr_decay_steps: 5000
+#   lr_schedule: exponential
+#   lr_warmup_steps: 5000
+#   model: AToELeaves
+#   name: ks_w0dbg_E_sched_h3000_wu5k
+#   optimizer_1: adam
+#   optimizer_2: lbfgs
+#   optimizer_switch_epoch: 20000
+#   patience_evals: 30
+#   precision: float32
+#   problem: ks
+#   sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+# - adaptive_pinn:
+#     M_experts_num: 0
+#     fine_tune: {epochs: 0}
+#     initial_train: {epochs: 50000, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
+#       optimizer_1: adam, optimizer_2: lbfgs, optimizer_switch_epoch: 20000}
+#     split_icbc: {bc_term_normalization: false, interface_term_normalization: true,
+#       max_interface_derivative_order: 1}
+#   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+#   batch_size: 99999
+#   epochs: 0
+#   experts_architecture: [2, 30, 30, 30, 1]
+#   freeze_stop_epochs: 1001
+#   ks:
+#     bc_max_derivative_order: 1
+#     fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+#     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
+#     temporal_domain: [0.0, 0.5]
+#     time_marching: {debug_windows: [1], enabled: true, freeze_previous_windows: true,
+#       last_window_checkpoint: roots_checkpoints/single_precision/ks_5_windowed_root-6x128RFF-20a30lbfgs-h1000/window_0_best_model_root.pt,
+#       m_distribution: equal, num_windows: 5, only_for_tree_structure: false, warm_start_from_previous: true}
+#   lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
+#     tolerance_change: 0.0, tolerance_grad: 1.0e-07}
+#   lr: 0.001
+#   lr_schedule: none
+#   lr_warmup_steps: 0
+#   model: AToELeaves
+#   name: ks_w1dbg_F_warmstart
+#   optimizer_1: adam
+#   optimizer_2: lbfgs
+#   optimizer_switch_epoch: 20000
+#   patience_evals: 30
+#   precision: float32
+#   problem: ks
+#   sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
 # ---- for memory (2026-09-04): KS w4 debug completion (RAN 20260904_085931 -> w4 7.083e-1, stitched 4.327e-1) ----
 # experiment_name: ks_f32_tw5_T05_complete_window4
 # experiments:

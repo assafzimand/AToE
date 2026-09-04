@@ -1189,22 +1189,32 @@ def _setup_training(
     # an improvement if it beats the best-so-far rel-L2 by at least this fraction.
     patience_rel_delta = cfg.get('patience_rel_delta', 0.0)
 
-    # LRA: adaptive loss component weighting (read from per-problem config)
+    # LRA: adaptive loss component weighting (read from per-problem config).
+    # When enabled, the STATIC config loss_weights are bypassed entirely:
+    # weights start at 1.0 (the jaxpi/Expert's-Guide setup) and grad-norm
+    # balancing discovers its own scale during the first-order phase; the
+    # last adapted values then stay frozen through LBFGS/SSBroyden.
     lra_cfg = problem_cfg['lra']
     lra_enabled = lra_cfg['enabled']
     if lra_enabled:
-        initial_loss_weights = problem_cfg['loss_weights']
         lra_weights = LRAWeights(
             alpha=lra_cfg['alpha'],
             update_every=lra_cfg['update_every'],
-            initial_weights=initial_loss_weights,
+            initial_weights={'residual': 1.0, 'ic': 1.0, 'bc': 1.0},
             scheme=lra_cfg['scheme'],
             scheme_cfg=lra_cfg,
         )
+        logger.info("  [LRA] Enabled — static loss_weights BYPASSED; weights "
+                    "start at 1.0 and adapt during the first-order phase only.")
     else:
         lra_weights = None
 
-    # Wrap loss_fn to apply LRA weights when enabled
+    # Wrap loss_fn to apply LRA weights when enabled. Diagnostic breakdown
+    # entries (bc_dx/bc_dxx/... are already contained in 'bc'; l2sp lines are
+    # ft-only add-ons) are excluded from the weighted total — summing them
+    # again would double-count.
+    _LRA_DIAG_KEYS = frozenset(
+        {'bc_dx', 'bc_dxx', 'bc_dxxx', 'l2sp', 'l2sp_drift'})
     if lra_weights is not None:
         _orig_loss_fn = loss_fn
 
@@ -1215,7 +1225,8 @@ def _setup_training(
                                      update_causal_state=False)
             comps = _orig_loss_fn(model, batch, return_components=True, update_causal_state=update_causal_state)
             w = lra_weights.weights
-            lra_total = sum(w.get(k, 1.0) * v for k, v in comps.items() if k != 'total')
+            lra_total = sum(w.get(k, 1.0) * v for k, v in comps.items()
+                            if k != 'total' and k not in _LRA_DIAG_KEYS)
             if return_components:
                 comps['total'] = lra_total
                 return comps

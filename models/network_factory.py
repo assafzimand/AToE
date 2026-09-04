@@ -12,7 +12,7 @@ def create_network(layers: List[int], activation: str, config: Dict,
         activation: Activation function name.
         config: Full configuration dictionary.
         is_base: Whether this is a base model (validates input_dim).
-        expert_type: 'mlp' | 'resnet' | 'piratenet'.
+        expert_type: 'mlp' | 'resnet' | 'piratenet' | 'modified_mlp'.
 
     Returns:
         An nn.Module with the standard PINN interface
@@ -24,5 +24,8 @@ def create_network(layers: List[int], activation: str, config: Dict,
     if expert_type == 'piratenet':
         from models.pirate_net import PirateNet
         return PirateNet(layers, activation, config, is_base)
+    if expert_type == 'modified_mlp':
+        from models.modified_mlp import ModifiedMLP
+        return ModifiedMLP(layers, activation, config, is_base)
     from models.fc_model import FCNet
     return FCNet(layers, activation, config, is_base)

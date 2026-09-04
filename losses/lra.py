@@ -73,8 +73,12 @@ class LRAWeights:
             # Split-loss batches return per-expert nested dicts; LRA balances
             # the global composed loss only, so skip the update here.
             return False
-        # 'total' is the weighted sum of the other terms, not a component
-        components = {k: v for k, v in components.items() if k != 'total'}
+        # 'total' is the weighted sum of the other terms, not a component;
+        # bc_dx/bc_dxx/... are diagnostic breakdown lines already contained
+        # in 'bc' (and l2sp lines are ft-only add-ons) — balancing them as
+        # separate terms would double-count the bc gradient.
+        _diag = {'total', 'bc_dx', 'bc_dxx', 'bc_dxxx', 'l2sp', 'l2sp_drift'}
+        components = {k: v for k, v in components.items() if k not in _diag}
         trainable_params = [p for p in model.parameters() if p.requires_grad]
 
         grad_norms: Dict[str, float] = {}

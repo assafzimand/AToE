@@ -1072,6 +1072,15 @@ def _train_segment(
             evals_no_improve = 0
             patience_start_epoch = switch_epoch
             _refresh_hist.clear()
+            # LRA freezes at the switch: the quasi-Newton phase needs a fixed
+            # objective (shifting weights corrupt curvature pairs and the
+            # strong-Wolfe comparisons). The LAST adapted weights keep
+            # weighting the loss from here on.
+            if lra_weights is not None:
+                _w_str = ', '.join(f'{k}={v:.4e}'
+                                   for k, v in lra_weights.weights.items())
+                logger.info(f"  [LRA] FROZEN for the {current_optimizer_name} "
+                            f"phase at: {_w_str}")
             metrics['optimizer_events'].append({
                 'epoch': epoch,
                 'from': _prev_opt,
@@ -1185,8 +1194,12 @@ def _train_segment(
                     {'epoch': epoch, 'refresh': current_optimizer_name})
                 _refresh_hist.clear()
 
-        # LRA: update adaptive loss weights periodically
-        if lra_weights is not None and epoch > 0 and epoch % lra_weights.update_every == 0:
+        # LRA: update adaptive loss weights periodically — first-order phase
+        # ONLY. Quasi-Newton phases (LBFGS/SSBroyden) train under the frozen
+        # last-adapted weights (see the switch block above).
+        if (lra_weights is not None and epoch > 0
+                and epoch % lra_weights.update_every == 0
+                and current_optimizer_name not in ('LBFGS', 'SSBroyden')):
             try:
                 batch_for_lra = next(iter(train_loader))
                 if lra_weights.update(model, loss_fn, batch_for_lra):
