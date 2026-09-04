@@ -7,7 +7,7 @@
 #   wrp3h1k  = kdv_wroot3_p3_M18W3lin_e3x50_50a40l_h1000.pt
 #              (run 20260904_085030, p3 5.283e-3 @ ep72k — NEW BEST,
 #              within 3.3% of the stitched root 5.116e-3)
-#   wrp3h100 = kdv_wroot3_p3_M18W3lin_e3x50_50a40l_h100.pt
+#   wrp3h100  = kdv_wroot3_p3_M18W3lin_e3x50_50a40l_h100.pt
 #              (run 20260903_100222, p3 6.167e-3 @ ep83k)
 # Grid per ckpt: ft SW LBFGS history {100, 1000} x lr {0.1, 0.01,
 # 0.001}; fixed sigma 0.03, collar 0.3, 30k budget, static 20k pool,
