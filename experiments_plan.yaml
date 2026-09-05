@@ -270,6 +270,7 @@ experiments:
     bc_max_derivative_order: 1
     causal_training:
       enabled: true
+      min_epochs_per_stage: 5000
       min_weight_threshold: 0.99
       num_chunks: 32
       tol_schedule: [0.01, 0.1, 1.0, 10.0, 100.0]

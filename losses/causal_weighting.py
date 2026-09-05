@@ -47,6 +47,14 @@ def create_causal_state(
         'min_weight': 1.0,
         'threshold': causal_cfg.get(
             'min_weight_threshold', 0.99),
+        # Minimum epochs a stage must last before it may advance. Guards the
+        # ladder against racing to max epsilon at initialization: an untrained
+        # near-zero net trivially near-satisfies the KS residual (all loss in
+        # the IC), so min_w > delta holds vacuously — especially under an lr
+        # warmup, where the net barely moves for thousands of epochs. 0 keeps
+        # the old advance-any-epoch behavior.
+        'min_epochs_per_stage': causal_cfg.get('min_epochs_per_stage', 0),
+        'epochs_in_stage': 0,
     }
 
 
@@ -63,9 +71,13 @@ def advance_causal_schedule(causal_state: Optional[Dict]) -> bool:
     schedule = causal_state['schedule']
     if idx >= len(schedule) - 1:
         return False
+    if (causal_state.get('epochs_in_stage', 0)
+            < causal_state.get('min_epochs_per_stage', 0)):
+        return False
     if causal_state['min_weight'] > causal_state['threshold']:
         causal_state['schedule_idx'] = idx + 1
         causal_state['tol'] = float(schedule[idx + 1])
+        causal_state['epochs_in_stage'] = 0
         # min_weight is reset by the trainer after the advance check
         # (single owner: the per-epoch loop).
         return True

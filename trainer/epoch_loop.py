@@ -1228,6 +1228,8 @@ def _train_segment(
         causal_state = getattr(loss_fn, 'causal_state', None)
         causal_epoch_min_weight = None
         if causal_state is not None:
+            causal_state['epochs_in_stage'] = (
+                causal_state.get('epochs_in_stage', 0) + 1)
             causal_epoch_min_weight = causal_state['min_weight']
         if advance_causal_schedule(causal_state):
             cs = loss_fn.causal_state
