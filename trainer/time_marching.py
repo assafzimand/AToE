@@ -33,12 +33,17 @@ class TimeWindow:
     t_start: float    # start of window
     t_end: float      # end of window
     is_first: bool    # True for window 0
-    M: int            # experts allocated to this window
+    M: int            # global top-M nodes this window won (informational)
 
 
 def compute_m_per_window(global_M: int, num_windows: int, distribution: str) -> List[int]:
     """
     Distribute global_M experts across windows based on distribution strategy.
+
+    NOT used by the training pipeline any more (the windows compete for one
+    global budget — see preselect_window_trees / adaptive.window_tree_selection).
+    Kept for the fixed-distribution perfect-tree reference sweeps
+    (perfect_tree_examples/create_prefect_trees.py, scripts/sweep_perfect_trees*.py).
     
     Args:
         global_M: Total number of experts to distribute
@@ -115,27 +120,30 @@ def compute_m_per_window(global_M: int, num_windows: int, distribution: str) -> 
 
 
 def compute_time_windows(
-    temporal_domain: List[float], 
+    temporal_domain: List[float],
     num_windows: int,
     global_M: int,
-    m_distribution: str
 ) -> List[TimeWindow]:
     """
-    Split [t_min, t_max] into num_windows equal, non-overlapping windows with M allocation.
-    
+    Split [t_min, t_max] into num_windows equal, non-overlapping windows.
+
+    There is no per-window budget split any more: the windows compete for
+    the single global budget (``preselect_window_trees``), and each
+    window's ``M`` is filled in afterwards with the number of top-M nodes
+    it actually won (informational — the tree itself is preselected).
+    Until then every window carries the global M.
+
     Args:
         temporal_domain: [t_min, t_max] from config
         num_windows: Number of windows to create
-        global_M: Total experts to distribute
-        m_distribution: Distribution strategy
-    
+        global_M: The single global expert budget
+
     Returns:
         List of TimeWindow objects
     """
     t_min, t_max = temporal_domain
     dt = (t_max - t_min) / num_windows
-    m_values = compute_m_per_window(global_M, num_windows, m_distribution)
-    
+
     windows = []
     for i in range(num_windows):
         windows.append(TimeWindow(
@@ -143,9 +151,146 @@ def compute_time_windows(
             t_start=t_min + i * dt,
             t_end=t_min + (i + 1) * dt,
             is_first=(i == 0),
-            M=m_values[i]
+            M=int(global_M),
         ))
     return windows
+
+
+def preselect_window_trees(
+    config: Dict,
+    windows: List[TimeWindow],
+    model_class,
+    architecture: List[int],
+    activation: str,
+    device: torch.device,
+) -> Tuple[Optional[List[Dict]], Dict]:
+    """Global top-M tree selection across ALL windows, before the window loop.
+
+    Sequential training only ever has the CURRENT window's root, but the
+    global competition needs every window's tree at once. The fit target per
+    window is therefore taken from:
+
+      * the per-window pretrained roots when ``pretrained_base_checkpoint``
+        resolves to a root for EVERY window (the roots -> experts flow):
+        each root's prediction on its slice of the solver's native grid —
+        the same target the single-window fit used; or
+      * the solver's native ground-truth grid otherwise (roots trained
+        in-run). This is a method deviation (the reference "perfect tree")
+        and is logged as a WARNING and recorded in the manifest / final
+        metrics as ``tree_fit_source``.
+
+    Returns (per-window result dicts in orchestrator shape, summary). The
+    per-window dict goes into ``cfg['_time_marching_window']
+    ['preselected_tree']`` and is consumed by
+    ``trainer.orchestrator._build_tree_once``. Returns (None, {...}) when
+    the tree is not needed (``pretrained_local_expert_checkpoint`` set: the
+    experts come from the checkpoint).
+    """
+    from adaptive.window_tree_selection import build_global_windowed_trees
+    from trainer.utils import native_ground_truth_grid
+
+    problem = config['problem']
+    problem_cfg = config[problem]
+    adaptive_cfg = config['adaptive_pinn']
+    global_M = int(adaptive_cfg['M_experts_num'])
+
+    if problem_cfg.get('pretrained_local_expert_checkpoint') is not None:
+        logger.info("  [GlobalTree] pretrained_local_expert_checkpoint set — "
+                    "experts come from the checkpoint; no tree preselection.")
+        return None, {'selection': 'none (pretrained experts)'}
+
+    if global_M <= 0:
+        # M=0 = the windowed-ROOT recipe: every window trains its root and
+        # nothing spawns. Without this guard the global selection would mark
+        # every window root-kept and hand each one a whole-slice ACCEPTED
+        # leaf, so the orchestrator would spawn an (untrained) expert and
+        # retire the base from the composition — silently breaking root-only
+        # runs. Skipping restores the pre-refactor path exactly: no
+        # preselected tree, the per-window top-0 fit accepts nothing,
+        # "No nodes accepted — finishing after root."
+        logger.info("  [GlobalTree] M_experts_num=0 — root-only windows; "
+                    "no tree preselection (nothing will spawn).")
+        return None, {'selection': 'none (M=0 root-only windows)'}
+
+    native = native_ground_truth_grid(config)
+    if native is None:
+        raise RuntimeError(
+            "Global top-M window tree selection needs the solver's native "
+            f"solution grid for {problem}, which is unavailable.")
+    gt_grid, gx, gt = native
+    gx = np.asarray(gx, dtype=np.float64)
+    gt = np.asarray(gt, dtype=np.float64)
+    XX, TT = np.meshgrid(gx, gt, indexing='ij')
+    X_full = np.stack([XX.reshape(-1), TT.reshape(-1)], axis=1)
+    y_gt = (np.asarray(gt_grid).reshape(-1) if np.asarray(gt_grid).ndim == 2
+            else np.asarray(gt_grid).reshape(-1, np.asarray(gt_grid).shape[2]))
+    t_col = 1
+
+    # Fit target: per-window pretrained roots when available for all windows.
+    ckpt_value = problem_cfg.get('pretrained_base_checkpoint')
+    root_paths = None
+    if ckpt_value is not None:
+        try:
+            root_paths = [resolve_window_pretrained_checkpoint(
+                ckpt_value, w, len(windows)) for w in windows]
+        except Exception as _res_err:  # noqa: BLE001
+            logger.warning(f"  [GlobalTree] could not resolve per-window "
+                           f"roots from {ckpt_value}: {_res_err}")
+            root_paths = None
+        if root_paths is not None and any(p is None for p in root_paths):
+            root_paths = None
+
+    slices = []
+    if root_paths is not None:
+        fit_source = 'pretrained_window_roots'
+        logger.info(f"  [GlobalTree] fit target: each window's PRETRAINED "
+                    f"root prediction on its slice of the native grid "
+                    f"({len(gx)}x{len(gt)} points).")
+        for w, path in zip(windows, root_paths):
+            smask = ((X_full[:, t_col] >= w.t_start - 1e-12)
+                     & (X_full[:, t_col] <= w.t_end + 1e-12))
+            root = _load_prev_window_model(
+                path, model_class, architecture, activation, config, w, device)
+            p_dtype = next(root.parameters()).dtype
+            with torch.no_grad():
+                xt = torch.as_tensor(X_full[smask], dtype=p_dtype, device=device)
+                y_k = root(xt).detach().cpu().numpy()
+            if y_k.ndim == 2 and y_k.shape[1] == 1:
+                y_k = y_k[:, 0]
+            slices.append((w.t_start, w.t_end, X_full[smask], y_k))
+            del root
+    else:
+        fit_source = 'ground_truth (fallback)'
+        logger.warning("  [GlobalTree] WARNING: no per-window pretrained root "
+                       "for every window — the global top-M window trees are "
+                       "fit on the solver's GROUND-TRUTH grid (the reference "
+                       "'perfect tree'), not on a root prediction. Recorded "
+                       "as tree_fit_source in the manifest / final metrics.")
+        for w in windows:
+            smask = ((X_full[:, t_col] >= w.t_start - 1e-12)
+                     & (X_full[:, t_col] <= w.t_end + 1e-12))
+            slices.append((w.t_start, w.t_end, X_full[smask], y_gt[smask]))
+
+    sd = int(problem_cfg['spatial_dim'])
+    domain_bounds = {
+        'lower': [problem_cfg['spatial_domain'][d][0] for d in range(sd)]
+                 + [float(problem_cfg['temporal_domain'][0])],
+        'upper': [problem_cfg['spatial_domain'][d][1] for d in range(sd)]
+                 + [float(problem_cfg['temporal_domain'][1])],
+    }
+    results, summary = build_global_windowed_trees(
+        slices, global_M,
+        max_depth=int(adaptive_cfg.get('tree_max_depth', 30)),
+        min_samples_leaf=int(adaptive_cfg.get('tree_min_samples_leaf', 10)),
+        domain_bounds=domain_bounds,
+        t_dim=sd,
+        variable=adaptive_cfg.get('variable_for_node_accept', 'norm'),
+        eps=float(adaptive_cfg.get('epsilon_node_acceptance', 0.0)),
+        retain_siblings=True,   # full binary tiling (same as the orchestrator)
+        id_offset_step=0,       # each window is its own run: plain ids
+    )
+    summary['tree_fit_source'] = fit_source
+    return results, summary
 
 
 def narrow_config_for_window(cfg: Dict, window: TimeWindow, prev_model: nn.Module = None) -> Dict:
@@ -177,7 +322,8 @@ def narrow_config_for_window(cfg: Dict, window: TimeWindow, prev_model: nn.Modul
     # Narrow temporal domain
     window_cfg[problem]['temporal_domain'] = [window.t_start, window.t_end]
 
-    # Set window-specific M
+    # Window-specific M: the number of global top-M nodes this window won
+    # (informational — its tree is preselected; see preselect_window_trees).
     window_cfg['adaptive_pinn']['M_experts_num'] = window.M
 
     # Add flag to indicate time marching is active (for eval filtering and IC override)
@@ -660,22 +806,42 @@ def train_with_time_marching(
     tm_cfg = config[problem]['time_marching']
     global_M = config['adaptive_pinn']['M_experts_num']
     
-    # Compute time windows with M allocation
+    # Compute time windows (one global budget; no per-window split)
     windows = compute_time_windows(
         config[problem]['temporal_domain'],
         tm_cfg['num_windows'],
         global_M,
-        tm_cfg['m_distribution']
     )
-    
-    # Log M distribution
+    if tm_cfg.get('m_distribution') is not None:
+        logger.info(f"  time_marching.m_distribution="
+                    f"{tm_cfg.get('m_distribution')!r} is IGNORED — the "
+                    f"windows compete for the single global budget.")
+
     logger.info(f"\n{'='*60}")
-    logger.info(f"  TIME MARCHING: {len(windows)} windows, global_M={global_M}")
-    logger.info(f"  Distribution ({tm_cfg['m_distribution']}): {[w.M for w in windows]}")
+    logger.info(f"  TIME MARCHING: {len(windows)} windows, global_M={global_M} "
+                f"(global top-M across windows)")
     logger.info(f"  Temporal ranges:")
     for w in windows:
-        logger.info(f"    Window {w.idx}: t in [{w.t_start:.4f}, {w.t_end:.4f}], M={w.M}")
+        logger.info(f"    Window {w.idx}: t in [{w.t_start:.4f}, {w.t_end:.4f}]")
     logger.info(f"{'='*60}")
+
+    # Global top-M tree selection across ALL windows, before any training:
+    # per-window trees, one pooled ranking, per-window closure. Each
+    # window's M becomes the number of top-M nodes it won (informational).
+    logger.info(f"\n  [GlobalTree] Preselecting the window trees "
+                f"(global top-M={global_M} across {len(windows)} windows)...")
+    preselected, tree_summary = preselect_window_trees(
+        config, windows, model_class, architecture, activation, device)
+    if preselected is not None:
+        for w, res in zip(windows, preselected):
+            w.M = int(res['top_M_count'])
+        logger.info(f"  [GlobalTree] realized per-window top-M: "
+                    f"{tree_summary['m_per_window']}; accepted after closure: "
+                    f"{tree_summary['accepted_per_window']}; roots kept: "
+                    f"{tree_summary['root_kept']}; fit source: "
+                    f"{tree_summary['tree_fit_source']}")
+        with open(run_dir / 'window_tree_selection.json', 'w') as _f:
+            json.dump(tree_summary, _f, indent=2)
     
     # Per-RUN checkpoint collection: run_dir/checkpoints/<segment>/ gathers
     # every window's best_model_<segment>.pt (root / phase3 / fine_tune), so
@@ -689,7 +855,8 @@ def train_with_time_marching(
         'problem': problem,
         'temporal_domain': list(config[problem]['temporal_domain']),
         'num_windows': len(windows),
-        'm_distribution': tm_cfg['m_distribution'],
+        'tree_selection': tree_summary.get('selection'),
+        'tree_fit_source': tree_summary.get('tree_fit_source'),
         'global_M': global_M,
     }
     segment_manifests: Dict[str, Dict] = {}
@@ -748,11 +915,15 @@ def train_with_time_marching(
             continue
         logger.info(f"\n{'='*60}")
         logger.info(f"  WINDOW {window.idx + 1}/{len(windows)}: t in [{window.t_start:.4f}, {window.t_end:.4f}]")
-        logger.info(f"  M_experts_num = {window.M}")
+        logger.info(f"  top-M nodes won by this window = {window.M}")
         logger.info(f"{'='*60}")
         
         # 1. Narrow config for this window (pass prev_model for IC override during resampling)
         window_cfg = narrow_config_for_window(config, window, prev_model=prev_model)
+        # Hand the window its preselected tree (consumed by
+        # orchestrator._build_tree_once instead of a fresh per-window fit).
+        if preselected is not None:
+            window_cfg['_time_marching_window']['preselected_tree'] =                 preselected[window.idx]
         window_run_dir = run_dir / f"window_{window.idx}"
         window_run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -930,6 +1101,7 @@ def train_with_time_marching(
             'num_windows_total': len(windows),
             'num_windows_run': len(window_models),
             'm_per_window_run': [w.M for w, _ in window_models],
+            'tree_selection': tree_summary,
             'problem': config['problem'],
         }
         with open(run_dir / 'time_marching_final_metrics.json', 'w') as _f:
@@ -1000,6 +1172,7 @@ def train_with_time_marching(
         'num_windows': len(windows),
         'm_per_window': [w.M for w in windows],
         'total_m': sum(w.M for w in windows),
+        'tree_selection': tree_summary,
         'problem': config['problem'],
     }
     final_metrics_path = run_dir / 'time_marching_final_metrics.json'

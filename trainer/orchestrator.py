@@ -601,6 +601,28 @@ def _build_tree_once(ctx: TrainingContext, retain_siblings: bool) -> Dict:
     variable_for_node_accept = ctx.variable_for_node_accept
     M = adaptive_cfg['M_experts_num']
 
+    # Real time marching: the window's tree was selected BEFORE the window
+    # loop by the global top-M competition across all windows
+    # (trainer.time_marching.preselect_window_trees) — consume it as-is.
+    _tmw = (ctx.cfg or {}).get('_time_marching_window') or {}
+    _pre = _tmw.get('preselected_tree')
+    if _pre is not None:
+        from types import SimpleNamespace
+        logger.info("[Tree] Using the PRESELECTED window tree (global top-M "
+                    f"across windows): {len(_pre['accepted_nodes'])} accepted "
+                    f"node(s) of {_pre['node_count']} tree nodes, "
+                    f"{_pre.get('top_M_count', '?')} from the global top-M"
+                    f"{' — window root kept (whole-slice expert)' if _pre.get('root_kept') else ''}.")
+        return {
+            'accepted_nodes': _pre['accepted_nodes'],
+            'tree': SimpleNamespace(node_count=_pre['node_count']),
+            'children_left': _pre['children_left'],
+            'parent_map': _pre['parent_map'],
+            'node_tree_depth': _pre['node_tree_depth'],
+            'prune_depth_stats': _pre['prune_depth_stats'],
+            'diag_nodes': _pre['diag_nodes'],
+        }
+
     # ── Tree-fitting sample: symmetric regular grid over the domain ──
     # Random points put sklearn's split candidates (sample midpoints) at
     # asymmetric, draw-dependent locations. A regular grid keeps candidate
@@ -662,8 +684,9 @@ def _build_tree_once(ctx: TrainingContext, retain_siblings: bool) -> Dict:
     epsilon_node_acceptance = adaptive_cfg.get('epsilon_node_acceptance', 0.0)
 
     # only_for_tree_structure: the time-marching windows shape the TREE ONLY —
-    # one tree per time slice, m_k leaves each (compute_m_per_window), unioned
-    # into a single full-domain layout; training stays one full-domain run.
+    # one tree per time slice, the slices competing for ONE global budget M
+    # (adaptive.window_tree_selection), unioned into a single full-domain
+    # layout; training stays one full-domain run.
     tm = (problem_cfg or {}).get('time_marching', {}) or {}
     windowed_tree = bool(tm.get('enabled')) and bool(tm.get('only_for_tree_structure'))
 
@@ -689,21 +712,40 @@ def _build_tree_once(ctx: TrainingContext, retain_siblings: bool) -> Dict:
             'diag_nodes': part['diag_nodes'],
         }
 
-    from trainer.time_marching import compute_m_per_window
+    from adaptive.window_tree_selection import build_global_windowed_trees
     num_windows = int(tm.get('num_windows', 1))
-    m_distribution = tm.get('m_distribution', 'equal')
-    m_per_window = compute_m_per_window(M, num_windows, m_distribution)
     t_min, t_max = problem_cfg['temporal_domain']
     edges = np.linspace(float(t_min), float(t_max), num_windows + 1)
+    if tm.get('m_distribution') is not None:
+        logger.info(f"  [WindowedTree] time_marching.m_distribution="
+                    f"{tm.get('m_distribution')!r} is IGNORED — windows now "
+                    f"compete for the global budget (global top-M).")
     logger.info(f"  [WindowedTree] only_for_tree_structure: {num_windows} time "
-                f"slices, M={M} distributed {m_distribution} -> {m_per_window}; "
-                f"one tree per slice on the full-domain root prediction, "
-                f"leaves unioned, single full-domain training.")
+                f"slices, ONE global budget M={M} (top-M across all slices, "
+                f"eps={epsilon_node_acceptance}); one tree per slice on the "
+                f"full-domain root prediction, leaves unioned, single "
+                f"full-domain training.")
 
-    # Per-slice node ids are made globally unique by an offset per slice; the
-    # merged children/parent/depth maps are plain dicts (same [] access the
-    # consumers already use on the single-tree arrays).
-    _ID_OFF = 1_000_000
+    # One full tree per slice (full-domain box, boxes clipped to the slice
+    # afterwards), then the slices' nodes compete for the single budget.
+    t_col = X_eval.shape[1] - 1  # time is the last input column
+    slices = []
+    for k in range(num_windows):
+        lo, hi = float(edges[k]), float(edges[k + 1])
+        smask = (X_eval[:, t_col] >= lo - 1e-12) & (X_eval[:, t_col] <= hi + 1e-12)
+        slices.append((lo, hi, X_eval[smask], y_eval[smask]))
+    results, gsum = build_global_windowed_trees(
+        slices, M,
+        max_depth=region_detector.max_depth,
+        min_samples_leaf=region_detector.min_samples_leaf,
+        domain_bounds=region_detector.domain_bounds,
+        t_dim=int(problem_cfg['spatial_dim']),
+        variable=variable_for_node_accept,
+        eps=epsilon_node_acceptance,
+        retain_siblings=retain_siblings,
+    )
+    ctx.metrics['windowed_tree_selection'] = gsum
+
     merged_accepted = []
     merged_children: Dict[int, int] = {}
     merged_parent: Dict[int, int] = {}
@@ -711,71 +753,7 @@ def _build_tree_once(ctx: TrainingContext, retain_siblings: bool) -> Dict:
     merged_prune_stats: Dict = {}
     merged_diag = []
     total_nodes = 0
-    t_col = X_eval.shape[1] - 1  # time is the last input column
-    for k in range(num_windows):
-        m_k = int(m_per_window[k])
-        lo, hi = float(edges[k]), float(edges[k + 1])
-        smask = (X_eval[:, t_col] >= lo - 1e-12) & (X_eval[:, t_col] <= hi + 1e-12)
-        n_slice = int(smask.sum())
-        if m_k <= 0:
-            # M=0 slice (the *_zero distributions): ONE expert spanning the
-            # whole slice — a synthetic accepted leaf, no tree fit. Spawning
-            # gives it the standard experts_architecture like any other leaf.
-            from adaptive.region_detector import TreeNodeInfo
-            sd = int(problem_cfg['spatial_dim'])
-            bl = [problem_cfg['spatial_domain'][d][0] for d in range(sd)] + [lo]
-            bu = [problem_cfg['spatial_domain'][d][1] for d in range(sd)] + [hi]
-            nid = (k + 1) * _ID_OFF + 1
-            node = TreeNodeInfo(
-                node_id=nid, tree_idx=0, is_leaf=True, n_samples=n_slice,
-                bounds_lower=bl, bounds_upper=bu,
-                prediction=np.zeros(1), parent_prediction=None,
-            )
-            logger.info(f"  [WindowedTree] slice {k}: t in [{lo:.4f}, {hi:.4f}], "
-                        f"M=0 -> single whole-slice expert "
-                        f"(bounds {bl} .. {bu}).")
-            merged_accepted.append((node, -1))
-            merged_children[nid] = -1
-            merged_parent[nid] = -1
-            merged_depth[nid] = 1
-            merged_diag.append({
-                'node_id': nid, 'parent_node_id': -1,
-                'wavelet_norm_squared': 0.0, 'n_samples': n_slice,
-                'is_leaf': True, 'bounds_lower': bl, 'bounds_upper': bu,
-                'tree_depth': 1,
-            })
-            total_nodes += 1
-            continue
-        logger.info(f"  [WindowedTree] slice {k}: t in [{lo:.4f}, {hi:.4f}], "
-                    f"{n_slice} grid points, selecting top M={m_k} "
-                    f"(eps={epsilon_node_acceptance})...")
-        part = _fit_tree_and_maps(ctx, X_eval[smask], y_eval[smask], m_k,
-                                  retain_siblings, epsilon_node_acceptance,
-                                  id_offset=(k + 1) * _ID_OFF)
-        # Clip node boxes to the slice's t-range: sklearn tree boxes inherit
-        # the DOMAIN bounds and only refine at split cuts, so a node that
-        # never splits on t would span the full [t_min, t_max] — its region
-        # must live in its slice (this is what makes slice-1+ experts take
-        # interface_ic from the root at their t_lo instead of the true IC).
-        _t_dim = int(problem_cfg['spatial_dim'])
-        for _node, _ in part['accepted_nodes']:
-            _bl = list(_node.bounds_lower)
-            _bu = list(_node.bounds_upper)
-            _bl[_t_dim] = max(float(_bl[_t_dim]), lo)
-            _bu[_t_dim] = min(float(_bu[_t_dim]), hi)
-            _node.bounds_lower = _bl
-            _node.bounds_upper = _bu
-        for _dn in part['diag_nodes']:
-            _bl = list(_dn['bounds_lower'])
-            _bu = list(_dn['bounds_upper'])
-            _bl[_t_dim] = max(float(_bl[_t_dim]), lo)
-            _bu[_t_dim] = min(float(_bu[_t_dim]), hi)
-            _dn['bounds_lower'] = _bl
-            _dn['bounds_upper'] = _bu
-        logger.info(f"  [WindowedTree] slice {k}: accepted "
-                    f"{len(part['accepted_nodes'])} node(s) of "
-                    f"{part['node_count']} tree nodes "
-                    f"(boxes clipped to t in [{lo:.4f}, {hi:.4f}]).")
+    for k, part in enumerate(results):
         merged_accepted.extend(part['accepted_nodes'])
         merged_children.update(part['children_left'])
         merged_parent.update(part['parent_map'])
@@ -785,7 +763,9 @@ def _build_tree_once(ctx: TrainingContext, retain_siblings: bool) -> Dict:
         total_nodes += part['node_count']
 
     logger.info(f"  [Tree] Union: {len(merged_accepted)} accepted node(s) "
-                f"across {num_windows} slices ({total_nodes} tree nodes).")
+                f"across {num_windows} slices ({total_nodes} tree nodes); "
+                f"realized per-slice top-M {gsum['m_per_window']}"
+                f"{', roots kept ' + str(gsum['root_kept']) if any(gsum['root_kept']) else ''}.")
     from types import SimpleNamespace
     return {
         'accepted_nodes': merged_accepted,

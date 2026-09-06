@@ -345,12 +345,12 @@ def _finalize_training(ctx: TrainingContext) -> Path:
     logger.info(f"  Summary saved to {summary_path}")
 
     # Save config used
-    from utils.io import get_git_info
+    from utils.io import get_git_info, strip_transient_window_state
     cfg['git'] = get_git_info()
     config_path = run_dir / "config_used.yaml"
     import yaml
     with open(config_path, 'w') as f:
-        yaml.dump(cfg, f, default_flow_style=False)
+        yaml.dump(strip_transient_window_state(cfg), f, default_flow_style=False)
     logger.info(f"  Config saved to {config_path}")
     
     # Problem-specific final evaluation visualization

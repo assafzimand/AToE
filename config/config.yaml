@@ -109,7 +109,6 @@ allen_cahn:
   time_marching:
     enabled: false
     freeze_previous_windows: true
-    m_distribution: quadratic
     num_windows: 5
   tree_smoothness_threshold: 0.5
   wavelet_threshold: 0.002
@@ -178,7 +177,6 @@ burgers1d:
   time_marching:
     enabled: false
     freeze_previous_windows: true
-    m_distribution: quadratic
     num_windows: 5
   tree_smoothness_threshold: 0.5
   wavelet_threshold: 0.001
@@ -252,7 +250,6 @@ kdv:
     enabled: true
     freeze_previous_windows: true
     last_window_checkpoint: null
-    m_distribution: linear
     num_windows: 3
     only_for_tree_structure: true
   tree_smoothness_threshold: 0.4
@@ -319,7 +316,6 @@ ks:
     enabled: true
     freeze_previous_windows: true
     last_window_checkpoint: null
-    m_distribution: quadratic
     num_windows: 5
   tree_smoothness_threshold: 0.3
   wavelet_threshold: 0.04
@@ -423,7 +419,6 @@ schrodinger:
   time_marching:
     enabled: false
     freeze_previous_windows: true
-    m_distribution: quadratic
     num_windows: 5
   tree_smoothness_threshold: 0.7
   wavelet_threshold: 0.1

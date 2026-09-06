@@ -627,16 +627,11 @@ def _save_checkpoint(
     ``rel_l2`` is the solver-grid rel-L2 at save time (may be None before the
     first evaluation).
     """
-    # In time-marching mode, cfg['_time_marching_window'] carries a transient
-    # 'prev_model' reference that must not be serialized into the checkpoint
-    # (time_marching.py manages it in memory).
-    cfg_to_save = cfg
-    if ('_time_marching_window' in cfg
-            and cfg['_time_marching_window'].get('prev_model') is not None):
-        cfg_to_save = dict(cfg)
-        tm = dict(cfg['_time_marching_window'])
-        tm['prev_model'] = None
-        cfg_to_save['_time_marching_window'] = tm
+    # In time-marching mode, cfg['_time_marching_window'] carries transient
+    # in-memory objects ('prev_model', the 'preselected_tree' node dicts)
+    # that must not be serialized into the checkpoint.
+    from utils.io import strip_transient_window_state
+    cfg_to_save = strip_transient_window_state(cfg)
 
     # Optimizer STATE is intentionally not stored: nothing reloads it
     # (reconciliation and resume restore weights only; optimizers are

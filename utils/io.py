@@ -124,3 +124,25 @@ def make_run_dir(
     (run_dir / "training_plots").mkdir(exist_ok=True)
 
     return run_dir
+
+
+def strip_transient_window_state(cfg):
+    """Copy of ``cfg`` safe to serialize (checkpoint / config_used.yaml).
+
+    In time-marching mode ``cfg['_time_marching_window']`` carries in-memory
+    objects — the previous window's model (``prev_model``) and the window's
+    preselected tree (``preselected_tree``: TreeNodeInfo dicts from the
+    global top-M selection). Both are managed by trainer.time_marching and
+    are dropped here (set to None) in a shallow copy; ``cfg`` itself is
+    untouched. Returns ``cfg`` unchanged when there is nothing to strip.
+    """
+    tm = cfg.get('_time_marching_window') if isinstance(cfg, dict) else None
+    if not tm or not any(tm.get(k) is not None
+                         for k in ('prev_model', 'preselected_tree')):
+        return cfg
+    out = dict(cfg)
+    tm = dict(tm)
+    tm['prev_model'] = None
+    tm['preselected_tree'] = None
+    out['_time_marching_window'] = tm
+    return out

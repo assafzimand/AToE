@@ -213,10 +213,11 @@ def main():
         generate_and_save_datasets(config)
 
         # Time-marching: separate models trained per temporal window.
-        # only_for_tree_structure: the window count / M distribution shape the
-        # TREE ONLY (per-time-slice trees, unioned; see orchestrator
-        # _build_tree_once) — training itself is a single full-domain run:
-        # no window loop, no freezing, no last_window_checkpoint.
+        # only_for_tree_structure: the window count shapes the TREE ONLY
+        # (per-time-slice trees competing for one global top-M budget,
+        # unioned; see orchestrator _build_tree_once) — training itself is a
+        # single full-domain run: no window loop, no freezing, no
+        # last_window_checkpoint.
         tm_cfg = config.get(problem, {}).get('time_marching', {})
         tree_only_tm = (tm_cfg.get('enabled', False)
                         and tm_cfg.get('only_for_tree_structure', False))
@@ -224,13 +225,14 @@ def main():
         if tree_only_tm:
             logger.info("5. Time marching: only_for_tree_structure — windowed "
                         "TREE on a single full-domain run "
-                        f"(windows={tm_cfg.get('num_windows')}, "
-                        f"m_distribution={tm_cfg.get('m_distribution')})")
+                        f"(windows={tm_cfg.get('num_windows')}, global "
+                        f"top-M across slices)")
 
         if use_time_marching:
             logger.info("5. Time marching mode enabled")
             logger.info(f"  Windows: {tm_cfg.get('num_windows', 5)}")
-            logger.info(f"  M distribution: {tm_cfg.get('m_distribution', 'quadratic')}")
+            logger.info("  Expert budget: global top-M across windows "
+                        "(no per-window M distribution)")
             logger.info(f"  Freeze previous: {tm_cfg.get('freeze_previous_windows', True)}")
 
             if not is_adaptive:
