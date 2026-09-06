@@ -67,9 +67,13 @@ axis-aligned splits cannot efficiently isolate them over the full time horizon: 
 A separate tree is constructed within each tile, and the nodes of all the
 tile trees then compete for the single global budget: the candidate nodes of
 every tile are pooled, ranked by their geometric wavelet norms, and the
-$M$-term approximation \eqref{m-term} is selected over the union. Each
-tile's selection is then completed to a complete binary sub-tree within its
-own tree, as before. The allocation of terms across the tiles is therefore
+$M$-term approximation \eqref{m-term} is selected over the union, a known
+method for compressing decision tree approximations of a function.
+Each tile's selection is then completed to a
+complete binary sub-tree within its own tree, as before. In addition, the
+root of every tile is always retained, so a tile that wins no terms still
+contributes a single region spanning its whole slice, and the leaves of all
+tile trees are guaranteed to tile the entire space--time domain. The allocation of terms across the tiles is therefore
 not prescribed in advance but emerges from the solution itself: tiles whose
 slice of the domain carries more fine structure win a larger share of the
 budget. The leaves of all tile trees together form the decomposition, and
