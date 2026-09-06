@@ -143,11 +143,31 @@ def build_split_loss(
     # Periodic PDEs use cross-expert BC pairing, so skip Dirichlet-to-zero
     is_periodic = problem in PERIODIC_PROBLEMS
 
+    # BC mode (``split_icbc.global_bc_or_root_mounted``): 'global' keeps the
+    # historical per-expert BC enforcement (periodic pairing / true
+    # Dirichlet); 'root_mounted' removes it entirely — the data builder
+    # relabels the global-boundary faces as KIND_INTERFACE_BC (root-mounted
+    # interfaces), so they flow through the standard interface path below
+    # (root targets, derivative matching, normalization, interface_bc
+    # weight) and NO KIND_BC_TRUE points exist. Under root_mounted the
+    # composition is only as periodic as the frozen root is at the edges.
+    bc_mode = _split_icbc_cfg.get('global_bc_or_root_mounted', 'root_mounted')
+    if bc_mode not in ('global', 'root_mounted'):
+        raise ValueError(
+            f"split_icbc.global_bc_or_root_mounted must be 'global' or "
+            f"'root_mounted', got {bc_mode!r}")
+    pairing_active = is_periodic and bc_mode == 'global'
+    if bc_mode == 'root_mounted':
+        logger.info("[SplitLoss] BC mode: root_mounted — no global BC term "
+                    "(no periodic pairing / true-BC matching); the "
+                    "global-boundary faces are root-mounted interfaces "
+                    "handled by the interface_bc path.")
+
     # Optional cap on the periodic-pairing derivative order (per-problem
     # ``bc_max_derivative_order``, same knob as the global loss). None keeps
     # the default m-1 pairing; 0 pairs the value only.
     bc_pair_max_order = pc.get('bc_max_derivative_order')
-    if is_periodic and bc_pair_max_order is not None:
+    if pairing_active and bc_pair_max_order is not None:
         _full = pde_spatial_order(problem) - 1
         logger.info(f"[SplitLoss] Periodic BC pairing capped at order "
                     f"{int(bc_pair_max_order)} (default for {problem}: "
@@ -161,7 +181,7 @@ def build_split_loss(
     # ~40-100x and dxx/value ~500-1100x early in training. Value term
     # never scaled; default false keeps all past runs' semantics.
     bc_norm = bool(_split_icbc_cfg.get('bc_term_normalization', False))
-    if is_periodic and bc_norm:
+    if pairing_active and bc_norm:
         logger.info("[SplitLoss] Periodic BC pairing per-order normalization "
                     "ENABLED: order-k pairing term divided by "
                     "(1 + mean|d^k u0|^2) at the boundary points; value term "
@@ -227,7 +247,7 @@ def build_split_loss(
                 model, eidx,
                 x[emask], t[emask], h_gt[emask],
                 kinds[emask],
-                w_res, w_ic, w_bc, is_periodic,
+                w_res, w_ic, w_bc, pairing_active,
                 device,
                 problem, iface_src,
                 residual_loss=residual_losses.get(eidx),
@@ -242,8 +262,10 @@ def build_split_loss(
             if return_components:
                 all_comps[eidx] = comps
 
-        # ── Periodic BC: cross-expert pairing ──
-        if is_periodic and bc_face_ids is not None:
+        # ── Periodic BC: cross-expert pairing (bc_mode 'global' only —
+        # under 'root_mounted' no KIND_BC_TRUE points exist and the edge
+        # faces are handled by the interface path above) ──
+        if pairing_active and bc_face_ids is not None:
             bc_loss_contrib, bc_per_expert = _compute_periodic_bc_loss(
                 model, x, t, expert_ids, kinds,
                 bc_face_ids, device, problem,

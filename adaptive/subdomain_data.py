@@ -504,6 +504,30 @@ def build_subdomain_static(
 
     n_ic_per_face, n_bc_per_face = _face_counts(cfg)
 
+    # BC mode (``split_icbc.global_bc_or_root_mounted``):
+    #   'global' — the historical behavior: global spatial-boundary faces are
+    #     KIND_BC_TRUE (periodic PDEs pair them across experts, others match
+    #     the true Dirichlet data).
+    #   'root_mounted' — global-boundary faces are treated EXACTLY like
+    #     interior x-face interfaces (KIND_INTERFACE_BC): targets minted from
+    #     the frozen root, derivatives matched up to the interface order,
+    #     included in the interface normalization/weighting. No cross-expert
+    #     pairing, no true-BC term; the composition is only as periodic as
+    #     the root is at the edges.
+    _split_cfg = (cfg.get('adaptive_pinn', {}).get('split_icbc', {}) or {})
+    _bc_mode = _split_cfg.get('global_bc_or_root_mounted', 'root_mounted')
+    if _bc_mode not in ('global', 'root_mounted'):
+        raise ValueError(
+            f"split_icbc.global_bc_or_root_mounted must be 'global' or "
+            f"'root_mounted', got {_bc_mode!r}")
+    bc_root_mounted = (_bc_mode == 'root_mounted')
+    if bc_root_mounted:
+        logger.info(
+            "[SplitData] BC mode: root_mounted — global spatial-boundary "
+            "faces become ROOT-MOUNTED interfaces (KIND_INTERFACE_BC, "
+            "targets minted from the frozen root like every interior "
+            "interface); no periodic pairing / true-BC data.")
+
     if len(new_expert_indices) == 0:
         return _empty(spatial_dim, output_dim, device)
 
@@ -532,6 +556,7 @@ def build_subdomain_static(
             n_bc_per_face, output_dim, device,
             xs, ts, gs, eids, ks, bc_fids,
             bc_t_global,
+            root_mounted=bc_root_mounted,
         )
 
     # ── Continuity faces: neighbor-to-neighbor on shared interior faces ──
@@ -778,6 +803,7 @@ def _add_bc_faces_periodic(
     n_pts, output_dim, device,
     xs, ts, gs, eids, ks, bc_fids,
     bc_t_global,
+    root_mounted=False,
 ):
     """Add BC face points with periodic pairing support.
 
@@ -788,6 +814,12 @@ def _add_bc_faces_periodic(
 
     For interior x-face interfaces (non-global boundaries):
     - Uses KIND_INTERFACE_BC (weighted by w_bc)
+
+    ``root_mounted`` (``split_icbc.global_bc_or_root_mounted``): the
+    global-boundary faces take the INTERIOR-interface treatment as well —
+    KIND_INTERFACE_BC with a fresh per-expert t-draw (no cross-expert
+    alignment needed since there is no pairing), targets minted from the
+    frozen root downstream like every other interface.
     """
     bl, bu = region.bounds_lower, region.bounds_upper
     t_lo = bl[spatial_dim]
@@ -798,7 +830,7 @@ def _add_bc_faces_periodic(
         for side_idx, face_val in enumerate([bl[d], bu[d]]):
             is_true = _is_global_boundary(
                 face_val, g_lo, g_hi
-            )
+            ) and not root_mounted
 
             if is_true:
                 # Shared t per dimension, filtered to this expert's t-range,

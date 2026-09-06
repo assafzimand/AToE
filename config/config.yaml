@@ -47,6 +47,7 @@ adaptive_pinn:
   max_experts: 150
   split_icbc:
     enabled: true
+    global_bc_or_root_mounted: root_mounted
     interface_term_normalization: true
     max_interface_derivative_order: 2
   tree_max_depth: 15
