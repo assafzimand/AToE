@@ -1,10 +1,14 @@
 # ==========================================================================
 # KDV f32 WINDOWED-ROOT P3 — M22 W3-LINEAR, EXPERTS 5x35 (DEEP), H100
 # (REV 2026-09-06c: experts 3x45 -> 5x35 — first DEEPER-expert probe
-# on the wroot p3 line (~5.2k params/expert vs ~4.4k at 3x45);
-# leaf_input_normalization: true stays active from base_config, so
-# comparable to the e3x45 leaf-norm run but NOT to the unnormalized
-# h100 anchors.)
+# on the wroot p3 line (~5.2k params/expert vs ~4.4k at 3x45).)
+# (REV 2026-09-06d: leaf_input_normalization RETIRED back to false in
+# base_config — verified harmful with RFF experts: norm stretches leaf
+# box to [-1,1]^2 BEFORE the expert's own RFF, multiplying effective
+# physical frequencies by 1/halfspan; measured at init on real leaves:
+# |u_xxx| x46,000 on the smallest box (hx=0.039). RFF experts on raw
+# coords = the known-good config; run IS comparable to h100 anchors.
+# The e3x45 leaf-norm run + the first e5x35 launch are burnt.)
 # (2026-09-06, main). ACTIVE: 1 run = the exact h100-reference wroot
 # p3 config with the tree at M22 W3-linear, only the expert
 # architecture changed to [2,35,35,35,35,35,1].
@@ -63,7 +67,7 @@ base_config:
       optimizer_2: null, optimizer_switch_epoch: 99999, sigma_fraction: 0.03, single_corrector: false}
     initial_train: {epochs: 41000, lr: 0.001, lr_decay_rate: 0.98, lr_decay_steps: 1000, lr_schedule: none,
       lr_warmup_steps: 0, optimizer_1: adam, optimizer_2: ssbroyden, optimizer_switch_epoch: 1000}
-    leaf_input_normalization: true
+    leaf_input_normalization: false
     max_experts: 150
     split_icbc: {bc_term_normalization: false, enabled: true, interface_order_decay: 1.0, interface_term_normalization: false,
       max_interface_derivative_order: null}
