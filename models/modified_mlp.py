@@ -115,6 +115,25 @@ class ModifiedMLP(nn.Module):
             LinearCls = nn.Linear if is_output_layer else LinearCls_hidden
             self.network[layer_name] = LinearCls(in_dim, out_dim)
 
+    def set_input_box(self, lower, upper) -> None:
+        """FBPINN-style per-leaf input normalization (see FCNet.set_input_box):
+        affinely map inputs from [lower, upper] to [-1, 1]^d before the RFF /
+        encoders. Non-persistent buffers — state dict unchanged."""
+        ref = next(self.parameters())
+        lo = torch.as_tensor(lower, device=ref.device, dtype=ref.dtype)
+        hi = torch.as_tensor(upper, device=ref.device, dtype=ref.dtype)
+        span = (hi - lo).clamp(min=1e-12)
+        self.register_buffer('input_box_center', (hi + lo) / 2.0,
+                             persistent=False)
+        self.register_buffer('input_box_halfspan', span / 2.0,
+                             persistent=False)
+
+    def _normalize_input(self, x: torch.Tensor) -> torch.Tensor:
+        center = getattr(self, 'input_box_center', None)
+        if center is None:
+            return x
+        return (x - center) / self.input_box_halfspan
+
     def _get_activation(self, activation: str) -> nn.Module:
         activations = {
             'tanh': nn.Tanh(),
@@ -131,7 +150,7 @@ class ModifiedMLP(nn.Module):
         return activations[activation.lower()]
 
     def forward(self, x: torch.Tensor, return_activation: bool = False):
-        out = x
+        out = self._normalize_input(x)
         if self.ff_emb is not None:
             out = self.ff_emb(out)
 

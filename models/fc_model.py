@@ -111,6 +111,31 @@ class FCNet(nn.Module):
             LinearCls = nn.Linear if is_output_layer else LinearCls_hidden
             self.network[layer_name] = LinearCls(in_dim, out_dim)
 
+    def set_input_box(self, lower, upper) -> None:
+        """Enable per-leaf input normalization: affinely map inputs from the
+        box [lower, upper] to [-1, 1]^d before the (RFF and) first layer.
+
+        FBPINN-style per-subdomain normalization: deep/narrow leaves otherwise
+        receive coordinate ranges far below the domain scale, which conditions
+        a tanh MLP (and the RFF frequencies) poorly. Buffers are registered
+        NON-persistent so state dicts are unchanged — on reload the trainer
+        re-applies the box from the saved region bounds + adaptive_config.
+        """
+        ref = next(self.parameters())
+        lo = torch.as_tensor(lower, device=ref.device, dtype=ref.dtype)
+        hi = torch.as_tensor(upper, device=ref.device, dtype=ref.dtype)
+        span = (hi - lo).clamp(min=1e-12)
+        self.register_buffer('input_box_center', (hi + lo) / 2.0,
+                             persistent=False)
+        self.register_buffer('input_box_halfspan', span / 2.0,
+                             persistent=False)
+
+    def _normalize_input(self, x: torch.Tensor) -> torch.Tensor:
+        center = getattr(self, 'input_box_center', None)
+        if center is None:
+            return x
+        return (x - center) / self.input_box_halfspan
+
     def _get_activation(self, activation: str) -> nn.Module:
         """Get activation function by name."""
         activations = {
@@ -147,7 +172,7 @@ class FCNet(nn.Module):
             If return_activation is True:  tuple of (output, activation)
                 where activation is (N, last_hidden_dim).
         """
-        out = x
+        out = self._normalize_input(x)
 
         # Apply Fourier Feature embedding if enabled
         if self.ff_emb is not None:

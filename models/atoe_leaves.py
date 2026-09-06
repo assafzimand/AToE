@@ -401,6 +401,14 @@ class AToELeaves(nn.Module):
             )
             expert = expert.to(device)
 
+        # Per-leaf input normalization (adaptive_pinn.leaf_input_normalization):
+        # map the expert's inputs from its region box to [-1, 1]^d (FBPINN-
+        # style conditioning for narrow tiles). Buffers are non-persistent;
+        # load_state_dict_extended re-applies from the SAVED adaptive_config.
+        if (self.adaptive_config.get('leaf_input_normalization', False)
+                and hasattr(expert, 'set_input_box')):
+            expert.set_input_box(region.bounds_lower, region.bounds_upper)
+
         self.experts.append(expert)
         self.regions.append(region)
 
@@ -732,6 +740,13 @@ class AToELeaves(nn.Module):
 
             device = next(self.base_model.parameters()).device
             expert = expert.to(device)
+
+            # Re-apply per-leaf input normalization from the CHECKPOINT's own
+            # adaptive_config (never the current run's): experts trained with
+            # normalized inputs must be evaluated the same way, and vice versa.
+            if (saved_adaptive.get('leaf_input_normalization', False)
+                    and hasattr(expert, 'set_input_box')):
+                expert.set_input_box(region.bounds_lower, region.bounds_upper)
 
             self.experts.append(expert)
             self.regions.append(region)
