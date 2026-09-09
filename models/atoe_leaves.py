@@ -508,19 +508,70 @@ class AToELeaves(nn.Module):
             'leaf_list': leaf_list,
         }
 
+    def mount_hard_ic(self, prev_model: nn.Module, t_start: float,
+                      t_end: float) -> None:
+        """Hard-enforce the window IC on the previous window's frozen model.
+
+        Kiyani-style output transform for time-marching windows k >= 1:
+
+            u(x, t) = u_prev(x, t0) + ((t - t0) / (t1 - t0)) * u_net(x, t)
+
+        so u(x, t0) == u_prev(x, t0) identically for any weights — the IC
+        loss term is exactly zero from the first step (its targets are the
+        same frozen prediction) and there is no ic-weight cliff for the
+        line search to fall off. phi is the simplest linear ramp; u_t at t0
+        stays free (u_t(t0) = u_net/dt), so the PDE residual, not the
+        ansatz, decides the dynamics.
+
+        ``prev_model`` is registered as a submodule, so window checkpoints
+        are self-contained (and a later window's prev may itself be
+        mounted — the recursion just nests frozen forwards). Params are
+        frozen here; optimizers built from requires_grad params never see
+        them. Intended for root-only (M=0) windows: expert split losses go
+        through forward_single_expert and would NOT see the mount.
+        """
+        if len(self.experts) > 0:
+            logger.warning("[HardIC] mounted on a model WITH experts — "
+                           "split-phase losses bypass the mount; only the "
+                           "composed forward is transformed.")
+        for p in prev_model.parameters():
+            p.requires_grad_(False)
+        prev_model.eval()
+        self._hard_ic_prev = prev_model
+        self._hard_ic_t0 = float(t_start)
+        self._hard_ic_dt = float(t_end - t_start)
+        self._hard_ic_active = True
+        logger.info(f"[HardIC] mounted: u = u_prev(x, {t_start:.4f}) + "
+                    f"((t - {t_start:.4f}) / {self._hard_ic_dt:.4f}) * u_net")
+
+    def _apply_hard_ic(self, inputs: torch.Tensor,
+                       out: torch.Tensor) -> torch.Tensor:
+        """Apply the mounted hard-IC transform (no-op when not mounted)."""
+        if not getattr(self, '_hard_ic_active', False):
+            return out
+        t = inputs[:, -1:]
+        prev_in = torch.cat(
+            [inputs[:, :-1], torch.full_like(t, self._hard_ic_t0)], dim=1)
+        u0 = self._hard_ic_prev(prev_in)
+        phi = (t - self._hard_ic_t0) / self._hard_ic_dt
+        return u0 + phi * out
+
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         # Base-only case (no experts spawned yet)
         if -1 in self.leaf_indices:
-            return self.base_model(inputs)
+            return self._apply_hard_ic(inputs, self.base_model(inputs))
 
         # Single-corrector fine-tune: frozen soft blend + collar-gated correction.
         if getattr(self, 'corrector_active', False) and self.corrector is not None:
             u_soft, chi, _, _ = self._soft_blend_and_chi(inputs)
-            return u_soft + chi * self.corrector(inputs)
+            return self._apply_hard_ic(
+                inputs, u_soft + chi * self.corrector(inputs))
 
         if self.blending_mode == 'hard':
-            return self._forward_hard_only_leaves(inputs)
-        return self._forward_soft_only_leaves(inputs)
+            return self._apply_hard_ic(
+                inputs, self._forward_hard_only_leaves(inputs))
+        return self._apply_hard_ic(
+            inputs, self._forward_soft_only_leaves(inputs))
 
     def _forward_soft_only_leaves(self, inputs: torch.Tensor) -> torch.Tensor:
         """
@@ -582,7 +633,7 @@ class AToELeaves(nn.Module):
         if -1 in self.leaf_indices:
             u_base = self.base_model(inputs)
             result['base'] = u_base
-            result['composed'] = u_base
+            result['composed'] = self._apply_hard_ic(inputs, u_base)
             result['masks'] = {}
             result['weights_normalized'] = {'base': torch.ones(N, 1, device=device)}
             result['blending_mode_info'] = 'base_only'
@@ -616,7 +667,7 @@ class AToELeaves(nn.Module):
             result['weights_normalized'][f'expert_{expert_idx}'] = psi_norm[:, local_idx:local_idx+1]
             u_total = u_total + psi_norm[:, local_idx:local_idx+1] * u_k
 
-        result['composed'] = u_total
+        result['composed'] = self._apply_hard_ic(inputs, u_total)
         result['blending_mode_info'] = blending_info
         return result
 

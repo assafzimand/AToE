@@ -1,26 +1,32 @@
 # ==========================================================================
-# KS f32 FULL 5-WINDOW ROOTS — IC/BC WEIGHTS 1e4 ON THE BEST CLEAN
-# CONFIG (H1000)
-# (2026-09-09, main). CONTEXT: the w0 lr grid (no causal) resolved:
-# lr 1.0 -> 1.20e-2 (line-search blowup), lr 0.1 -> 3.25e-4 (NEW
-# no-causal w0 best; h1000 alone beat the h100 4.327e-4 x1.33),
-# lr 0.01 -> 8.93e-4, lr 0.001 -> 2.51e-3. Best clean config = 50k
-# Adam sched(warmup5000, 0.9/5000) -> 40k SW LBFGS h1000 lr 0.1
-# tol 0/0, periodic root_only.
-# ACTIVE: 1 run = FULL 5-WINDOW time marching (T=0.5, dt=0.1) on
-# that config with loss weights raised 1e3 -> 1e4 (ic/bc/interface
-# all 1e4; NOTE: under periodic root_only the BC term is
-# architecturally absent, so per window this is the IC weight — the
-# inherited-IC anchor of every handoff; fills the never-run 1e4 rung
-# of the IC/BC ladder). READ: per-window growth vs the 1e3 full run
-# (h100: 4.33e-4 -> 5.71e-3 -> 5.70e-2, x13/x10, stitched 3.972e-1)
-# — does a 10x stronger IC anchor slow the window-to-window growth?
-# w0 read vs 3.25e-4 (same config w/ 1e3, w0-debug); causal I-cell
-# 2.124e-4.
-# ON HOLD/RUNNING: KS w0 causal completion grid (LAUNCHED
-# 2026-09-08, 6 cells), KdV CLOSED (marked chain root 5.1157e-3 ->
-# p3 4.8994e-3 -> ft 4.89635e-3, MD5-verified), KS f64 pair cell B
-# (never ran), KS w1 lr pair (queued).
+# KS f32 WINDOW-1 DEBUG — A: PURE SOAP (clean / sched / causal / LRA),
+# B: KIYANI-STYLE HARD IC ON THE BENCHMARK SCHEME
+# (2026-09-09b, main). REQUIRES THE HARD-IC + this plan's COMMIT on the
+# training machine (models/atoe_leaves.py mount_hard_ic, trainer/
+# time_marching.py hard_ic hook — smoke-tested locally 2026-09-09).
+# CONTEXT: weights-1e4 full-5w REJECTED (w1 1.880e-2, ~1 LBFGS step then
+# frozen — IC anchor steepens the handoff cliff). Literature: nobody runs
+# causal/adaptive weights inside quasi-Newton; jaxpi2 KS = pure SOAP
+# lr 1e-3 warmup2000+exp0.9/2000, dynamic weights, causal tol 1.0 x16
+# chunks; Kiyani = fixed weights + HARD BCs (ours are hard already via
+# periodic root_only) -> hard IC makes the window loss residual-only.
+# ALL 5 CELLS: debug_windows [1] (t in [0.1, 0.2]), w0 = staged ckpt of
+# the 3.25e-4 benchmark run (20260907_174632, lr0.1/h1000/sched/periodic;
+# MD5 e6899ae3fe6140d4357792a3e864ac99), M=0, 6x128, weights 1e3,
+# periodic root_only, f32, 20k residual, patience 30.
+# A-cells: optimizer_1 soap ONLY (no switch -> causal advances + LRA
+#   adapts the whole run; soap betas .95/.95, precond every 10, eps 1e-8),
+#   90k epochs, lr 1e-3: clean(flat) / sched(warmup2000, 0.9/2000) /
+#   causal(tol [1.0], 16 chunks) / lra(grad_norm, alpha .1, every 1000).
+# B-cell: benchmark scheme 50k adam sched(warmup5000, 0.9/5000) -> 40k SW
+#   LBFGS h1000 lr 0.1 tol 0/0, ks.time_marching.hard_ic: true — the IC
+#   term self-zeroes (u(x,t0) == u_prev exactly), no handoff cliff.
+# READ vs w1 benchmarks: 8.9e-4 (1e3 h1k chain w1, premature freeze),
+# 1.88e-2 (weights-1e4). Does SOAP degrade gracefully? Does hard IC let
+# LBFGS descend past 8.9e-4?
+# ON HOLD/RUNNING: KS w0dbg causal completion grid (LAUNCHED 2026-09-08,
+# results pending), KdV CLOSED (marked chain), KS f64 pair cell B (never
+# ran), w1 lbfgs.lr pair (superseded by this batch's B).
 # ==========================================================================
 base_config:
   activation: tanh
@@ -233,8 +239,133 @@ base_config:
     precondition_frequency: 10
     weight_decay: 0.0
   ssbroyden: {lr: 1.0, tolerance_grad: 1.0e-14}
-experiment_name: ks_f32_tw5_T05_roots_h1k_weights1e4
+experiment_name: ks_f32_w1dbg_soap_vs_hardic
 experiments:
+- adaptive_pinn:
+    M_experts_num: 0
+    fine_tune: {epochs: 0}
+    initial_train: {epochs: 90000, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
+      optimizer_1: soap, optimizer_2: null, optimizer_switch_epoch: 999999}
+    split_icbc: {bc_term_normalization: false, interface_term_normalization: true,
+      max_interface_derivative_order: 1}
+  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+  batch_size: 99999
+  epochs: 0
+  experts_architecture: [2, 30, 30, 30, 1]
+  freeze_stop_epochs: 1001
+  ks:
+    bc_max_derivative_order: 1
+    fourier_features: {dim: auto, enabled: true, periodic: root_only, scale: 2.0}
+    loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
+    temporal_domain: [0.0, 0.5]
+    time_marching: {debug_windows: [1], enabled: true, freeze_previous_windows: true,
+      last_window_checkpoint: roots_checkpoints/single_precision/ks_5w_w0_root-6x128RFF-50a40l-h1k-lr01-relL2_3.25e-4.pt,
+      num_windows: 5, only_for_tree_structure: false}
+  lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
+    tolerance_change: 0.0, tolerance_grad: 0.0}
+  lr: 0.001
+  model: AToELeaves
+  name: ks_w1dbg_soap_clean
+  patience_evals: 30
+  precision: float32
+  problem: ks
+  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+  soap: {betas: [0.95, 0.95], precondition_frequency: 10, weight_decay: 0.0}
+- adaptive_pinn:
+    M_experts_num: 0
+    fine_tune: {epochs: 0}
+    initial_train: {epochs: 90000, lr: 0.001, lr_decay_rate: 0.9, lr_decay_steps: 2000,
+      lr_schedule: exponential, lr_warmup_steps: 2000,
+      optimizer_1: soap, optimizer_2: null, optimizer_switch_epoch: 999999}
+    split_icbc: {bc_term_normalization: false, interface_term_normalization: true,
+      max_interface_derivative_order: 1}
+  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+  batch_size: 99999
+  epochs: 0
+  experts_architecture: [2, 30, 30, 30, 1]
+  freeze_stop_epochs: 1001
+  ks:
+    bc_max_derivative_order: 1
+    fourier_features: {dim: auto, enabled: true, periodic: root_only, scale: 2.0}
+    loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
+    temporal_domain: [0.0, 0.5]
+    time_marching: {debug_windows: [1], enabled: true, freeze_previous_windows: true,
+      last_window_checkpoint: roots_checkpoints/single_precision/ks_5w_w0_root-6x128RFF-50a40l-h1k-lr01-relL2_3.25e-4.pt,
+      num_windows: 5, only_for_tree_structure: false}
+  lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
+    tolerance_change: 0.0, tolerance_grad: 0.0}
+  lr: 0.001
+  model: AToELeaves
+  name: ks_w1dbg_soap_sched
+  patience_evals: 30
+  precision: float32
+  problem: ks
+  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+  soap: {betas: [0.95, 0.95], precondition_frequency: 10, weight_decay: 0.0}
+- adaptive_pinn:
+    M_experts_num: 0
+    fine_tune: {epochs: 0}
+    initial_train: {epochs: 90000, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
+      optimizer_1: soap, optimizer_2: null, optimizer_switch_epoch: 999999}
+    split_icbc: {bc_term_normalization: false, interface_term_normalization: true,
+      max_interface_derivative_order: 1}
+  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+  batch_size: 99999
+  epochs: 0
+  experts_architecture: [2, 30, 30, 30, 1]
+  freeze_stop_epochs: 1001
+  ks:
+    bc_max_derivative_order: 1
+    causal_training: {enabled: true, min_epochs_per_stage: 5000,
+      min_weight_threshold: 0.99, num_chunks: 16, tol_schedule: [1.0]}
+    fourier_features: {dim: auto, enabled: true, periodic: root_only, scale: 2.0}
+    loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
+    temporal_domain: [0.0, 0.5]
+    time_marching: {debug_windows: [1], enabled: true, freeze_previous_windows: true,
+      last_window_checkpoint: roots_checkpoints/single_precision/ks_5w_w0_root-6x128RFF-50a40l-h1k-lr01-relL2_3.25e-4.pt,
+      num_windows: 5, only_for_tree_structure: false}
+  lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
+    tolerance_change: 0.0, tolerance_grad: 0.0}
+  lr: 0.001
+  model: AToELeaves
+  name: ks_w1dbg_soap_causal
+  patience_evals: 30
+  precision: float32
+  problem: ks
+  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+  soap: {betas: [0.95, 0.95], precondition_frequency: 10, weight_decay: 0.0}
+- adaptive_pinn:
+    M_experts_num: 0
+    fine_tune: {epochs: 0}
+    initial_train: {epochs: 90000, lr: 0.001, lr_schedule: none, lr_warmup_steps: 0,
+      optimizer_1: soap, optimizer_2: null, optimizer_switch_epoch: 999999}
+    split_icbc: {bc_term_normalization: false, interface_term_normalization: true,
+      max_interface_derivative_order: 1}
+  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+  batch_size: 99999
+  epochs: 0
+  experts_architecture: [2, 30, 30, 30, 1]
+  freeze_stop_epochs: 1001
+  ks:
+    bc_max_derivative_order: 1
+    lra: {alpha: 0.1, enabled: true, epsilon: 1.0e-05, scheme: grad_norm,
+      update_every: 1000}
+    fourier_features: {dim: auto, enabled: true, periodic: root_only, scale: 2.0}
+    loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
+    temporal_domain: [0.0, 0.5]
+    time_marching: {debug_windows: [1], enabled: true, freeze_previous_windows: true,
+      last_window_checkpoint: roots_checkpoints/single_precision/ks_5w_w0_root-6x128RFF-50a40l-h1k-lr01-relL2_3.25e-4.pt,
+      num_windows: 5, only_for_tree_structure: false}
+  lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
+    tolerance_change: 0.0, tolerance_grad: 0.0}
+  lr: 0.001
+  model: AToELeaves
+  name: ks_w1dbg_soap_lra
+  patience_evals: 30
+  precision: float32
+  problem: ks
+  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+  soap: {betas: [0.95, 0.95], precondition_frequency: 10, weight_decay: 0.0}
 - adaptive_pinn:
     M_experts_num: 0
     fine_tune: {epochs: 0}
@@ -251,26 +382,60 @@ experiments:
   ks:
     bc_max_derivative_order: 1
     fourier_features: {dim: auto, enabled: true, periodic: root_only, scale: 2.0}
-    loss_weights: {bc: 10000.0, ic: 10000.0, interface_bc: 10000.0, interface_ic: 10000.0}
+    loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
     temporal_domain: [0.0, 0.5]
-    time_marching: {debug_windows: null, enabled: true, freeze_previous_windows: true,
-      last_window_checkpoint: null, num_windows: 5, only_for_tree_structure: false}
+    time_marching: {debug_windows: [1], enabled: true, freeze_previous_windows: true,
+      hard_ic: true, last_window_checkpoint: roots_checkpoints/single_precision/ks_5w_w0_root-6x128RFF-50a40l-h1k-lr01-relL2_3.25e-4.pt,
+      num_windows: 5, only_for_tree_structure: false}
   lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
     tolerance_change: 0.0, tolerance_grad: 0.0}
   lr: 0.001
-  lr_decay_rate: 0.9
-  lr_decay_steps: 5000
-  lr_schedule: exponential
-  lr_warmup_steps: 5000
   model: AToELeaves
-  name: ks_root_tw5_f32_h1k_sched_periodic_w1e4
-  optimizer_1: adam
-  optimizer_2: lbfgs
-  optimizer_switch_epoch: 50000
+  name: ks_w1dbg_hardic_50a40l_h1k
   patience_evals: 30
   precision: float32
   problem: ks
   sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+  soap: {betas: [0.95, 0.95], precondition_frequency: 10, weight_decay: 0.0}
+# ---- for memory (2026-09-09): KS full-5w weights-1e4 (RAN 2026-09-09 — STOPPED after w1: w0 3.014e-4, w1 1.880e-2, REJECTED) ----
+# experiment_name: ks_f32_tw5_T05_roots_h1k_weights1e4
+# experiments:
+# - adaptive_pinn:
+#     M_experts_num: 0
+#     fine_tune: {epochs: 0}
+#     initial_train: {epochs: 90000, lr: 0.001, lr_decay_rate: 0.9, lr_decay_steps: 5000,
+#       lr_schedule: exponential, lr_warmup_steps: 5000, optimizer_1: adam,
+#       optimizer_2: lbfgs, optimizer_switch_epoch: 50000}
+#     split_icbc: {bc_term_normalization: false, interface_term_normalization: true,
+#       max_interface_derivative_order: 1}
+#   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+#   batch_size: 99999
+#   epochs: 0
+#   experts_architecture: [2, 30, 30, 30, 1]
+#   freeze_stop_epochs: 1001
+#   ks:
+#     bc_max_derivative_order: 1
+#     fourier_features: {dim: auto, enabled: true, periodic: root_only, scale: 2.0}
+#     loss_weights: {bc: 10000.0, ic: 10000.0, interface_bc: 10000.0, interface_ic: 10000.0}
+#     temporal_domain: [0.0, 0.5]
+#     time_marching: {debug_windows: null, enabled: true, freeze_previous_windows: true,
+#       last_window_checkpoint: null, num_windows: 5, only_for_tree_structure: false}
+#   lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
+#     tolerance_change: 0.0, tolerance_grad: 0.0}
+#   lr: 0.001
+#   lr_decay_rate: 0.9
+#   lr_decay_steps: 5000
+#   lr_schedule: exponential
+#   lr_warmup_steps: 5000
+#   model: AToELeaves
+#   name: ks_root_tw5_f32_h1k_sched_periodic_w1e4
+#   optimizer_1: adam
+#   optimizer_2: lbfgs
+#   optimizer_switch_epoch: 50000
+#   patience_evals: 30
+#   precision: float32
+#   problem: ks
+#   sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
 # ---- for memory (2026-09-08): KS w0dbg causal completion grid — 6 missing cells (LAUNCHED 2026-09-08) ----
 # experiment_name: ks_f32_w0dbg_h1k_causal_grid_completion
 # experiments:

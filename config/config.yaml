@@ -250,6 +250,7 @@ kdv:
     debug_windows: null
     enabled: true
     freeze_previous_windows: true
+    hard_ic: false
     last_window_checkpoint: null
     num_windows: 3
     only_for_tree_structure: true
@@ -316,6 +317,7 @@ ks:
     debug_windows: null
     enabled: true
     freeze_previous_windows: true
+    hard_ic: false
     last_window_checkpoint: null
     num_windows: 5
   tree_smoothness_threshold: 0.3

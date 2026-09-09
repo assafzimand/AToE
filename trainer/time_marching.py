@@ -985,6 +985,17 @@ def train_with_time_marching(
             except Exception as _ws_err:  # noqa: BLE001
                 logger.warning(f"  [WarmStart] SKIPPED — incompatible base "
                                f"state dict: {_ws_err}")
+
+        # Optional Kiyani-style hard IC (time_marching.hard_ic): windows >= 1
+        # mount the frozen previous model so u(x, t_start) == u_prev(x,
+        # t_start) identically — the soft IC term self-zeroes (its h_gt
+        # override queries the same frozen net at the same points), removing
+        # the ic-weight loss cliff at the handoff. Window 0 is untouched
+        # (analytic IC, stays comparable to soft-IC baselines).
+        if (tm_cfg.get('hard_ic', False) and not window.is_first
+                and prev_model is not None):
+            window_model.mount_hard_ic(
+                prev_model, window.t_start, window.t_end)
         
         # 4. Build loss function for this window
         loss_module = importlib.import_module(f"losses.{problem}_loss")
