@@ -19,6 +19,7 @@ config_used.yaml), e.g.:
 """
 
 import os
+import re
 import sys
 import json
 import argparse
@@ -48,7 +49,8 @@ def _style_axes(ax):
 
 
 def plot_training_curves_paper(metrics, save_dir, optimizer_switch_epochs=None,
-                               segment_markers=None, name_suffix=''):
+                               segment_markers=None, name_suffix='',
+                               show_root_ref=True, rel_l2_ylim=None):
     """Paper-styled reimplementation of trainer.plotting.plot_training_curves:
     same panels/data/markers (reuses its _safe_log_scale, _draw_segment_markers
     helpers), just bigger/bold tick, axis-label and legend text. Kept local to
@@ -95,7 +97,9 @@ def plot_training_curves_paper(metrics, save_dir, optimizer_switch_epochs=None,
                 label='Rel. $L^2$ error', linewidth=2, alpha=0.8)
         experts_rel_l2 = metrics.get('pretrained_experts_rel_l2')
         root_rel_l2 = metrics.get('root_rel_l2')
-        if experts_rel_l2 is not None and experts_rel_l2 > 0:
+        if not show_root_ref:
+            pass
+        elif experts_rel_l2 is not None and experts_rel_l2 > 0:
             ax.axhline(y=experts_rel_l2, color='black', linestyle='-',
                        linewidth=1.5, alpha=0.8,
                        label=f'Phase-3 ckpt ({experts_rel_l2:.2e})')
@@ -106,6 +110,8 @@ def plot_training_curves_paper(metrics, save_dir, optimizer_switch_epochs=None,
                        label=f'Root ({root_rel_l2:.2e})')
         _draw_markers(ax)
         _finish(ax, 'Relative $L^2$ error', [_rl2])
+        if rel_l2_ylim is not None:
+            ax.set_ylim(*rel_l2_ylim)
 
     def _panel_components(ax):
         comp_epochs = loss_comps['epochs']
@@ -190,7 +196,19 @@ def load_run(run_dir: Path):
     with open(_winlong(run_dir / 'metrics.json'), encoding='utf-8') as f:
         metrics = json.load(f)
     with open(_winlong(run_dir / 'config_used.yaml'), encoding='utf-8') as f:
-        cfg = yaml.safe_load(f)
+        raw = f.read()
+    try:
+        cfg = yaml.safe_load(raw)
+    except yaml.constructor.ConstructorError:
+        # Some time-marching window configs got dumped with a live Python
+        # object embedded (a stray prev-window model reference), which
+        # safe_load refuses to construct. load_run only needs cfg['problem']
+        # (concat_runs' PDE-consistency check), so fall back to scanning
+        # just that line instead of parsing the whole document.
+        m = re.search(r'^problem:\s*(\S+)', raw, re.MULTILINE)
+        if not m:
+            raise
+        cfg = {'problem': m.group(1)}
     return metrics, cfg
 
 
@@ -396,6 +414,13 @@ def main():
     ap.add_argument('--out-dir', type=Path,
                      default=Path('outputs/paper_figures/training_curves'),
                      help='Output directory for the figures')
+    ap.add_argument('--no-root-ref', action='store_true',
+                     help='Omit the root/phase-3-ckpt reference line and legend '
+                          'entry from the rel-L2 panel')
+    ap.add_argument('--rel-l2-ylim', type=float, nargs=2, default=None,
+                     metavar=('YMIN', 'YMAX'),
+                     help='Fix the rel-L2 panel y-axis to this range (for a '
+                          'shared scale across separately-run comparison plots)')
     args = ap.parse_args()
 
     run_specs = [parse_run_arg(a) for a in args.run_dirs]
@@ -420,6 +445,8 @@ def main():
         optimizer_switch_epochs=optimizer_switch_epochs,
         segment_markers=segment_markers,
         name_suffix=name_suffix,
+        show_root_ref=not args.no_root_ref,
+        rel_l2_ylim=tuple(args.rel_l2_ylim) if args.rel_l2_ylim else None,
     )
 
 

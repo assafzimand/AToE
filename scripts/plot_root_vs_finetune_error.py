@@ -34,6 +34,8 @@ Usage:
 """
 
 import sys
+import json
+import copy
 import math
 import importlib
 import argparse
@@ -52,6 +54,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from utils.plot_io import save_png
 from models.atoe_leaves import AToELeaves
+from models.time_marching_model import TimeMarchingModel
+from trainer.time_marching import TimeWindow, _load_prev_window_model
 
 TICK_SIZE = 14
 LABEL_SIZE = 17
@@ -104,6 +108,52 @@ def build_model(cfg, device):
         adaptive_config=cfg['adaptive_pinn'],
         experts_architecture=cfg.get('experts_architecture'),
     ).to(device)
+
+
+def build_windowed_root_model(manifest_path: Path, device):
+    """Rebuild a time-marching root's full-domain model from its
+    checkpoints/root/manifest.json (window_i_best_model_root.pt files),
+    the same reconstruction scripts/regenerate_tm_combined_curves.py uses.
+    Returns (model, epoch, rel_l2) -- epoch/rel_l2 summarize the whole
+    stitched model (max epoch across windows; full_domain_rel_l2 from
+    time_marching_final_metrics.json when available, else None)."""
+    manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+    seg_dir = manifest_path.parent
+    entries = sorted(manifest['windows'], key=lambda e: e['idx'])
+    if len(entries) != manifest['num_windows']:
+        raise SystemExit(
+            f"{seg_dir} holds {len(entries)} of {manifest['num_windows']} "
+            f"windows -- partial run, cannot rebuild the full-domain model.")
+
+    windows = [TimeWindow(idx=e['idx'], t_start=e['t_start'], t_end=e['t_end'],
+                          is_first=(e['idx'] == 0), M=e['M'])
+              for e in entries]
+
+    ckpt0 = torch.load(seg_dir / entries[0]['file'], map_location='cpu',
+                       weights_only=False)
+    cfg = copy.deepcopy(ckpt0.get('config') or {})
+    if not cfg:
+        raise SystemExit(f"{entries[0]['file']} carries no stored config.")
+    tm_flag = cfg.pop('_time_marching_window', None)
+    full_domain = (tm_flag or {}).get('original_temporal_domain',
+                                      manifest['temporal_domain'])
+    cfg[cfg['problem']]['temporal_domain'] = list(full_domain)
+
+    pairs = [(w, _load_prev_window_model(
+                 str(seg_dir / e['file']), AToELeaves,
+                 cfg['base_architecture'], cfg['activation'], cfg, w, device))
+             for w, e in zip(windows, entries)]
+    model = TimeMarchingModel(pairs).to(device)
+    model.eval()
+
+    epoch = max(torch.load(seg_dir / e['file'], map_location='cpu',
+                           weights_only=False).get('epoch', 0)
+               for e in entries)
+    final_metrics_path = seg_dir.parent.parent / 'time_marching_final_metrics.json'
+    rel_l2 = None
+    if final_metrics_path.exists():
+        rel_l2 = json.loads(final_metrics_path.read_text(encoding='utf-8')).get('full_domain_rel_l2')
+    return model, epoch, rel_l2
 
 
 def load_checkpoint(model, ckpt_path):
@@ -166,7 +216,8 @@ def save_error_map(pde, segment, label, n_labels, x_grid, t_grid, err,
     return out_path
 
 
-def process_pde(ft_run_dir: Path, roots_dir: Path, out_dir: Path, root_checkpoint: Path = None):
+def process_pde(ft_run_dir: Path, roots_dir: Path, out_dir: Path, root_checkpoint: Path = None,
+                root_time_marching_manifest: Path = None):
     cfg = yaml.safe_load((ft_run_dir / 'config_used.yaml').read_text(encoding='utf-8'))
     pde = cfg['problem']
     labels = _DIM_LABELS.get(pde, ['u'])
@@ -185,23 +236,32 @@ def process_pde(ft_run_dir: Path, roots_dir: Path, out_dir: Path, root_checkpoin
     xt = np.column_stack([X.ravel(), T.ravel()])
     gt_flat = np.stack([c.ravel() for c in gt_channels], axis=1)
 
-    root_ckpt_path = root_checkpoint if root_checkpoint is not None else roots_dir / f'{_ROOT_TAG[pde]}_root.pt'
+    if root_time_marching_manifest is not None:
+        root_ckpt_path = None
+    else:
+        root_ckpt_path = root_checkpoint if root_checkpoint is not None else roots_dir / f'{_ROOT_TAG[pde]}_root.pt'
     ft_ckpt_path = ft_run_dir / 'checkpoints' / 'best_model_fine_tune.pt'
 
     segments = {}
     for seg_name, ckpt_path in [('root', root_ckpt_path), ('fine_tune', ft_ckpt_path)]:
-        model = build_model(cfg, device)
-        ckpt = load_checkpoint(model, ckpt_path)
+        if seg_name == 'root' and root_time_marching_manifest is not None:
+            model, epoch, ckpt_rel_l2 = build_windowed_root_model(
+                root_time_marching_manifest, device)
+        else:
+            model = build_model(cfg, device)
+            ckpt = load_checkpoint(model, ckpt_path)
+            epoch, ckpt_rel_l2 = ckpt['epoch'], ckpt.get('rel_l2')
         pred_flat = predict(model, xt, device)
         err = np.abs(pred_flat - gt_flat)                    # (N, n_channels)
         rel_l2 = math.sqrt(((pred_flat - gt_flat) ** 2).sum()
                            / (gt_flat ** 2).sum())
-        print(f"  {seg_name}: epoch={ckpt['epoch']}  "
-              f"ckpt rel_l2={ckpt.get('rel_l2'):.3e}  recomputed rel_l2={rel_l2:.3e}")
+        print(f"  {seg_name}: epoch={epoch}  "
+              f"ckpt rel_l2={ckpt_rel_l2 if ckpt_rel_l2 is None else f'{ckpt_rel_l2:.3e}'}  "
+              f"recomputed rel_l2={rel_l2:.3e}")
         err_grids = [err[:, d].reshape(len(t_grid), len(x_grid))
                     for d in range(len(labels))]
-        segments[seg_name] = {'err_grids': err_grids, 'epoch': ckpt['epoch'],
-                              'rel_l2': ckpt.get('rel_l2', rel_l2)}
+        segments[seg_name] = {'err_grids': err_grids, 'epoch': epoch,
+                              'rel_l2': ckpt_rel_l2 if ckpt_rel_l2 is not None else rel_l2}
 
     out_dir.mkdir(parents=True, exist_ok=True)
     gt_paths = save_ground_truth(pde, cfg, x_grid, t_grid, gt_channels, labels, out_dir)
@@ -236,12 +296,17 @@ def main():
                      help="Explicit root .pt path, overriding --roots-dir's <tag>_root.pt lookup "
                           "-- for runs whose root was trained standalone (its own checkpoints/ dir) "
                           "rather than coming from the shared roots_checkpoints/ folder")
+    ap.add_argument('--root-time-marching-manifest', type=Path, default=None,
+                     help="checkpoints/root/manifest.json of a time-marching root run -- "
+                          "rebuilds the full-domain stitched model from its window_i_best_model_root.pt "
+                          "files instead of loading a single checkpoint via --root-checkpoint")
     ap.add_argument('--out-dir', type=Path,
                      default=Path('outputs/paper_figures/heatmaps'))
     args = ap.parse_args()
 
     for run_dir in args.fine_tune_run_dirs:
-        process_pde(run_dir, args.roots_dir, args.out_dir, root_checkpoint=args.root_checkpoint)
+        process_pde(run_dir, args.roots_dir, args.out_dir, root_checkpoint=args.root_checkpoint,
+                   root_time_marching_manifest=args.root_time_marching_manifest)
 
 
 if __name__ == '__main__':
