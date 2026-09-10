@@ -254,6 +254,7 @@ kdv:
     last_window_checkpoint: null
     num_windows: 3
     only_for_tree_structure: true
+    window_extension: 0.0
   tree_smoothness_threshold: 0.4
   wavelet_threshold: 0.0025
   window_smoothness_order: 3
@@ -320,6 +321,7 @@ ks:
     hard_ic: false
     last_window_checkpoint: null
     num_windows: 5
+    window_extension: 0.0
   tree_smoothness_threshold: 0.3
   wavelet_threshold: 0.04
   window_smoothness_order: 4

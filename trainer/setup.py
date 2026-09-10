@@ -967,7 +967,11 @@ def _setup_training(
     time_marching_window = cfg.get('_time_marching_window', {})
     if time_marching_window.get('enabled', False):
         t_start = time_marching_window['t_start']
-        t_end = time_marching_window['t_end']
+        # window_extension: training keeps the extended range [t_start,
+        # t_end_train]; eval/handoff stay at the core t_end (see
+        # narrow_config_for_window). Falls back to t_end for old configs.
+        t_end = time_marching_window.get('t_end_train',
+                                         time_marching_window['t_end'])
         window_idx = time_marching_window['idx']
 
         # IMPORTANT: For windows 1+, override IC BEFORE filtering

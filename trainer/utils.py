@@ -81,7 +81,10 @@ def compute_native_grid_metrics(
     except Exception:
         return None
 
-    t0, t1 = cfg[problem]['temporal_domain']
+    # metrics_temporal_domain (set by window_extension): score on the CORE
+    # window even when the training domain was extended past the handoff.
+    t0, t1 = (cfg[problem].get('metrics_temporal_domain')
+              or cfg[problem]['temporal_domain'])
     t_mask = (t_grid >= t0 - 1e-12) & (t_grid <= t1 + 1e-12)
     t_grid = np.asarray(t_grid)[t_mask]
     h_sol = np.asarray(h_sol)[t_mask]  # (nt, nx), complex for schrodinger

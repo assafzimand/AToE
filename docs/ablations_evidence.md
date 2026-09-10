@@ -95,7 +95,18 @@ With uniform sampling the fine-tune *degrades* the blend (8.6e-7 → 5.1e-5 at �
 
 ## 5.4.3 Time-tile count at fixed M
 
-**No fixed-M tile-count training sweep exists for KdV or KS.** What exists:
+### ★ CHOSEN — KdV f32, the marked best chain vs the same chain with a single full-domain tree (2026-09-07 vs 2026-09-09)
+
+Verified 2026-09-10: `config_used.yaml` of the two runs differs ONLY in `time_marching.enabled` (true + `only_for_tree_structure` vs false) and in M (25 vs 24, chosen so both decompositions close to the same 24 leaves). Same 3-window root (5.1157e-3), same 3x45+RFF experts (446,667 params in both), same 50k-Adam → SW L-BFGS h100 recipe, global BC, interface order 1 + norm, weights 1e3, 2048-point floor. Code between the two commits (0a82197 → 5039106) only added the hard-IC mount for real time-marching windows, inactive here.
+
+| decomposition | M | leaves | phase-3 best rel-L2 | vs root | stop |
+|---|---|---|---|---|---|
+| 3 time tiles, global top-M (`kdv_f32_ft_M25global_rootm_lrgrid_then_p3_globalbc_20260907_160942-kdv-best/.../20260907_161222`) | 25 | 24 | **4.899e-3** | 0.96x (below root) | freeze @88,653 |
+| single full-domain tree (`kdv_f32_p3_fulldomtree_M24_e3x45_h100_globalbc_20260909_171732-time-tile-ablation/.../20260909_171738`) | 24 | 24 | 5.726e-3 | 1.12x (above root) | freeze @86,047 |
+
+Tiling is worth 1.17x at equal leaf count and capacity, and it is the difference between beating the root and not. Geometry (from `per_expert_rel_l2` bounds): the tiled tree has max box dt = 0.333 and max dx = 0.664; the full-domain tree produces two full-height slabs (dt = 1.0, dx 0.30–0.32) which are its two worst experts (1.47e-2, 1.05e-2) — the "tall-box gamble" predicted by the reference-tree analysis below.
+
+### Older evidence (superseded by the chosen pair)
 
 ### Trained fixed-M pair: KdV f64, M = 12, W2 vs W3 (2026-08-25/26)
 
@@ -143,9 +154,9 @@ W5 costs 5–8 extra leaves at every M (closure overhead of 5 independent trees)
 
 KS: 5 tiles = the 5 time-marching windows (dt = 0.1 on T = 0.5, matching Kiyani's 5-window split); the KS reference sweep (`perfect_tree_examples/sweep/ks`, M 10/20/30 × W 5/7/10) shows leaves 39–44 (W5) vs 56–59 (W7) vs 64–79 (W10) at M 20–30. No KS experts run exists.
 
-### What would close this subsection
+### Closed
 
-One batch on the settled KdV f32 chain: 3-window root, M25 global top-M, global BC, e3x45, h100, `only_for_tree_structure: true`, `num_windows` ∈ {1, 2, 3, 5}, everything else as in `kdv_p3_f32_wroot3_M25global_e3x45_50a40l_h100_globalbc` (4.899e-3 at W3). Under the global top-M selection W is now the only tile knob, so the sweep is a single-key change per cell.
+The batch proposed here on 2026-09-09 was run as the ★ pair above (single full-domain tree vs 3 tiles at 24 leaves). A W ∈ {2, 5} extension is optional.
 
 ---
 
@@ -160,5 +171,6 @@ One batch on the settled KdV f32 chain: 3-window root, M25 global top-M, global 
 | ★ uniform vs 0.3 on paper experts (5.4.2) | `outputs/experiments/finetune_nocorr_40k_20260725_170953`, `outputs/experiments/finetune_corrector_ablation_20260725_053553` (nocorr cells only), `outputs/experiments/ft_noresample_factorial_2x2x2_20260805_063430` (cd03 cells) |
 | KdV W1 uniform vs 0.3 (supporting 5.4.2) | `Desktop\kdv_w12_ftc_sigma_collar_20260812_211320` |
 | KdV full-domain σ/collar | `Desktop\ks_root_phase3_and_kdv_ft_ablation_20260814_201306` |
+| ★ tiled vs full-domain tree, KdV best chain (5.4.3) | `outputs/experiments/kdv_f32_ft_M25global_rootm_lrgrid_then_p3_globalbc_20260907_160942-kdv-best`, `outputs/experiments/kdv_f32_p3_fulldomtree_M24_e3x45_h100_globalbc_20260909_171732-time-tile-ablation` |
 | KdV f64 M12 W2 vs W3 | `outputs/experiments/kdv_p3_trees_from5x60roots_ord1_vs_full_20260825_200910` |
 | reference-tree sweeps | `perfect_tree_examples/sweep/` (`sweep_summary.json`, `kdv_no_m_distribution/`, `ks/`, `ks_t05_no_m_distribution/`) |

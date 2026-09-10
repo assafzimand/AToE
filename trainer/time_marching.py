@@ -313,14 +313,40 @@ def narrow_config_for_window(cfg: Dict, window: TimeWindow, prev_model: nn.Modul
     """
     window_cfg = copy.deepcopy(cfg)
     problem = window_cfg['problem']
-    
+
     # Save original temporal domain BEFORE narrowing — solvers need it to compute
     # the full-domain numerical solution once and cache it, then serve each window
     # from the correct time slice rather than re-solving with a wrong per-window IC.
     original_temporal_domain = cfg[problem]['temporal_domain'][:]
 
-    # Narrow temporal domain
-    window_cfg[problem]['temporal_domain'] = [window.t_start, window.t_end]
+    # time_marching.window_extension (fraction of the window length): train each
+    # window on [t_start, t_end + delta] so the handoff point t_end sits in the
+    # INTERIOR of the trained domain (residual constraints on both sides) rather
+    # than at the least-constrained sampling edge — the jaxpi KS "Expand
+    # Temporal Domain" tip. Eval / patience / best-checkpoint / stitching stay
+    # on the core window via metrics_temporal_domain. Capped at the original
+    # domain end (GT is served from the one full-domain solve), so the LAST
+    # window trains unextended — its endpoint is never handed off.
+    _ext_frac = float((cfg[problem].get('time_marching') or {})
+                      .get('window_extension', 0.0) or 0.0)
+    _t_end_train = window.t_end
+    if _ext_frac > 0.0:
+        _t_end_train = min(
+            window.t_end + _ext_frac * (window.t_end - window.t_start),
+            float(original_temporal_domain[1]))
+        if _t_end_train > window.t_end:
+            logger.info(f"  [WindowExtension] window {window.idx}: training "
+                        f"domain extended to [{window.t_start:.4f}, "
+                        f"{_t_end_train:.4f}] (handoff/eval stay at "
+                        f"{window.t_end:.4f})")
+        else:
+            logger.info(f"  [WindowExtension] window {window.idx}: extension "
+                        f"capped at the domain end — trains unextended.")
+
+    # Narrow temporal domain (training/sampling range — includes the extension)
+    window_cfg[problem]['temporal_domain'] = [window.t_start, _t_end_train]
+    # Metrics/eval range: the CORE window only
+    window_cfg[problem]['metrics_temporal_domain'] = [window.t_start, window.t_end]
 
     # Window-specific M: the number of global top-M nodes this window won
     # (informational — its tree is preselected; see preselect_window_trees).
@@ -331,12 +357,13 @@ def narrow_config_for_window(cfg: Dict, window: TimeWindow, prev_model: nn.Modul
     window_cfg['_time_marching_window'] = {
         'enabled': True,
         't_start': window.t_start,
-        't_end': window.t_end,
+        't_end': window.t_end,          # core window end (handoff point)
+        't_end_train': _t_end_train,    # extended end for the train-data filter
         'idx': window.idx,
         'prev_model': prev_model,  # None for window 0, model for windows 1+
         'original_temporal_domain': original_temporal_domain,
     }
-    
+
     return window_cfg
 
 
