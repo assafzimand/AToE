@@ -255,8 +255,15 @@ experiments:
     time_marching: {debug_windows: null, enabled: true, freeze_previous_windows: true,
       last_window_checkpoint: null, num_windows: 3, only_for_tree_structure: true}
   lr: 0.001
+  lr_decay_rate: 0.9
+  lr_decay_steps: 2000
+  lr_schedule: exponential
+  lr_warmup_steps: 2000
   model: AToELeaves
   name: kdv_p3_soapwr3_M25_e3x45_perroot_gbc
+  optimizer_1: soap
+  optimizer_2: null
+  optimizer_switch_epoch: 999999
   patience_evals: 30
   precision: float32
   problem: kdv
@@ -284,8 +291,15 @@ experiments:
     time_marching: {debug_windows: null, enabled: true, freeze_previous_windows: true,
       last_window_checkpoint: null, num_windows: 3, only_for_tree_structure: true}
   lr: 0.001
+  lr_decay_rate: 0.9
+  lr_decay_steps: 2000
+  lr_schedule: exponential
+  lr_warmup_steps: 2000
   model: AToELeaves
   name: kdv_p3_soapwr3_M25_e3x45_perroot_rootm
+  optimizer_1: soap
+  optimizer_2: null
+  optimizer_switch_epoch: 999999
   patience_evals: 30
   precision: float32
   problem: kdv
@@ -313,8 +327,15 @@ experiments:
     time_marching: {debug_windows: null, enabled: true, freeze_previous_windows: true,
       last_window_checkpoint: null, num_windows: 3, only_for_tree_structure: true}
   lr: 0.001
+  lr_decay_rate: 0.9
+  lr_decay_steps: 2000
+  lr_schedule: exponential
+  lr_warmup_steps: 2000
   model: AToELeaves
   name: kdv_p3_soapwr3_M25_e3x45_nonperroot_gbc
+  optimizer_1: soap
+  optimizer_2: null
+  optimizer_switch_epoch: 999999
   patience_evals: 30
   precision: float32
   problem: kdv
@@ -342,8 +363,15 @@ experiments:
     time_marching: {debug_windows: null, enabled: true, freeze_previous_windows: true,
       last_window_checkpoint: null, num_windows: 3, only_for_tree_structure: true}
   lr: 0.001
+  lr_decay_rate: 0.9
+  lr_decay_steps: 2000
+  lr_schedule: exponential
+  lr_warmup_steps: 2000
   model: AToELeaves
   name: kdv_p3_soapwr3_M25_e3x45_nonperroot_rootm
+  optimizer_1: soap
+  optimizer_2: null
+  optimizer_switch_epoch: 999999
   patience_evals: 30
   precision: float32
   problem: kdv
@@ -372,8 +400,15 @@ experiments:
 #     time_marching: {debug_windows: null, enabled: true, freeze_previous_windows: true,
 #       last_window_checkpoint: null, num_windows: 5, only_for_tree_structure: true}
 #   lr: 0.001
+#   lr_decay_rate: 0.9
+#   lr_decay_steps: 2000
+#   lr_schedule: exponential
+#   lr_warmup_steps: 2000
 #   model: AToELeaves
 #   name: ks_p3_soapwr5_M25_e3x45_gbc
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -401,8 +436,15 @@ experiments:
 #     time_marching: {debug_windows: null, enabled: true, freeze_previous_windows: true,
 #       last_window_checkpoint: null, num_windows: 5, only_for_tree_structure: true}
 #   lr: 0.001
+#   lr_decay_rate: 0.9
+#   lr_decay_steps: 2000
+#   lr_schedule: exponential
+#   lr_warmup_steps: 2000
 #   model: AToELeaves
 #   name: ks_p3_soapwr5_M25_e3x45_rootm
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -467,8 +509,15 @@ experiments:
 #   lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
 #     tolerance_change: 0.0, tolerance_grad: 0.0}
 #   lr: 0.001
+#   lr_decay_rate: 0.9
+#   lr_decay_steps: 2000
+#   lr_schedule: exponential
+#   lr_warmup_steps: 2000
 #   model: AToELeaves
 #   name: kdv_root_tw3_soap_clean_ext005_100k
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: kdv
@@ -498,8 +547,15 @@ experiments:
 #   lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
 #     tolerance_change: 0.0, tolerance_grad: 0.0}
 #   lr: 0.001
+#   lr_decay_rate: 0.9
+#   lr_decay_steps: 2000
+#   lr_schedule: exponential
+#   lr_warmup_steps: 2000
 #   model: AToELeaves
 #   name: kdv_root_tw3_soap_clean_ext005_100k_nonper
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: kdv
@@ -595,8 +651,15 @@ experiments:
 #   lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
 #     tolerance_change: 0.0, tolerance_grad: 0.0}
 #   lr: 0.001
+#   lr_decay_rate: 0.9
+#   lr_decay_steps: 2000
+#   lr_schedule: exponential
+#   lr_warmup_steps: 2000
 #   model: AToELeaves
 #   name: ks_w1dbg_ext005_clean_soap
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -626,8 +689,15 @@ experiments:
 #   lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
 #     tolerance_change: 0.0, tolerance_grad: 0.0}
 #   lr: 0.001
+#   lr_decay_rate: 0.9
+#   lr_decay_steps: 2000
+#   lr_schedule: exponential
+#   lr_warmup_steps: 2000
 #   model: AToELeaves
 #   name: ks_w1dbg_ext010_clean_soap
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -660,8 +730,15 @@ experiments:
 #   lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
 #     tolerance_change: 0.0, tolerance_grad: 0.0}
 #   lr: 0.001
+#   lr_decay_rate: 0.9
+#   lr_decay_steps: 2000
+#   lr_schedule: exponential
+#   lr_warmup_steps: 2000
 #   model: AToELeaves
 #   name: ks_w0dbg_ext002_clean_al
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -691,8 +768,15 @@ experiments:
 #   lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
 #     tolerance_change: 0.0, tolerance_grad: 0.0}
 #   lr: 0.001
+#   lr_decay_rate: 0.9
+#   lr_decay_steps: 2000
+#   lr_schedule: exponential
+#   lr_warmup_steps: 2000
 #   model: AToELeaves
 #   name: ks_w0dbg_ext005_clean_al
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -722,8 +806,15 @@ experiments:
 #   lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
 #     tolerance_change: 0.0, tolerance_grad: 0.0}
 #   lr: 0.001
+#   lr_decay_rate: 0.9
+#   lr_decay_steps: 2000
+#   lr_schedule: exponential
+#   lr_warmup_steps: 2000
 #   model: AToELeaves
 #   name: ks_w0dbg_ext010_clean_al
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -756,8 +847,15 @@ experiments:
 #   lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
 #     tolerance_change: 0.0, tolerance_grad: 0.0}
 #   lr: 0.001
+#   lr_decay_rate: 0.9
+#   lr_decay_steps: 2000
+#   lr_schedule: exponential
+#   lr_warmup_steps: 2000
 #   model: AToELeaves
 #   name: ks_w0dbg_ext002_causS_al
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -790,8 +888,15 @@ experiments:
 #   lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
 #     tolerance_change: 0.0, tolerance_grad: 0.0}
 #   lr: 0.001
+#   lr_decay_rate: 0.9
+#   lr_decay_steps: 2000
+#   lr_schedule: exponential
+#   lr_warmup_steps: 2000
 #   model: AToELeaves
 #   name: ks_w0dbg_ext005_causS_al
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -824,8 +929,15 @@ experiments:
 #   lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
 #     tolerance_change: 0.0, tolerance_grad: 0.0}
 #   lr: 0.001
+#   lr_decay_rate: 0.9
+#   lr_decay_steps: 2000
+#   lr_schedule: exponential
+#   lr_warmup_steps: 2000
 #   model: AToELeaves
 #   name: ks_w0dbg_ext010_causS_al
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -855,8 +967,15 @@ experiments:
 #   lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
 #     tolerance_change: 0.0, tolerance_grad: 0.0}
 #   lr: 0.001
+#   lr_decay_rate: 0.9
+#   lr_decay_steps: 2000
+#   lr_schedule: exponential
+#   lr_warmup_steps: 2000
 #   model: AToELeaves
 #   name: ks_w0dbg_ext005_clean_soap
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -886,8 +1005,15 @@ experiments:
 #   lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
 #     tolerance_change: 0.0, tolerance_grad: 0.0}
 #   lr: 0.001
+#   lr_decay_rate: 0.9
+#   lr_decay_steps: 2000
+#   lr_schedule: exponential
+#   lr_warmup_steps: 2000
 #   model: AToELeaves
 #   name: ks_w0dbg_ext010_clean_soap
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -920,8 +1046,15 @@ experiments:
 #   lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
 #     tolerance_change: 0.0, tolerance_grad: 0.0}
 #   lr: 0.001
+#   lr_decay_rate: 0.9
+#   lr_decay_steps: 2000
+#   lr_schedule: exponential
+#   lr_warmup_steps: 2000
 #   model: AToELeaves
 #   name: ks_w0dbg_ext005_causS_soap
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -954,8 +1087,15 @@ experiments:
 #   lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
 #     tolerance_change: 0.0, tolerance_grad: 0.0}
 #   lr: 0.001
+#   lr_decay_rate: 0.9
+#   lr_decay_steps: 2000
+#   lr_schedule: exponential
+#   lr_warmup_steps: 2000
 #   model: AToELeaves
 #   name: ks_w0dbg_ext010_causS_soap
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -992,6 +1132,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 50000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: kdv
@@ -1022,8 +1165,15 @@ experiments:
 #   lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
 #     tolerance_change: 0.0, tolerance_grad: 0.0}
 #   lr: 0.001
+#   lr_decay_rate: 0.9
+#   lr_decay_steps: 2000
+#   lr_schedule: exponential
+#   lr_warmup_steps: 2000
 #   model: AToELeaves
 #   name: ks_w1dbg_soap_clean
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -1053,8 +1203,15 @@ experiments:
 #   lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
 #     tolerance_change: 0.0, tolerance_grad: 0.0}
 #   lr: 0.001
+#   lr_decay_rate: 0.9
+#   lr_decay_steps: 2000
+#   lr_schedule: exponential
+#   lr_warmup_steps: 2000
 #   model: AToELeaves
 #   name: ks_w1dbg_soap_sched
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -1085,8 +1242,15 @@ experiments:
 #   lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
 #     tolerance_change: 0.0, tolerance_grad: 0.0}
 #   lr: 0.001
+#   lr_decay_rate: 0.9
+#   lr_decay_steps: 2000
+#   lr_schedule: exponential
+#   lr_warmup_steps: 2000
 #   model: AToELeaves
 #   name: ks_w1dbg_soap_causal
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -1117,8 +1281,15 @@ experiments:
 #   lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
 #     tolerance_change: 0.0, tolerance_grad: 0.0}
 #   lr: 0.001
+#   lr_decay_rate: 0.9
+#   lr_decay_steps: 2000
+#   lr_schedule: exponential
+#   lr_warmup_steps: 2000
 #   model: AToELeaves
 #   name: ks_w1dbg_soap_lra
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -1148,8 +1319,15 @@ experiments:
 #   lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1,
 #     tolerance_change: 0.0, tolerance_grad: 0.0}
 #   lr: 0.001
+#   lr_decay_rate: 0.9
+#   lr_decay_steps: 2000
+#   lr_schedule: exponential
+#   lr_warmup_steps: 2000
 #   model: AToELeaves
 #   name: ks_w1dbg_hardic_50a40l_h1k
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -1190,6 +1368,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 50000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -1235,6 +1416,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 50000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -1277,6 +1461,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 50000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -1319,6 +1506,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 50000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -1361,6 +1551,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 50000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -1403,6 +1596,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 50000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -1445,6 +1641,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 50000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -1772,6 +1971,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 50000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: kdv
@@ -1811,6 +2013,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 50000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -1847,6 +2052,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 50000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -1883,6 +2091,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 50000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -1919,6 +2130,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 50000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -1961,6 +2175,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 50000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -2003,6 +2220,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 50000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -2045,6 +2265,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 50000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -2087,6 +2310,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 50000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -2129,6 +2355,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 50000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -2171,6 +2400,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 50000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -2213,6 +2445,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 50000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -2255,6 +2490,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 50000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -2435,6 +2673,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 50000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: kdv
@@ -2481,6 +2722,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 50000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -2519,6 +2763,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 50000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: kdv
@@ -2557,6 +2804,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 50000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: kdv
@@ -2596,6 +2846,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 50000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: kdv
@@ -2632,6 +2885,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 50000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: kdv
@@ -2668,6 +2924,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 50000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: kdv
@@ -2704,6 +2963,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 50000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: kdv
@@ -2746,6 +3008,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 20000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -2782,6 +3047,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 50000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: kdv
@@ -2962,6 +3230,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 50000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: kdv
@@ -3008,6 +3279,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 50000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -3044,6 +3318,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 50000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: kdv
@@ -3077,6 +3354,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 50000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: kdv
@@ -3115,6 +3395,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 20000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -3150,6 +3433,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 20000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -3189,6 +3475,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 20000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -3229,6 +3518,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 20000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -3265,6 +3557,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 20000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -3305,6 +3600,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 20000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -3346,6 +3644,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 20000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -3386,6 +3687,9 @@ experiments:
 #   model: AToELeaves
 #   name: ks_w0dbg_N_adamonly_all3_wangsched
 #   optimizer_1: adam
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
+#   optimizer_1: soap
 #   optimizer_2: null
 #   optimizer_switch_epoch: 999999
 #   patience_evals: 30
@@ -3862,6 +4166,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 20000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -3896,6 +4203,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 20000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -3930,6 +4240,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 20000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -3966,6 +4279,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 20000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -4002,6 +4318,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 20000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -4036,6 +4355,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 20000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -4073,6 +4395,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 20000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -4109,6 +4434,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 50000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: kdv
@@ -4145,6 +4473,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 20000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: kdv
@@ -4182,6 +4513,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 20000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -4250,6 +4584,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 50000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: kdv
@@ -4320,6 +4657,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 50000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: ks
@@ -4356,6 +4696,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 50000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: kdv
@@ -4541,6 +4884,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 50000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: kdv
@@ -4577,6 +4923,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 50000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: kdv
@@ -7433,6 +7782,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 50000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: kdv
@@ -7465,6 +7817,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 50000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: kdv
@@ -7499,6 +7854,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 50000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: kdv
@@ -7531,6 +7889,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 50000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: kdv
@@ -7563,6 +7924,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 50000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: kdv
@@ -7595,6 +7959,9 @@ experiments:
 #   optimizer_1: adam
 #   optimizer_2: lbfgs
 #   optimizer_switch_epoch: 50000
+#   optimizer_1: soap
+#   optimizer_2: null
+#   optimizer_switch_epoch: 999999
 #   patience_evals: 30
 #   precision: float32
 #   problem: kdv
