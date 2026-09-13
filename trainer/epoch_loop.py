@@ -114,6 +114,40 @@ def _build_rad_pool(model, loss_fn, cfg, device, train_data):
     return [(x.detach(), t.detach(), r2)]
 
 
+def _cap_probe_residual(batch: dict, cap: int, epoch: int) -> dict:
+    """Subsample the RESIDUAL rows of a plain probe batch to ``cap`` points.
+
+    The [LossTerms] snapshot runs the plain training set through the
+    COMPOSED model; during split segments that evaluates every expert at
+    every point and then chains the full-order residual derivatives
+    through the stacked graph — ~n_experts x the memory of a training
+    step (measured: 27 KS experts x 20.5k points x u_xxxx = >38 GiB OOM
+    on an A100-40GB while the training step itself fit easily). IC/BC
+    rows are few and kept intact, so those components stay exact; only
+    the residual mean becomes a (seeded, epoch-keyed) subsample estimate.
+    """
+    masks = batch.get('mask') if isinstance(batch, dict) else None
+    res = masks.get('residual') if isinstance(masks, dict) else None
+    if res is None or int(res.sum().item()) <= cap:
+        return batch
+    idx_res = torch.nonzero(res).squeeze(1)
+    g = torch.Generator(device=idx_res.device)
+    g.manual_seed(1234 + int(epoch))
+    perm = torch.randperm(idx_res.numel(), generator=g,
+                          device=idx_res.device)[:cap]
+    keep = torch.cat([torch.nonzero(~res).squeeze(1), idx_res[perm]])
+    n = res.shape[0]
+    out = {}
+    for k, v in batch.items():
+        if k == 'mask':
+            out['mask'] = {mk: mv[keep] for mk, mv in v.items()}
+        elif torch.is_tensor(v) and v.shape[:1] == (n,):
+            out[k] = v[keep]
+        else:
+            out[k] = v
+    return out
+
+
 def _train_segment(
     ctx: TrainingContext,
     segment_name: str,
@@ -1306,6 +1340,13 @@ def _train_segment(
                       and 'mask' in train_data else ctx.plain_train_data)
             comp_means = {}
             if _probe is not None:
+                # Composed-model probe with spawned experts is the one graph
+                # that scales with n_experts x n_points x derivative order —
+                # cap its residual rows (root segments stay exact).
+                if len(getattr(model, 'experts', []) or []) > 0:
+                    _cap = int(cfg.get('sampling', {})
+                               .get('eval_probe_max_points', 4096))
+                    _probe = _cap_probe_residual(_probe, _cap, epoch)
                 timer.start('eval.loss_fn')
                 comps = loss_fn(model, _probe, return_components=True,
                                 update_causal_state=False)
