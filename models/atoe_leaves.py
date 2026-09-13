@@ -467,6 +467,31 @@ class AToELeaves(nn.Module):
                 if getattr(last, 'bias', None) is not None:
                     last.bias.zero_()
 
+    def _routed_weighted_sum(self, inputs: torch.Tensor,
+                             weights: torch.Tensor,
+                             leaf_list: list) -> torch.Tensor:
+        """Σ_j w_j(x)·u_j(x), evaluating each expert ONLY on its support rows.
+
+        ``weights`` (N, L) must be EXACTLY zero outside each expert's
+        support — true for smoothstep windows (compact support) in both
+        hard and normalized-soft form. Each expert gathers its own rows;
+        a point inside a collar overlap appears in several gathers and
+        ``index_add`` accumulates the PoU sum, so mixed batches need no
+        sorting or dispatch. Identical math to the dense stack (up to
+        float summation order); work and — in training graphs (fine-tune)
+        — stored activations scale with Σ_j |support_j| ≈ N·(1+overlap)
+        instead of N·L.
+        """
+        out = inputs.new_zeros(inputs.shape[0], self.base_model.layers[-1])
+        for col, eidx in enumerate(leaf_list):
+            idx = torch.nonzero(weights[:, col] > 0).squeeze(1)
+            if idx.numel() == 0:
+                continue
+            out = out.index_add(
+                0, idx,
+                weights[idx, col:col + 1] * self.experts[eidx](inputs[idx]))
+        return out
+
     def _soft_blend_and_chi(self, inputs: torch.Tensor):
         """Normalized soft blend, its collar indicator, and the per-leaf weights.
 
@@ -480,8 +505,11 @@ class AToELeaves(nn.Module):
         psi_leaves = psi_experts[:, leaf_list]  # (N, L)
         psi_sum = psi_leaves.sum(dim=1, keepdim=True).clamp(min=1e-12)
         psi_norm = psi_leaves / psi_sum
-        u_leaves = torch.stack([self.experts[i](inputs) for i in leaf_list], dim=1)
-        u_soft = (psi_norm.unsqueeze(-1) * u_leaves).sum(dim=1)
+        if self.window_type == 'smoothstep':
+            u_soft = self._routed_weighted_sum(inputs, psi_norm, leaf_list)
+        else:  # legacy non-compact windows: dense path
+            u_leaves = torch.stack([self.experts[i](inputs) for i in leaf_list], dim=1)
+            u_soft = (psi_norm.unsqueeze(-1) * u_leaves).sum(dim=1)
         chi = (1.0 - (psi_norm ** 2).sum(dim=1, keepdim=True)).clamp(min=0.0)
         return u_soft, chi, psi_norm, leaf_list
 
@@ -586,6 +614,8 @@ class AToELeaves(nn.Module):
         _, psi_experts = self.batched_indicators(inputs)  # (N, K)
         psi_leaves = psi_experts[:, leaf_list]  # (N, L)
         psi_norm = psi_leaves / psi_leaves.sum(dim=1, keepdim=True)
+        if self.window_type == 'smoothstep':
+            return self._routed_weighted_sum(inputs, psi_norm, leaf_list)
         u_leaves = torch.stack([self.experts[i](inputs) for i in leaf_list], dim=1)
         return (psi_norm.unsqueeze(-1) * u_leaves).sum(dim=1)
 
@@ -611,7 +641,9 @@ class AToELeaves(nn.Module):
         # Guard against Z=0 (shouldn't happen if leaves tile the domain)
         Z = Z.clamp(min=1e-8)
         hard_norm = hard_leaves / Z  # (N, L)
-        
+
+        if self.window_type == 'smoothstep':
+            return self._routed_weighted_sum(inputs, hard_norm, leaf_list)
         u_leaves = torch.stack([self.experts[i](inputs) for i in leaf_list], dim=1)  # (N, L, out_dim)
         return (hard_norm.unsqueeze(-1) * u_leaves).sum(dim=1)
 
