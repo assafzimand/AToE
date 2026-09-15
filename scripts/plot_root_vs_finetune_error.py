@@ -217,7 +217,8 @@ def save_error_map(pde, segment, label, n_labels, x_grid, t_grid, err,
 
 
 def process_pde(ft_run_dir: Path, roots_dir: Path, out_dir: Path, root_checkpoint: Path = None,
-                root_time_marching_manifest: Path = None):
+                root_time_marching_manifest: Path = None, second_segment: str = 'fine_tune',
+                second_checkpoint_name: str = 'best_model_fine_tune.pt'):
     cfg = yaml.safe_load((ft_run_dir / 'config_used.yaml').read_text(encoding='utf-8'))
     pde = cfg['problem']
     labels = _DIM_LABELS.get(pde, ['u'])
@@ -240,10 +241,10 @@ def process_pde(ft_run_dir: Path, roots_dir: Path, out_dir: Path, root_checkpoin
         root_ckpt_path = None
     else:
         root_ckpt_path = root_checkpoint if root_checkpoint is not None else roots_dir / f'{_ROOT_TAG[pde]}_root.pt'
-    ft_ckpt_path = ft_run_dir / 'checkpoints' / 'best_model_fine_tune.pt'
+    ft_ckpt_path = ft_run_dir / 'checkpoints' / second_checkpoint_name
 
     segments = {}
-    for seg_name, ckpt_path in [('root', root_ckpt_path), ('fine_tune', ft_ckpt_path)]:
+    for seg_name, ckpt_path in [('root', root_ckpt_path), (second_segment, ft_ckpt_path)]:
         if seg_name == 'root' and root_time_marching_manifest is not None:
             model, epoch, ckpt_rel_l2 = build_windowed_root_model(
                 root_time_marching_manifest, device)
@@ -270,13 +271,13 @@ def process_pde(ft_run_dir: Path, roots_dir: Path, out_dir: Path, root_checkpoin
 
     for d, label in enumerate(labels):
         root_err = segments['root']['err_grids'][d]
-        ft_err = segments['fine_tune']['err_grids'][d]
+        ft_err = segments[second_segment]['err_grids'][d]
         joint_max = max(float(root_err.max()), float(ft_err.max()))
         pos = np.concatenate([root_err[root_err > 0], ft_err[ft_err > 0]])
         joint_min = max(float(pos.min()), joint_max * 1e-5) if pos.size else joint_max
         print(f"  channel {label}: shared scale [{joint_min:.2e}, {joint_max:.2e}]")
 
-        for seg_name in ('root', 'fine_tune'):
+        for seg_name in ('root', second_segment):
             err = segments[seg_name]['err_grids'][d]
             out_path = save_error_map(
                 pde, seg_name, label, len(labels), x_grid, t_grid, err,
@@ -302,11 +303,19 @@ def main():
                           "files instead of loading a single checkpoint via --root-checkpoint")
     ap.add_argument('--out-dir', type=Path,
                      default=Path('outputs/paper_figures/heatmaps'))
+    ap.add_argument('--second-segment', type=str, default='fine_tune',
+                     help="Label for the non-root comparison side (default 'fine_tune') -- "
+                          "e.g. 'phase3' when comparing root vs. a phase-3 checkpoint directly")
+    ap.add_argument('--second-checkpoint-name', type=str, default='best_model_fine_tune.pt',
+                     help="Checkpoint filename under <run_dir>/checkpoints/ for the non-root side "
+                          "(default 'best_model_fine_tune.pt'; e.g. 'best_model_phase3.pt')")
     args = ap.parse_args()
 
     for run_dir in args.fine_tune_run_dirs:
         process_pde(run_dir, args.roots_dir, args.out_dir, root_checkpoint=args.root_checkpoint,
-                   root_time_marching_manifest=args.root_time_marching_manifest)
+                   root_time_marching_manifest=args.root_time_marching_manifest,
+                   second_segment=args.second_segment,
+                   second_checkpoint_name=args.second_checkpoint_name)
 
 
 if __name__ == '__main__':

@@ -1,11 +1,11 @@
 # ==========================================================================
 # KDV FT ABLATION ON THE MARKED SOAP-FLOW P3 (nonper root -> p3 BEATS
-# ROOT): {SOAP, LBFGS-h100} x LR {1e-3, 1e-4, 1e-5}, 30k, NO PATIENCE
+# ROOT): {SOAP, LBFGS-h100} x LR {1e-3, 1e-4, 1e-5}, 30k, PATIENCE 10 EVALS
 # (2026-09-15b, main). MARKED BEST KdV flow: ext-t 3w SOAP nonper root
 # 1.06e-3 -> p3 M25 e3x45 GLOBAL-BC 6.26e-4 (run 20260914_033228; p3/
 # root = 0.59). p3 ckpt staged (MD5 9c0a3b5d5701569dbf27863fbf5bcb84).
 # ACTIVE: 6 ft cells on that ckpt — sigma_fraction 0.03, collar_data
-# 0.3, 30k ft epochs, patience OFF (999999), freeze_stop on, f32:
+# 0.3, 30k ft epochs, patience 10 (=10k epochs, rel_delta 1%), freeze_stop on, f32:
 #   1-3 SOAP ft, lr 1e-3 / 1e-4 / 1e-5 (betas .95/.95, precond 10)
 #   4-6 SW LBFGS ft h100 (tol_grad 1e-7), lr 1e-3 / 1e-4 / 1e-5
 # fourier periodic FALSE (matches the nonper root/experts), split gbc.
@@ -260,11 +260,11 @@ experiments:
   lr_schedule: none
   lr_warmup_steps: 0
   model: AToELeaves
-  name: kdv_ft_soapwr3_nonper_gbc_soap_lr1em3
+  name: kdv_ft_soapwr3_nonper_gbc_soap_lr1em3_pat10
   optimizer_1: adam
   optimizer_2: null
   optimizer_switch_epoch: 999999
-  patience_evals: 999999
+  patience_evals: 10
   precision: float32
   problem: kdv
   sampling: {min_points_per_expert: 2048, n_residual_train: 20000, resample_every_epochs: 99999}
@@ -298,11 +298,11 @@ experiments:
   lr_schedule: none
   lr_warmup_steps: 0
   model: AToELeaves
-  name: kdv_ft_soapwr3_nonper_gbc_soap_lr1em4
+  name: kdv_ft_soapwr3_nonper_gbc_soap_lr1em4_pat10
   optimizer_1: adam
   optimizer_2: null
   optimizer_switch_epoch: 999999
-  patience_evals: 999999
+  patience_evals: 10
   precision: float32
   problem: kdv
   sampling: {min_points_per_expert: 2048, n_residual_train: 20000, resample_every_epochs: 99999}
@@ -336,11 +336,11 @@ experiments:
   lr_schedule: none
   lr_warmup_steps: 0
   model: AToELeaves
-  name: kdv_ft_soapwr3_nonper_gbc_soap_lr1em5
+  name: kdv_ft_soapwr3_nonper_gbc_soap_lr1em5_pat10
   optimizer_1: adam
   optimizer_2: null
   optimizer_switch_epoch: 999999
-  patience_evals: 999999
+  patience_evals: 10
   precision: float32
   problem: kdv
   sampling: {min_points_per_expert: 2048, n_residual_train: 20000, resample_every_epochs: 99999}
@@ -374,11 +374,11 @@ experiments:
   lr_schedule: none
   lr_warmup_steps: 0
   model: AToELeaves
-  name: kdv_ft_soapwr3_nonper_gbc_lbfgs_lr1em3
+  name: kdv_ft_soapwr3_nonper_gbc_lbfgs_lr1em3_pat10
   optimizer_1: adam
   optimizer_2: null
   optimizer_switch_epoch: 999999
-  patience_evals: 999999
+  patience_evals: 10
   precision: float32
   problem: kdv
   sampling: {min_points_per_expert: 2048, n_residual_train: 20000, resample_every_epochs: 99999}
@@ -412,11 +412,11 @@ experiments:
   lr_schedule: none
   lr_warmup_steps: 0
   model: AToELeaves
-  name: kdv_ft_soapwr3_nonper_gbc_lbfgs_lr1em4
+  name: kdv_ft_soapwr3_nonper_gbc_lbfgs_lr1em4_pat10
   optimizer_1: adam
   optimizer_2: null
   optimizer_switch_epoch: 999999
-  patience_evals: 999999
+  patience_evals: 10
   precision: float32
   problem: kdv
   sampling: {min_points_per_expert: 2048, n_residual_train: 20000, resample_every_epochs: 99999}
@@ -450,11 +450,11 @@ experiments:
   lr_schedule: none
   lr_warmup_steps: 0
   model: AToELeaves
-  name: kdv_ft_soapwr3_nonper_gbc_lbfgs_lr1em5
+  name: kdv_ft_soapwr3_nonper_gbc_lbfgs_lr1em5_pat10
   optimizer_1: adam
   optimizer_2: null
   optimizer_switch_epoch: 999999
-  patience_evals: 999999
+  patience_evals: 10
   precision: float32
   problem: kdv
   sampling: {min_points_per_expert: 2048, n_residual_train: 20000, resample_every_epochs: 99999}
