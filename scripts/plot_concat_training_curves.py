@@ -386,6 +386,7 @@ def concat_runs(run_specs):
         stage_name = metrics.get('segment_events', [{}])[-1].get('segment', run_dir.name)
         stage_tags.append(f"{stage_name}{local_final}")
 
+    first_metrics = runs_data[0][1]
     combined = {
         'train_loss_epochs': train_loss_epochs,
         'train_loss': train_loss,
@@ -393,6 +394,13 @@ def concat_runs(run_specs):
         'rel_l2': rel_l2,
         'inf_norm': inf_norm,
         'loss_components': {'epochs': lc_epochs, **lc_terms},
+        # Root-reference line (rel_l2 panel): carried from the FIRST run in
+        # the chain, since that's the one that recorded what it was trained
+        # against -- concat_runs' own per-field merge above doesn't touch
+        # these (they're scalars, not per-epoch series).
+        'root_rel_l2': first_metrics.get('root_rel_l2'),
+        'pretrained_experts_rel_l2': first_metrics.get('pretrained_experts_rel_l2'),
+        'root_loaded_from_checkpoint': first_metrics.get('root_loaded_from_checkpoint', False),
     }
     last_metrics = runs_data[-1][1]
     meta = {
