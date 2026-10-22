@@ -786,6 +786,16 @@ def _train_segment(
             if will_cache_for_resample and not hasattr(model, '_adaptive_sampling_activated'):
                 model._adaptive_sampling_activated = True
                 logger.info(f"  [Adaptive Sampling] Residual caching active from epoch {epoch}")
+        elif not adaptive_sampling_enabled and getattr(model, '_residual_cache_enabled', False):
+            # Plot-only caching must collect for the armed epoch ONLY. The
+            # flag used to stay on until the next resample consumed it, which
+            # under a full-batch optimizer that never resamples (SSBroyden /
+            # L-BFGS, resample_every_epochs 99999) meant every closure call of
+            # every following epoch appended a full residual batch: measured
+            # 17.45 GiB after 13k fine-tune epochs with plot_samples_every
+            # 20000 (OOM on the A10G, 2026-10-22). Keep the armed epoch's
+            # entries for the next resample/plot; just stop appending.
+            model._residual_cache_enabled = False
 
         # Same for the split-loss cache: diagnostic heatmaps and — when
         # adaptive sampling is on — the next split resample's adaptive redraw.
@@ -1407,6 +1417,18 @@ def _train_segment(
                     comp_means.get(term, 0.0))
             _comp_str = ', '.join(f'{k}={v:.6e}' for k, v in comp_means.items())
             logger.info(f"  [LossTerms] {_comp_str}")
+            # Residual-cache watchdog: entries must stay bounded by ONE epoch's
+            # closure calls (see the arming block); a growing count here is
+            # the 2026-10-22 OOM signature.
+            if torch.cuda.is_available() or getattr(model, '_residual_cache_enabled', False) \
+                    or len(getattr(model, '_residual_cache', []) or []) > 0:
+                _mem = (f", cuda_alloc={torch.cuda.memory_allocated() / 2**30:.2f}GiB"
+                        f", cuda_peak={torch.cuda.max_memory_allocated() / 2**30:.2f}GiB"
+                        if torch.cuda.is_available() else "")
+                logger.info(f"  [ResidualCache] enabled="
+                            f"{getattr(model, '_residual_cache_enabled', False)} "
+                            f"entries={len(getattr(model, '_residual_cache', []) or [])}"
+                            f"{_mem}")
             metrics['loss_components_history'].append({
                 'epoch': epoch,
                 **comp_means,
