@@ -1,5 +1,6 @@
 """Dataset generation utilities."""
 
+import json
 import math
 import torch
 from pathlib import Path
@@ -127,6 +128,11 @@ def generate_and_save_datasets(config: Dict, force: bool = False) -> None:
     # point count would otherwise crash loudly at load time (the setup-time
     # guard) — e.g. a multi-cell plan mixing float64 and float32 experiments.
     # Regenerate here, loudly, instead of dying mid-plan.
+    # The draw also depends on config['seed'] (the solvers seed numpy/torch
+    # from it), so a sidecar meta file records the seed the cache was drawn
+    # with; a different seed regenerates. Without this, seed-repeat runs of
+    # a non-time-marching problem silently reused the first seed's points.
+    meta_path = dataset_dir / "training_data.meta.json"
     if train_path.exists() and not force:
         try:
             cached = torch.load(train_path, map_location='cpu', weights_only=False)
@@ -142,6 +148,17 @@ def generate_and_save_datasets(config: Dict, force: bool = False) -> None:
                     f"(dtype {got_dtype} vs {want_dtype}, N {got_n} vs {want_n}) "
                     f"— regenerating.")
                 force = True
+            else:
+                got_seed = None
+                if meta_path.exists():
+                    with open(meta_path, 'r') as _mf:
+                        got_seed = json.load(_mf).get('seed')
+                if got_seed != config.get('seed'):
+                    logger.info(
+                        f"  Cached dataset {train_path} was drawn with seed "
+                        f"{got_seed} but config seed is {config.get('seed')} "
+                        f"— regenerating.")
+                    force = True
         except Exception as e:
             logger.info(f"  Cached dataset {train_path} unreadable ({e}) — regenerating.")
             force = True
@@ -159,6 +176,10 @@ def generate_and_save_datasets(config: Dict, force: bool = False) -> None:
             config=config
         )
         torch.save(train_data, train_path)
+        with open(meta_path, 'w') as _mf:
+            json.dump({'seed': config.get('seed'),
+                       'precision': str(config.get('precision', 'float32')),
+                       'n_total': int(train_data['x'].shape[0])}, _mf)
         logger.info(f"  Saved to {train_path}")
 
         # Create visualizations

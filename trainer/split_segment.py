@@ -89,7 +89,7 @@ def _run_split_segment(
     # within the segment: built once here, reused on every resample.
     split_static = build_subdomain_static(
         model_snapshot, new_expert_indices, regions_list, cfg,
-        ctx.device, seed=ctx.epoch,
+        ctx.device, seed=ctx.base_seed + ctx.epoch,
         interface_model=interface_model,
     )
     # Collar sampling for the segment's initial residual draw (resamples
@@ -111,7 +111,7 @@ def _run_split_segment(
         )
     split_data = build_subdomain_data(
         model_snapshot, new_expert_indices, regions_list, cfg,
-        ctx.device, seed=ctx.epoch,
+        ctx.device, seed=ctx.base_seed + ctx.epoch,
         interface_model=interface_model,
         static=split_static,
         collar_info=collar_info,
