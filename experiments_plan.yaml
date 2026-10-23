@@ -56,7 +56,7 @@ base_config:
       optimizer_1: adam, optimizer_2: ssbroyden, optimizer_switch_epoch: 1000}
     leaf_input_normalization: false
     max_experts: 150
-    split_icbc: {bc_term_normalization: false, enabled: true, global_bc_or_root_mounted: root_mounted, interface_order_decay: 1.0,
+    split_icbc: {bc_term_normalization: false, enabled: true, global_bc_or_root_mounted: global, interface_order_decay: 1.0,
       interface_term_normalization: false, max_interface_derivative_order: null}
     tree_max_depth: 15
     tree_min_samples_leaf: 50
