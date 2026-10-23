@@ -250,57 +250,57 @@ experiments:
 - base_architecture: [2, 60, 60, 60, 60, 1]
   experts_architecture: [2, 24, 24, 24, 1]
   model: AToELeaves
-  name: burgers1d_fullflow_seed42
+  name: burgers1d_fullflow_seed7
   problem: burgers1d
-  seed: 42
+  seed: 7
 - base_architecture: [2, 60, 60, 60, 60, 1]
   experts_architecture: [2, 24, 24, 24, 1]
   model: AToELeaves
-  name: burgers1d_fullflow_seed43
+  name: burgers1d_fullflow_seed13
   problem: burgers1d
-  seed: 43
+  seed: 13
 - base_architecture: [2, 60, 60, 60, 60, 1]
   experts_architecture: [2, 24, 24, 24, 1]
   model: AToELeaves
-  name: burgers1d_fullflow_seed44
+  name: burgers1d_fullflow_seed21
   problem: burgers1d
-  seed: 44
+  seed: 21
 - base_architecture: [2, 60, 60, 60, 60, 1]
   experts_architecture: [2, 24, 24, 24, 1]
   model: AToELeaves
-  name: allen_cahn_fullflow_seed42
+  name: allen_cahn_fullflow_seed7
   problem: allen_cahn
-  seed: 42
+  seed: 7
 - base_architecture: [2, 60, 60, 60, 60, 1]
   experts_architecture: [2, 24, 24, 24, 1]
   model: AToELeaves
-  name: allen_cahn_fullflow_seed43
+  name: allen_cahn_fullflow_seed13
   problem: allen_cahn
-  seed: 43
+  seed: 13
 - base_architecture: [2, 60, 60, 60, 60, 1]
   experts_architecture: [2, 24, 24, 24, 1]
   model: AToELeaves
-  name: allen_cahn_fullflow_seed44
+  name: allen_cahn_fullflow_seed21
   problem: allen_cahn
-  seed: 44
+  seed: 21
 - base_architecture: [2, 60, 60, 60, 60, 2]
   experts_architecture: [2, 20, 20, 20, 2]
   model: AToELeaves
-  name: schrodinger_fullflow_seed42
+  name: schrodinger_fullflow_seed7
   problem: schrodinger
-  seed: 42
+  seed: 7
 - base_architecture: [2, 60, 60, 60, 60, 2]
   experts_architecture: [2, 20, 20, 20, 2]
   model: AToELeaves
-  name: schrodinger_fullflow_seed43
+  name: schrodinger_fullflow_seed13
   problem: schrodinger
-  seed: 43
+  seed: 13
 - base_architecture: [2, 60, 60, 60, 60, 2]
   experts_architecture: [2, 20, 20, 20, 2]
   model: AToELeaves
-  name: schrodinger_fullflow_seed44
+  name: schrodinger_fullflow_seed21
   problem: schrodinger
-  seed: 44
+  seed: 21
 # ---- for memory (2026-10-22): previously ACTIVE block (KS ft collar x sigma grid, 2026-09-19) ----
 # # ==========================================================================
 # # KS FT COLLAR x SIGMA GRID — FIRST KS FINE-TUNES (2026-09-19, main):
