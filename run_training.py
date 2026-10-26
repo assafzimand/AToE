@@ -246,6 +246,12 @@ def main():
             device = torch.device('cuda' if cuda_available else 'cpu')
 
             from trainer.time_marching import train_with_time_marching
+            # Seed explicitly before the window loop (the plain and resume
+            # branches do this before _build_model). Window models were
+            # already deterministic per seed because each window's dataset
+            # generator reseeds torch from config['seed'] right before the
+            # model is built; this makes that intent explicit and logs it.
+            _seed_everything(config, logger)
             model, checkpoint_path = train_with_time_marching(
                 model_class=AToELeaves,
                 architecture=architecture,

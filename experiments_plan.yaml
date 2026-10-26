@@ -245,62 +245,267 @@ base_config:
     precondition_frequency: 10
     weight_decay: 0.0
   ssbroyden: {lr: 1.0, tolerance_grad: 1.0e-10}
-experiment_name: second_order_fullflow_3seeds
+# ===== ACTIVE (2026-10-24): higher-order ROOT-ONLY time-window runs, 3 seeds, paper recipes =====
+# Reproduces the paper's KdV root (nonperiodic RFF, 3 windows on [0,1], 1.06e-3) and KS root
+# (periodic RFF root_only, 5 windows on [0,0.5], 2.71e-4): f32, 6x128 tanh + RFF(scale 2),
+# pure SOAP 100k/window (lr 1e-3, warmup 2000, exp 0.9/2000), full-batch 20k residual resampled
+# every epoch, window_extension 0.05, M=0 (no tree/experts), epochs 0 + fine_tune 0 => root only.
+# Protocol changes vs the Sep-12 runs: seeds {7,13,21}, patience OFF (was 30), plots off.
+# After each run: stage the window folder (manifest + window_i_best_model_root.pt) under
+# roots_checkpoints/single_precision/..., then run the p3+ft plan on it (option a).
+experiment_name: higher_order_roots_3seeds
 experiments:
-- base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 24, 24, 24, 1]
+- adaptive_pinn:
+    M_experts_num: 0
+    fine_tune: {epochs: 0}
+    initial_train: {epochs: 100000, lr: 0.001, lr_decay_rate: 0.9, lr_decay_steps: 2000, lr_schedule: exponential,
+      lr_warmup_steps: 2000, optimizer_1: soap, optimizer_2: null, optimizer_switch_epoch: 999999}
+    split_icbc: {bc_term_normalization: false, interface_term_normalization: true, max_interface_derivative_order: 1}
+  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+  batch_size: 99999
+  epochs: 0
+  experts_architecture: [2, 30, 30, 30, 1]
+  freeze_stop_epochs: 1001
+  kdv:
+    bc_max_derivative_order: 1
+    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+    loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
+    temporal_domain: [0.0, 1.0]
+    time_marching: {debug_windows: null, enabled: true, freeze_previous_windows: true, last_window_checkpoint: null,
+      num_windows: 3, only_for_tree_structure: false, window_extension: 0.05}
+  lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1, tolerance_change: 0.0,
+    tolerance_grad: 0.0}
+  lr: 0.001
   model: AToELeaves
-  name: burgers1d_fullflow_seed7
-  problem: burgers1d
+  name: kdv_root_tw3_soap_ext005_100k_nonper_seed7
+  patience_evals: 999999
+  precision: float32
+  problem: kdv
+  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
   seed: 7
-- base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 24, 24, 24, 1]
+  soap:
+    betas: [0.95, 0.95]
+    precondition_frequency: 10
+    weight_decay: 0.0
+- adaptive_pinn:
+    M_experts_num: 0
+    fine_tune: {epochs: 0}
+    initial_train: {epochs: 100000, lr: 0.001, lr_decay_rate: 0.9, lr_decay_steps: 2000, lr_schedule: exponential,
+      lr_warmup_steps: 2000, optimizer_1: soap, optimizer_2: null, optimizer_switch_epoch: 999999}
+    split_icbc: {bc_term_normalization: false, interface_term_normalization: true, max_interface_derivative_order: 1}
+  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+  batch_size: 99999
+  epochs: 0
+  experts_architecture: [2, 30, 30, 30, 1]
+  freeze_stop_epochs: 1001
+  kdv:
+    bc_max_derivative_order: 1
+    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+    loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
+    temporal_domain: [0.0, 1.0]
+    time_marching: {debug_windows: null, enabled: true, freeze_previous_windows: true, last_window_checkpoint: null,
+      num_windows: 3, only_for_tree_structure: false, window_extension: 0.05}
+  lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1, tolerance_change: 0.0,
+    tolerance_grad: 0.0}
+  lr: 0.001
   model: AToELeaves
-  name: burgers1d_fullflow_seed13
-  problem: burgers1d
+  name: kdv_root_tw3_soap_ext005_100k_nonper_seed13
+  patience_evals: 999999
+  precision: float32
+  problem: kdv
+  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
   seed: 13
-- base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 24, 24, 24, 1]
+  soap:
+    betas: [0.95, 0.95]
+    precondition_frequency: 10
+    weight_decay: 0.0
+- adaptive_pinn:
+    M_experts_num: 0
+    fine_tune: {epochs: 0}
+    initial_train: {epochs: 100000, lr: 0.001, lr_decay_rate: 0.9, lr_decay_steps: 2000, lr_schedule: exponential,
+      lr_warmup_steps: 2000, optimizer_1: soap, optimizer_2: null, optimizer_switch_epoch: 999999}
+    split_icbc: {bc_term_normalization: false, interface_term_normalization: true, max_interface_derivative_order: 1}
+  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+  batch_size: 99999
+  epochs: 0
+  experts_architecture: [2, 30, 30, 30, 1]
+  freeze_stop_epochs: 1001
+  kdv:
+    bc_max_derivative_order: 1
+    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+    loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
+    temporal_domain: [0.0, 1.0]
+    time_marching: {debug_windows: null, enabled: true, freeze_previous_windows: true, last_window_checkpoint: null,
+      num_windows: 3, only_for_tree_structure: false, window_extension: 0.05}
+  lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1, tolerance_change: 0.0,
+    tolerance_grad: 0.0}
+  lr: 0.001
   model: AToELeaves
-  name: burgers1d_fullflow_seed21
-  problem: burgers1d
+  name: kdv_root_tw3_soap_ext005_100k_nonper_seed21
+  patience_evals: 999999
+  precision: float32
+  problem: kdv
+  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
   seed: 21
-- base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 24, 24, 24, 1]
+  soap:
+    betas: [0.95, 0.95]
+    precondition_frequency: 10
+    weight_decay: 0.0
+- adaptive_pinn:
+    M_experts_num: 0
+    fine_tune: {epochs: 0}
+    initial_train: {epochs: 100000, lr: 0.001, lr_decay_rate: 0.9, lr_decay_steps: 2000, lr_schedule: exponential,
+      lr_warmup_steps: 2000, optimizer_1: soap, optimizer_2: null, optimizer_switch_epoch: 999999}
+    split_icbc: {bc_term_normalization: false, interface_term_normalization: true, max_interface_derivative_order: 1}
+  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+  batch_size: 99999
+  epochs: 0
+  experts_architecture: [2, 30, 30, 30, 1]
+  freeze_stop_epochs: 1001
+  ks:
+    bc_max_derivative_order: 1
+    fourier_features: {dim: auto, enabled: true, periodic: root_only, scale: 2.0}
+    loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
+    temporal_domain: [0.0, 0.5]
+    time_marching: {debug_windows: null, enabled: true, freeze_previous_windows: true, last_window_checkpoint: null,
+      num_windows: 5, only_for_tree_structure: false, window_extension: 0.05}
+  lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1, tolerance_change: 0.0,
+    tolerance_grad: 0.0}
+  lr: 0.001
   model: AToELeaves
-  name: allen_cahn_fullflow_seed7
-  problem: allen_cahn
+  name: ks_root_tw5_soap_ext005_100k_seed7
+  patience_evals: 999999
+  precision: float32
+  problem: ks
+  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
   seed: 7
-- base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 24, 24, 24, 1]
+  soap:
+    betas: [0.95, 0.95]
+    precondition_frequency: 10
+    weight_decay: 0.0
+- adaptive_pinn:
+    M_experts_num: 0
+    fine_tune: {epochs: 0}
+    initial_train: {epochs: 100000, lr: 0.001, lr_decay_rate: 0.9, lr_decay_steps: 2000, lr_schedule: exponential,
+      lr_warmup_steps: 2000, optimizer_1: soap, optimizer_2: null, optimizer_switch_epoch: 999999}
+    split_icbc: {bc_term_normalization: false, interface_term_normalization: true, max_interface_derivative_order: 1}
+  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+  batch_size: 99999
+  epochs: 0
+  experts_architecture: [2, 30, 30, 30, 1]
+  freeze_stop_epochs: 1001
+  ks:
+    bc_max_derivative_order: 1
+    fourier_features: {dim: auto, enabled: true, periodic: root_only, scale: 2.0}
+    loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
+    temporal_domain: [0.0, 0.5]
+    time_marching: {debug_windows: null, enabled: true, freeze_previous_windows: true, last_window_checkpoint: null,
+      num_windows: 5, only_for_tree_structure: false, window_extension: 0.05}
+  lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1, tolerance_change: 0.0,
+    tolerance_grad: 0.0}
+  lr: 0.001
   model: AToELeaves
-  name: allen_cahn_fullflow_seed13
-  problem: allen_cahn
+  name: ks_root_tw5_soap_ext005_100k_seed13
+  patience_evals: 999999
+  precision: float32
+  problem: ks
+  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
   seed: 13
-- base_architecture: [2, 60, 60, 60, 60, 1]
-  experts_architecture: [2, 24, 24, 24, 1]
+  soap:
+    betas: [0.95, 0.95]
+    precondition_frequency: 10
+    weight_decay: 0.0
+- adaptive_pinn:
+    M_experts_num: 0
+    fine_tune: {epochs: 0}
+    initial_train: {epochs: 100000, lr: 0.001, lr_decay_rate: 0.9, lr_decay_steps: 2000, lr_schedule: exponential,
+      lr_warmup_steps: 2000, optimizer_1: soap, optimizer_2: null, optimizer_switch_epoch: 999999}
+    split_icbc: {bc_term_normalization: false, interface_term_normalization: true, max_interface_derivative_order: 1}
+  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+  batch_size: 99999
+  epochs: 0
+  experts_architecture: [2, 30, 30, 30, 1]
+  freeze_stop_epochs: 1001
+  ks:
+    bc_max_derivative_order: 1
+    fourier_features: {dim: auto, enabled: true, periodic: root_only, scale: 2.0}
+    loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
+    temporal_domain: [0.0, 0.5]
+    time_marching: {debug_windows: null, enabled: true, freeze_previous_windows: true, last_window_checkpoint: null,
+      num_windows: 5, only_for_tree_structure: false, window_extension: 0.05}
+  lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1, tolerance_change: 0.0,
+    tolerance_grad: 0.0}
+  lr: 0.001
   model: AToELeaves
-  name: allen_cahn_fullflow_seed21
-  problem: allen_cahn
+  name: ks_root_tw5_soap_ext005_100k_seed21
+  patience_evals: 999999
+  precision: float32
+  problem: ks
+  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
   seed: 21
-- base_architecture: [2, 60, 60, 60, 60, 2]
-  experts_architecture: [2, 20, 20, 20, 2]
-  model: AToELeaves
-  name: schrodinger_fullflow_seed7
-  problem: schrodinger
-  seed: 7
-- base_architecture: [2, 60, 60, 60, 60, 2]
-  experts_architecture: [2, 20, 20, 20, 2]
-  model: AToELeaves
-  name: schrodinger_fullflow_seed13
-  problem: schrodinger
-  seed: 13
-- base_architecture: [2, 60, 60, 60, 60, 2]
-  experts_architecture: [2, 20, 20, 20, 2]
-  model: AToELeaves
-  name: schrodinger_fullflow_seed21
-  problem: schrodinger
-  seed: 21
+  soap:
+    betas: [0.95, 0.95]
+    precondition_frequency: 10
+    weight_decay: 0.0
+
+# ===== ARCHIVED 2026-10-24: second_order_fullflow_3seeds (ran 2026-10-23/24 -> outputs/experiments/SEEDS_RUNS) =====
+# experiment_name: second_order_fullflow_3seeds
+# experiments:
+# - base_architecture: [2, 60, 60, 60, 60, 1]
+#   experts_architecture: [2, 24, 24, 24, 1]
+#   model: AToELeaves
+#   name: burgers1d_fullflow_seed7
+#   problem: burgers1d
+#   seed: 7
+# - base_architecture: [2, 60, 60, 60, 60, 1]
+#   experts_architecture: [2, 24, 24, 24, 1]
+#   model: AToELeaves
+#   name: burgers1d_fullflow_seed13
+#   problem: burgers1d
+#   seed: 13
+# - base_architecture: [2, 60, 60, 60, 60, 1]
+#   experts_architecture: [2, 24, 24, 24, 1]
+#   model: AToELeaves
+#   name: burgers1d_fullflow_seed21
+#   problem: burgers1d
+#   seed: 21
+# - base_architecture: [2, 60, 60, 60, 60, 1]
+#   experts_architecture: [2, 24, 24, 24, 1]
+#   model: AToELeaves
+#   name: allen_cahn_fullflow_seed7
+#   problem: allen_cahn
+#   seed: 7
+# - base_architecture: [2, 60, 60, 60, 60, 1]
+#   experts_architecture: [2, 24, 24, 24, 1]
+#   model: AToELeaves
+#   name: allen_cahn_fullflow_seed13
+#   problem: allen_cahn
+#   seed: 13
+# - base_architecture: [2, 60, 60, 60, 60, 1]
+#   experts_architecture: [2, 24, 24, 24, 1]
+#   model: AToELeaves
+#   name: allen_cahn_fullflow_seed21
+#   problem: allen_cahn
+#   seed: 21
+# - base_architecture: [2, 60, 60, 60, 60, 2]
+#   experts_architecture: [2, 20, 20, 20, 2]
+#   model: AToELeaves
+#   name: schrodinger_fullflow_seed7
+#   problem: schrodinger
+#   seed: 7
+# - base_architecture: [2, 60, 60, 60, 60, 2]
+#   experts_architecture: [2, 20, 20, 20, 2]
+#   model: AToELeaves
+#   name: schrodinger_fullflow_seed13
+#   problem: schrodinger
+#   seed: 13
+# - base_architecture: [2, 60, 60, 60, 60, 2]
+#   experts_architecture: [2, 20, 20, 20, 2]
+#   model: AToELeaves
+#   name: schrodinger_fullflow_seed21
+#   problem: schrodinger
+#   seed: 21
+
 # ---- for memory (2026-10-22): previously ACTIVE block (KS ft collar x sigma grid, 2026-09-19) ----
 # # ==========================================================================
 # # KS FT COLLAR x SIGMA GRID — FIRST KS FINE-TUNES (2026-09-19, main):
