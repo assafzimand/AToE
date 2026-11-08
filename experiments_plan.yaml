@@ -253,200 +253,455 @@ base_config:
 # Protocol changes vs the Sep-12 runs: seeds {7,13,21}, patience OFF (was 30), plots off.
 # After each run: stage the window folder (manifest + window_i_best_model_root.pt) under
 # roots_checkpoints/single_precision/..., then run the p3+ft plan on it (option a).
-experiment_name: higher_order_roots_3seeds
+# ===== ACTIVE (2026-11-08): higher-order PHASE 3 + FINE-TUNE on the 3-seed window roots, paper recipes =====
+# Roots: roots_checkpoints/single_precision/seeds_higher_order_roots/<run>-relL2_x (manifest + window ckpts,
+# from outputs/experiments/SEEDS_RUNS/higher_order_roots_3seeds_20261026_153620). Each cell pairs the root seed.
+# Phase 3 = paper cells kdv_p3_soapwr3_M25_e3x45_nonperroot_gbc / ks_p3_soapwr5_M25_e3x45_rootm: structure-only
+# window trees (3/5 slices) competing for ONE global top-M=25, experts 3x45 (+RFF), interface order 1 with
+# per-order normalization, BC mode global (KdV) / root_mounted (KS), pure SOAP 100k (lr 1e-3, warmup 2000,
+# 0.9/2000), 20k residual redrawn every epoch, min 2048 pts/expert. Top-level optimizer fields MIRROR
+# initial_train because phase 3 reads them (2026-09-13 pitfall). KS MUST carry temporal_domain [0,0.5].
+# Fine-tune = the paper grid choice (inert there): 30k, sigma 0.03, collar 0.3; KdV SOAP lr 1e-4,
+# KS LBFGS h100 lr 1e-4 tol_grad 1e-7. Protocol: patience OFF, plots off, best-rel-L2 ckpt per stage.
+# NOTE: KS fine-tune now includes the periodic BC term (ks_loss root_only guard, 2026-10-24).
+experiment_name: higher_order_p3ft_3seeds
 experiments:
 - adaptive_pinn:
-    M_experts_num: 0
-    fine_tune: {epochs: 0}
-    initial_train: {epochs: 100000, lr: 0.001, lr_decay_rate: 0.9, lr_decay_steps: 2000, lr_schedule: exponential,
+    M_experts_num: 25
+    fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0.3, epochs: 30000, lr: 0.0001, lr_schedule: none,
+      min_epochs: 1, optimizer_1: soap, optimizer_2: null, optimizer_switch_epoch: 99999, sigma_fraction: 0.03,
+      single_corrector: false}
+    initial_train: &id001 {epochs: 100000, lr: 0.001, lr_decay_rate: 0.9, lr_decay_steps: 2000, lr_schedule: exponential,
       lr_warmup_steps: 2000, optimizer_1: soap, optimizer_2: null, optimizer_switch_epoch: 999999}
-    split_icbc: {bc_term_normalization: false, interface_term_normalization: true, max_interface_derivative_order: 1}
-  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+    split_icbc: {bc_term_normalization: false, global_bc_or_root_mounted: global, interface_order_decay: 1.0,
+      interface_term_normalization: true, max_interface_derivative_order: 1}
+  base_architecture: &id002 [2, 128, 128, 128, 128, 128, 128, 1]
   batch_size: 99999
-  epochs: 0
-  experts_architecture: [2, 30, 30, 30, 1]
+  epochs: 100000
+  experts_architecture: &id003 [2, 45, 45, 45, 1]
   freeze_stop_epochs: 1001
   kdv:
     bc_max_derivative_order: 1
-    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+    fourier_features: &id004 {dim: auto, enabled: true, periodic: false, scale: 2.0}
     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
-    temporal_domain: [0.0, 1.0]
-    time_marching: {debug_windows: null, enabled: true, freeze_previous_windows: true, last_window_checkpoint: null,
-      num_windows: 3, only_for_tree_structure: false, window_extension: 0.05}
-  lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1, tolerance_change: 0.0,
-    tolerance_grad: 0.0}
+    pretrained_base_checkpoint: roots_checkpoints/single_precision/seeds_higher_order_roots/kdv_root_tw3_soap_ext005_100k_nonper_seed7-relL2_2.12e-03
+    pretrained_local_expert_checkpoint: null
+    temporal_domain: &id005 [0.0, 1.0]
+    time_marching: &id006 {debug_windows: null, enabled: true, freeze_previous_windows: true, last_window_checkpoint: null,
+      num_windows: 3, only_for_tree_structure: true}
+  lbfgs: &id007 {history_size: 100, line_search: strong_wolfe, lr: 0.1, max_iter: 1, tolerance_change: 0.0,
+    tolerance_grad: 1.0e-07}
   lr: 0.001
+  lr_decay_rate: 0.9
+  lr_decay_steps: 2000
+  lr_schedule: exponential
+  lr_warmup_steps: 2000
   model: AToELeaves
-  name: kdv_root_tw3_soap_ext005_100k_nonper_seed7
+  name: kdv_p3ft_soapwr3_M25_e3x45_gbc_seed7
+  optimizer_1: soap
+  optimizer_2: null
+  optimizer_switch_epoch: 999999
   patience_evals: 999999
   precision: float32
   problem: kdv
-  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+  sampling: {min_points_per_expert: 2048, n_residual_train: 20000, plot_samples_every: 0, resample_every_epochs: 99999}
   seed: 7
-  soap:
+  soap: &id008
     betas: [0.95, 0.95]
     precondition_frequency: 10
     weight_decay: 0.0
 - adaptive_pinn:
-    M_experts_num: 0
-    fine_tune: {epochs: 0}
-    initial_train: {epochs: 100000, lr: 0.001, lr_decay_rate: 0.9, lr_decay_steps: 2000, lr_schedule: exponential,
-      lr_warmup_steps: 2000, optimizer_1: soap, optimizer_2: null, optimizer_switch_epoch: 999999}
-    split_icbc: {bc_term_normalization: false, interface_term_normalization: true, max_interface_derivative_order: 1}
-  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+    M_experts_num: 25
+    fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0.3, epochs: 30000, lr: 0.0001, lr_schedule: none,
+      min_epochs: 1, optimizer_1: soap, optimizer_2: null, optimizer_switch_epoch: 99999, sigma_fraction: 0.03,
+      single_corrector: false}
+    initial_train: *id001
+    split_icbc: {bc_term_normalization: false, global_bc_or_root_mounted: global, interface_order_decay: 1.0,
+      interface_term_normalization: true, max_interface_derivative_order: 1}
+  base_architecture: *id002
   batch_size: 99999
-  epochs: 0
-  experts_architecture: [2, 30, 30, 30, 1]
+  epochs: 100000
+  experts_architecture: *id003
   freeze_stop_epochs: 1001
   kdv:
     bc_max_derivative_order: 1
-    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+    fourier_features: *id004
     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
-    temporal_domain: [0.0, 1.0]
-    time_marching: {debug_windows: null, enabled: true, freeze_previous_windows: true, last_window_checkpoint: null,
-      num_windows: 3, only_for_tree_structure: false, window_extension: 0.05}
-  lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1, tolerance_change: 0.0,
-    tolerance_grad: 0.0}
+    pretrained_base_checkpoint: roots_checkpoints/single_precision/seeds_higher_order_roots/kdv_root_tw3_soap_ext005_100k_nonper_seed13-relL2_2.32e-03
+    pretrained_local_expert_checkpoint: null
+    temporal_domain: *id005
+    time_marching: *id006
+  lbfgs: *id007
   lr: 0.001
+  lr_decay_rate: 0.9
+  lr_decay_steps: 2000
+  lr_schedule: exponential
+  lr_warmup_steps: 2000
   model: AToELeaves
-  name: kdv_root_tw3_soap_ext005_100k_nonper_seed13
+  name: kdv_p3ft_soapwr3_M25_e3x45_gbc_seed13
+  optimizer_1: soap
+  optimizer_2: null
+  optimizer_switch_epoch: 999999
   patience_evals: 999999
   precision: float32
   problem: kdv
-  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+  sampling: {min_points_per_expert: 2048, n_residual_train: 20000, plot_samples_every: 0, resample_every_epochs: 99999}
   seed: 13
-  soap:
-    betas: [0.95, 0.95]
-    precondition_frequency: 10
-    weight_decay: 0.0
+  soap: *id008
 - adaptive_pinn:
-    M_experts_num: 0
-    fine_tune: {epochs: 0}
-    initial_train: {epochs: 100000, lr: 0.001, lr_decay_rate: 0.9, lr_decay_steps: 2000, lr_schedule: exponential,
-      lr_warmup_steps: 2000, optimizer_1: soap, optimizer_2: null, optimizer_switch_epoch: 999999}
-    split_icbc: {bc_term_normalization: false, interface_term_normalization: true, max_interface_derivative_order: 1}
-  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+    M_experts_num: 25
+    fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0.3, epochs: 30000, lr: 0.0001, lr_schedule: none,
+      min_epochs: 1, optimizer_1: soap, optimizer_2: null, optimizer_switch_epoch: 99999, sigma_fraction: 0.03,
+      single_corrector: false}
+    initial_train: *id001
+    split_icbc: {bc_term_normalization: false, global_bc_or_root_mounted: global, interface_order_decay: 1.0,
+      interface_term_normalization: true, max_interface_derivative_order: 1}
+  base_architecture: *id002
   batch_size: 99999
-  epochs: 0
-  experts_architecture: [2, 30, 30, 30, 1]
+  epochs: 100000
+  experts_architecture: *id003
   freeze_stop_epochs: 1001
   kdv:
     bc_max_derivative_order: 1
-    fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+    fourier_features: *id004
     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
-    temporal_domain: [0.0, 1.0]
-    time_marching: {debug_windows: null, enabled: true, freeze_previous_windows: true, last_window_checkpoint: null,
-      num_windows: 3, only_for_tree_structure: false, window_extension: 0.05}
-  lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1, tolerance_change: 0.0,
-    tolerance_grad: 0.0}
+    pretrained_base_checkpoint: roots_checkpoints/single_precision/seeds_higher_order_roots/kdv_root_tw3_soap_ext005_100k_nonper_seed21-relL2_2.15e-03
+    pretrained_local_expert_checkpoint: null
+    temporal_domain: *id005
+    time_marching: *id006
+  lbfgs: *id007
   lr: 0.001
+  lr_decay_rate: 0.9
+  lr_decay_steps: 2000
+  lr_schedule: exponential
+  lr_warmup_steps: 2000
   model: AToELeaves
-  name: kdv_root_tw3_soap_ext005_100k_nonper_seed21
+  name: kdv_p3ft_soapwr3_M25_e3x45_gbc_seed21
+  optimizer_1: soap
+  optimizer_2: null
+  optimizer_switch_epoch: 999999
   patience_evals: 999999
   precision: float32
   problem: kdv
-  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+  sampling: {min_points_per_expert: 2048, n_residual_train: 20000, plot_samples_every: 0, resample_every_epochs: 99999}
   seed: 21
-  soap:
-    betas: [0.95, 0.95]
-    precondition_frequency: 10
-    weight_decay: 0.0
+  soap: *id008
 - adaptive_pinn:
-    M_experts_num: 0
-    fine_tune: {epochs: 0}
-    initial_train: {epochs: 100000, lr: 0.001, lr_decay_rate: 0.9, lr_decay_steps: 2000, lr_schedule: exponential,
+    M_experts_num: 25
+    fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0.3, epochs: 30000, lr: 0.0001, lr_schedule: none,
+      min_epochs: 1, optimizer_1: lbfgs, optimizer_2: null, optimizer_switch_epoch: 99999, sigma_fraction: 0.03,
+      single_corrector: false}
+    initial_train: &id009 {epochs: 100000, lr: 0.001, lr_decay_rate: 0.9, lr_decay_steps: 2000, lr_schedule: exponential,
       lr_warmup_steps: 2000, optimizer_1: soap, optimizer_2: null, optimizer_switch_epoch: 999999}
-    split_icbc: {bc_term_normalization: false, interface_term_normalization: true, max_interface_derivative_order: 1}
-  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+    split_icbc: {bc_term_normalization: false, global_bc_or_root_mounted: root_mounted, interface_order_decay: 1.0,
+      interface_term_normalization: true, max_interface_derivative_order: 1}
+  base_architecture: &id010 [2, 128, 128, 128, 128, 128, 128, 1]
   batch_size: 99999
-  epochs: 0
-  experts_architecture: [2, 30, 30, 30, 1]
+  epochs: 100000
+  experts_architecture: &id011 [2, 45, 45, 45, 1]
   freeze_stop_epochs: 1001
   ks:
     bc_max_derivative_order: 1
-    fourier_features: {dim: auto, enabled: true, periodic: root_only, scale: 2.0}
+    fourier_features: &id012 {dim: auto, enabled: true, periodic: root_only, scale: 2.0}
     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
-    temporal_domain: [0.0, 0.5]
-    time_marching: {debug_windows: null, enabled: true, freeze_previous_windows: true, last_window_checkpoint: null,
-      num_windows: 5, only_for_tree_structure: false, window_extension: 0.05}
-  lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1, tolerance_change: 0.0,
-    tolerance_grad: 0.0}
+    pretrained_base_checkpoint: roots_checkpoints/single_precision/seeds_higher_order_roots/ks_root_tw5_soap_ext005_100k_seed7-relL2_3.79e-04
+    pretrained_local_expert_checkpoint: null
+    temporal_domain: &id013 [0.0, 0.5]
+    time_marching: &id014 {debug_windows: null, enabled: true, freeze_previous_windows: true, last_window_checkpoint: null,
+      num_windows: 5, only_for_tree_structure: true}
+  lbfgs: &id015 {history_size: 100, line_search: strong_wolfe, lr: 0.0001, max_iter: 1, tolerance_change: 0.0,
+    tolerance_grad: 1.0e-07}
   lr: 0.001
+  lr_decay_rate: 0.9
+  lr_decay_steps: 2000
+  lr_schedule: exponential
+  lr_warmup_steps: 2000
   model: AToELeaves
-  name: ks_root_tw5_soap_ext005_100k_seed7
+  name: ks_p3ft_soapwr5_M25_e3x45_rootm_seed7
+  optimizer_1: soap
+  optimizer_2: null
+  optimizer_switch_epoch: 999999
   patience_evals: 999999
   precision: float32
   problem: ks
-  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+  sampling: {min_points_per_expert: 2048, n_residual_train: 20000, plot_samples_every: 0, resample_every_epochs: 99999}
   seed: 7
-  soap:
+  soap: &id016
     betas: [0.95, 0.95]
     precondition_frequency: 10
     weight_decay: 0.0
 - adaptive_pinn:
-    M_experts_num: 0
-    fine_tune: {epochs: 0}
-    initial_train: {epochs: 100000, lr: 0.001, lr_decay_rate: 0.9, lr_decay_steps: 2000, lr_schedule: exponential,
-      lr_warmup_steps: 2000, optimizer_1: soap, optimizer_2: null, optimizer_switch_epoch: 999999}
-    split_icbc: {bc_term_normalization: false, interface_term_normalization: true, max_interface_derivative_order: 1}
-  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+    M_experts_num: 25
+    fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0.3, epochs: 30000, lr: 0.0001, lr_schedule: none,
+      min_epochs: 1, optimizer_1: lbfgs, optimizer_2: null, optimizer_switch_epoch: 99999, sigma_fraction: 0.03,
+      single_corrector: false}
+    initial_train: *id009
+    split_icbc: {bc_term_normalization: false, global_bc_or_root_mounted: root_mounted, interface_order_decay: 1.0,
+      interface_term_normalization: true, max_interface_derivative_order: 1}
+  base_architecture: *id010
   batch_size: 99999
-  epochs: 0
-  experts_architecture: [2, 30, 30, 30, 1]
+  epochs: 100000
+  experts_architecture: *id011
   freeze_stop_epochs: 1001
   ks:
     bc_max_derivative_order: 1
-    fourier_features: {dim: auto, enabled: true, periodic: root_only, scale: 2.0}
+    fourier_features: *id012
     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
-    temporal_domain: [0.0, 0.5]
-    time_marching: {debug_windows: null, enabled: true, freeze_previous_windows: true, last_window_checkpoint: null,
-      num_windows: 5, only_for_tree_structure: false, window_extension: 0.05}
-  lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1, tolerance_change: 0.0,
-    tolerance_grad: 0.0}
+    pretrained_base_checkpoint: roots_checkpoints/single_precision/seeds_higher_order_roots/ks_root_tw5_soap_ext005_100k_seed13-relL2_3.45e-04
+    pretrained_local_expert_checkpoint: null
+    temporal_domain: *id013
+    time_marching: *id014
+  lbfgs: *id015
   lr: 0.001
+  lr_decay_rate: 0.9
+  lr_decay_steps: 2000
+  lr_schedule: exponential
+  lr_warmup_steps: 2000
   model: AToELeaves
-  name: ks_root_tw5_soap_ext005_100k_seed13
+  name: ks_p3ft_soapwr5_M25_e3x45_rootm_seed13
+  optimizer_1: soap
+  optimizer_2: null
+  optimizer_switch_epoch: 999999
   patience_evals: 999999
   precision: float32
   problem: ks
-  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+  sampling: {min_points_per_expert: 2048, n_residual_train: 20000, plot_samples_every: 0, resample_every_epochs: 99999}
   seed: 13
-  soap:
-    betas: [0.95, 0.95]
-    precondition_frequency: 10
-    weight_decay: 0.0
+  soap: *id016
 - adaptive_pinn:
-    M_experts_num: 0
-    fine_tune: {epochs: 0}
-    initial_train: {epochs: 100000, lr: 0.001, lr_decay_rate: 0.9, lr_decay_steps: 2000, lr_schedule: exponential,
-      lr_warmup_steps: 2000, optimizer_1: soap, optimizer_2: null, optimizer_switch_epoch: 999999}
-    split_icbc: {bc_term_normalization: false, interface_term_normalization: true, max_interface_derivative_order: 1}
-  base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+    M_experts_num: 25
+    fine_tune: {adaptive_collar_size: false, collar_data_ratio: 0.3, epochs: 30000, lr: 0.0001, lr_schedule: none,
+      min_epochs: 1, optimizer_1: lbfgs, optimizer_2: null, optimizer_switch_epoch: 99999, sigma_fraction: 0.03,
+      single_corrector: false}
+    initial_train: *id009
+    split_icbc: {bc_term_normalization: false, global_bc_or_root_mounted: root_mounted, interface_order_decay: 1.0,
+      interface_term_normalization: true, max_interface_derivative_order: 1}
+  base_architecture: *id010
   batch_size: 99999
-  epochs: 0
-  experts_architecture: [2, 30, 30, 30, 1]
+  epochs: 100000
+  experts_architecture: *id011
   freeze_stop_epochs: 1001
   ks:
     bc_max_derivative_order: 1
-    fourier_features: {dim: auto, enabled: true, periodic: root_only, scale: 2.0}
+    fourier_features: *id012
     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
-    temporal_domain: [0.0, 0.5]
-    time_marching: {debug_windows: null, enabled: true, freeze_previous_windows: true, last_window_checkpoint: null,
-      num_windows: 5, only_for_tree_structure: false, window_extension: 0.05}
-  lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1, tolerance_change: 0.0,
-    tolerance_grad: 0.0}
+    pretrained_base_checkpoint: roots_checkpoints/single_precision/seeds_higher_order_roots/ks_root_tw5_soap_ext005_100k_seed21-relL2_3.87e-04
+    pretrained_local_expert_checkpoint: null
+    temporal_domain: *id013
+    time_marching: *id014
+  lbfgs: *id015
   lr: 0.001
+  lr_decay_rate: 0.9
+  lr_decay_steps: 2000
+  lr_schedule: exponential
+  lr_warmup_steps: 2000
   model: AToELeaves
-  name: ks_root_tw5_soap_ext005_100k_seed21
+  name: ks_p3ft_soapwr5_M25_e3x45_rootm_seed21
+  optimizer_1: soap
+  optimizer_2: null
+  optimizer_switch_epoch: 999999
   patience_evals: 999999
   precision: float32
   problem: ks
-  sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+  sampling: {min_points_per_expert: 2048, n_residual_train: 20000, plot_samples_every: 0, resample_every_epochs: 99999}
   seed: 21
-  soap:
-    betas: [0.95, 0.95]
-    precondition_frequency: 10
-    weight_decay: 0.0
+  soap: *id016
+
+# ===== ARCHIVED 2026-11-08: higher_order_roots_3seeds (ran 2026-10-26..30 -> outputs/experiments/SEEDS_RUNS) =====
+# experiment_name: higher_order_roots_3seeds
+# experiments:
+# - adaptive_pinn:
+#     M_experts_num: 0
+#     fine_tune: {epochs: 0}
+#     initial_train: {epochs: 100000, lr: 0.001, lr_decay_rate: 0.9, lr_decay_steps: 2000, lr_schedule: exponential,
+#       lr_warmup_steps: 2000, optimizer_1: soap, optimizer_2: null, optimizer_switch_epoch: 999999}
+#     split_icbc: {bc_term_normalization: false, interface_term_normalization: true, max_interface_derivative_order: 1}
+#   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+#   batch_size: 99999
+#   epochs: 0
+#   experts_architecture: [2, 30, 30, 30, 1]
+#   freeze_stop_epochs: 1001
+#   kdv:
+#     bc_max_derivative_order: 1
+#     fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+#     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
+#     temporal_domain: [0.0, 1.0]
+#     time_marching: {debug_windows: null, enabled: true, freeze_previous_windows: true, last_window_checkpoint: null,
+#       num_windows: 3, only_for_tree_structure: false, window_extension: 0.05}
+#   lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1, tolerance_change: 0.0,
+#     tolerance_grad: 0.0}
+#   lr: 0.001
+#   model: AToELeaves
+#   name: kdv_root_tw3_soap_ext005_100k_nonper_seed7
+#   patience_evals: 999999
+#   precision: float32
+#   problem: kdv
+#   sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+#   seed: 7
+#   soap:
+#     betas: [0.95, 0.95]
+#     precondition_frequency: 10
+#     weight_decay: 0.0
+# - adaptive_pinn:
+#     M_experts_num: 0
+#     fine_tune: {epochs: 0}
+#     initial_train: {epochs: 100000, lr: 0.001, lr_decay_rate: 0.9, lr_decay_steps: 2000, lr_schedule: exponential,
+#       lr_warmup_steps: 2000, optimizer_1: soap, optimizer_2: null, optimizer_switch_epoch: 999999}
+#     split_icbc: {bc_term_normalization: false, interface_term_normalization: true, max_interface_derivative_order: 1}
+#   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+#   batch_size: 99999
+#   epochs: 0
+#   experts_architecture: [2, 30, 30, 30, 1]
+#   freeze_stop_epochs: 1001
+#   kdv:
+#     bc_max_derivative_order: 1
+#     fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+#     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
+#     temporal_domain: [0.0, 1.0]
+#     time_marching: {debug_windows: null, enabled: true, freeze_previous_windows: true, last_window_checkpoint: null,
+#       num_windows: 3, only_for_tree_structure: false, window_extension: 0.05}
+#   lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1, tolerance_change: 0.0,
+#     tolerance_grad: 0.0}
+#   lr: 0.001
+#   model: AToELeaves
+#   name: kdv_root_tw3_soap_ext005_100k_nonper_seed13
+#   patience_evals: 999999
+#   precision: float32
+#   problem: kdv
+#   sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+#   seed: 13
+#   soap:
+#     betas: [0.95, 0.95]
+#     precondition_frequency: 10
+#     weight_decay: 0.0
+# - adaptive_pinn:
+#     M_experts_num: 0
+#     fine_tune: {epochs: 0}
+#     initial_train: {epochs: 100000, lr: 0.001, lr_decay_rate: 0.9, lr_decay_steps: 2000, lr_schedule: exponential,
+#       lr_warmup_steps: 2000, optimizer_1: soap, optimizer_2: null, optimizer_switch_epoch: 999999}
+#     split_icbc: {bc_term_normalization: false, interface_term_normalization: true, max_interface_derivative_order: 1}
+#   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+#   batch_size: 99999
+#   epochs: 0
+#   experts_architecture: [2, 30, 30, 30, 1]
+#   freeze_stop_epochs: 1001
+#   kdv:
+#     bc_max_derivative_order: 1
+#     fourier_features: {dim: auto, enabled: true, periodic: false, scale: 2.0}
+#     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
+#     temporal_domain: [0.0, 1.0]
+#     time_marching: {debug_windows: null, enabled: true, freeze_previous_windows: true, last_window_checkpoint: null,
+#       num_windows: 3, only_for_tree_structure: false, window_extension: 0.05}
+#   lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1, tolerance_change: 0.0,
+#     tolerance_grad: 0.0}
+#   lr: 0.001
+#   model: AToELeaves
+#   name: kdv_root_tw3_soap_ext005_100k_nonper_seed21
+#   patience_evals: 999999
+#   precision: float32
+#   problem: kdv
+#   sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+#   seed: 21
+#   soap:
+#     betas: [0.95, 0.95]
+#     precondition_frequency: 10
+#     weight_decay: 0.0
+# - adaptive_pinn:
+#     M_experts_num: 0
+#     fine_tune: {epochs: 0}
+#     initial_train: {epochs: 100000, lr: 0.001, lr_decay_rate: 0.9, lr_decay_steps: 2000, lr_schedule: exponential,
+#       lr_warmup_steps: 2000, optimizer_1: soap, optimizer_2: null, optimizer_switch_epoch: 999999}
+#     split_icbc: {bc_term_normalization: false, interface_term_normalization: true, max_interface_derivative_order: 1}
+#   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+#   batch_size: 99999
+#   epochs: 0
+#   experts_architecture: [2, 30, 30, 30, 1]
+#   freeze_stop_epochs: 1001
+#   ks:
+#     bc_max_derivative_order: 1
+#     fourier_features: {dim: auto, enabled: true, periodic: root_only, scale: 2.0}
+#     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
+#     temporal_domain: [0.0, 0.5]
+#     time_marching: {debug_windows: null, enabled: true, freeze_previous_windows: true, last_window_checkpoint: null,
+#       num_windows: 5, only_for_tree_structure: false, window_extension: 0.05}
+#   lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1, tolerance_change: 0.0,
+#     tolerance_grad: 0.0}
+#   lr: 0.001
+#   model: AToELeaves
+#   name: ks_root_tw5_soap_ext005_100k_seed7
+#   patience_evals: 999999
+#   precision: float32
+#   problem: ks
+#   sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+#   seed: 7
+#   soap:
+#     betas: [0.95, 0.95]
+#     precondition_frequency: 10
+#     weight_decay: 0.0
+# - adaptive_pinn:
+#     M_experts_num: 0
+#     fine_tune: {epochs: 0}
+#     initial_train: {epochs: 100000, lr: 0.001, lr_decay_rate: 0.9, lr_decay_steps: 2000, lr_schedule: exponential,
+#       lr_warmup_steps: 2000, optimizer_1: soap, optimizer_2: null, optimizer_switch_epoch: 999999}
+#     split_icbc: {bc_term_normalization: false, interface_term_normalization: true, max_interface_derivative_order: 1}
+#   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+#   batch_size: 99999
+#   epochs: 0
+#   experts_architecture: [2, 30, 30, 30, 1]
+#   freeze_stop_epochs: 1001
+#   ks:
+#     bc_max_derivative_order: 1
+#     fourier_features: {dim: auto, enabled: true, periodic: root_only, scale: 2.0}
+#     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
+#     temporal_domain: [0.0, 0.5]
+#     time_marching: {debug_windows: null, enabled: true, freeze_previous_windows: true, last_window_checkpoint: null,
+#       num_windows: 5, only_for_tree_structure: false, window_extension: 0.05}
+#   lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1, tolerance_change: 0.0,
+#     tolerance_grad: 0.0}
+#   lr: 0.001
+#   model: AToELeaves
+#   name: ks_root_tw5_soap_ext005_100k_seed13
+#   patience_evals: 999999
+#   precision: float32
+#   problem: ks
+#   sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+#   seed: 13
+#   soap:
+#     betas: [0.95, 0.95]
+#     precondition_frequency: 10
+#     weight_decay: 0.0
+# - adaptive_pinn:
+#     M_experts_num: 0
+#     fine_tune: {epochs: 0}
+#     initial_train: {epochs: 100000, lr: 0.001, lr_decay_rate: 0.9, lr_decay_steps: 2000, lr_schedule: exponential,
+#       lr_warmup_steps: 2000, optimizer_1: soap, optimizer_2: null, optimizer_switch_epoch: 999999}
+#     split_icbc: {bc_term_normalization: false, interface_term_normalization: true, max_interface_derivative_order: 1}
+#   base_architecture: [2, 128, 128, 128, 128, 128, 128, 1]
+#   batch_size: 99999
+#   epochs: 0
+#   experts_architecture: [2, 30, 30, 30, 1]
+#   freeze_stop_epochs: 1001
+#   ks:
+#     bc_max_derivative_order: 1
+#     fourier_features: {dim: auto, enabled: true, periodic: root_only, scale: 2.0}
+#     loss_weights: {bc: 1000.0, ic: 1000.0, interface_bc: 1000.0, interface_ic: 1000.0}
+#     temporal_domain: [0.0, 0.5]
+#     time_marching: {debug_windows: null, enabled: true, freeze_previous_windows: true, last_window_checkpoint: null,
+#       num_windows: 5, only_for_tree_structure: false, window_extension: 0.05}
+#   lbfgs: {history_size: 1000, line_search: strong_wolfe, lr: 0.1, max_iter: 1, tolerance_change: 0.0,
+#     tolerance_grad: 0.0}
+#   lr: 0.001
+#   model: AToELeaves
+#   name: ks_root_tw5_soap_ext005_100k_seed21
+#   patience_evals: 999999
+#   precision: float32
+#   problem: ks
+#   sampling: {min_points_per_expert: 512, n_residual_train: 20000, resample_every_epochs: 99999}
+#   seed: 21
+#   soap:
+#     betas: [0.95, 0.95]
+#     precondition_frequency: 10
+#     weight_decay: 0.0
 
 # ===== ARCHIVED 2026-10-24: second_order_fullflow_3seeds (ran 2026-10-23/24 -> outputs/experiments/SEEDS_RUNS) =====
 # experiment_name: second_order_fullflow_3seeds
